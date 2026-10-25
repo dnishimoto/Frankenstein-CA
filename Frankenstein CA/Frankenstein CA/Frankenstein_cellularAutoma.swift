@@ -1,12 +1,8 @@
 
+
 import Foundation
 
-struct FrankensteinMotion {
-    var walkPhase: Float = 0
-    var armLift: Float = 0
-    var headTurn: Float = 0
-    var mouthOpen: Float = 0
-}
+
 
 final class FrankensteinCA {
     let rows = 18
@@ -18,6 +14,20 @@ final class FrankensteinCA {
 
     private(set) var motion = FrankensteinMotion()
 
+    // Reinforcement learning parameters.
+    private var memories: [String: FrankensteinLearningMemory] = [:]
+    private var lastStateKey: String?
+    private var lastAction: FrankensteinLearningAction?
+    private var explorationRate: Float = 0.25
+    private let learningRate: Float = 0.25
+    private let discountFactor: Float = 0.80
+
+    private var objectVisits: [String: Int] = [:]
+
+    private(set) var currentAction: FrankensteinLearningAction = .explore
+    private(set) var lastReward: Float = 0
+    private(set) var learnedExperienceCount = 0
+
     init() {
         cells = Array(
             repeating: Array(repeating: false, count: 18),
@@ -25,6 +35,8 @@ final class FrankensteinCA {
         )
         seedPattern()
     }
+
+    // MARK: Cellular automaton
 
     private func seedPattern() {
         let pattern: [(Int, Int)] = [
@@ -43,6 +55,7 @@ final class FrankensteinCA {
         for y in 0..<rows {
             for x in 0..<columns {
                 let value = (x * 17 + y * 31 + x * y * 3) % 23
+
                 if value == 0 || value == 7 {
                     cells[y][x] = true
                 }
@@ -87,8 +100,8 @@ final class FrankensteinCA {
                         let ny = y + dy
 
                         if nx >= 0 && nx < columns &&
-                           ny >= 0 && ny < rows &&
-                           cells[ny][nx] {
+                            ny >= 0 && ny < rows &&
+                            cells[ny][nx] {
                             neighbors += 1
                         }
                     }
@@ -112,15 +125,211 @@ final class FrankensteinCA {
         }
     }
 
+    // MARK: Action selection
+
+    func chooseAction(
+        for observation: FrankensteinObservation
+    ) -> FrankensteinLearningAction {
+        let state = observation.stateKey
+        var memory = memories[state] ?? FrankensteinLearningMemory()
+
+        // Track how often Frankenstein encounters each object.
+        if observation.objectNearby && !observation.objectID.isEmpty {
+            objectVisits[observation.objectID, default: 0] += 1
+        }
+
+        let legalActions = availableActions(for: observation)
+
+        guard !legalActions.isEmpty else {
+            currentAction = .stop
+            return .stop
+        }
+
+        // Explore occasionally; otherwise choose the best learned action.
+        if Float.random(in: 0...1) < explorationRate {
+            currentAction = legalActions.randomElement() ?? .stop
+        } else {
+            currentAction = legalActions.max {
+                memory.value(for: $0) < memory.value(for: $1)
+            } ?? .stop
+        }
+
+        lastStateKey = state
+        lastAction = currentAction
+
+        memory.attempts[currentAction, default: 0] += 1
+        memories[state] = memory
+
+        return currentAction
+    }
+
+    private func availableActions(
+        for observation: FrankensteinObservation
+    ) -> [FrankensteinLearningAction] {
+        // Never intentionally move forward without supporting ground.
+        guard observation.groundSupported else {
+            if observation.dropAhead {
+                return [.stop, .jumpDown, .explore]
+            }
+            return [.stop]
+        }
+
+        // An opening or door can be interacted with only when detected.
+        if observation.objectNearby && observation.objectCanOpen {
+            return [.stop, .open, .explore]
+        }
+
+        // Low ceilings favor crouched movement or rolling.
+        if observation.lowCeiling {
+            return [.roll, .walk, .stop]
+        }
+
+        // A gap requires a specific jump decision or stopping.
+        if observation.gapAhead {
+            return [.stop, .jump]
+        }
+
+        if observation.dropAhead {
+            return [.stop, .jumpDown, .explore]
+        }
+
+        if observation.stepAhead {
+            return [.stop, .stepUp, .jump]
+        }
+
+        if observation.obstacleAhead || !observation.pathClear {
+            return [.stop, .jump, .roll, .explore]
+        }
+
+        if observation.objectNearby {
+            return [.explore, .walk, .stop]
+        }
+
+        return [.walk, .run, .explore, .stop]
+    }
+
+    // MARK: Learning from outcomes
+
+    /// Call after an action has actually completed.
+    /// Positive reward means success; negative reward means failure.
+    func recordOutcome(
+        reward: Float,
+        nextObservation: FrankensteinObservation,
+        succeeded: Bool
+    ) {
+        guard let state = lastStateKey,
+              let action = lastAction else {
+            return
+        }
+
+        var memory = memories[state] ?? FrankensteinLearningMemory()
+        let oldValue = memory.value(for: action)
+
+        let nextActions = availableActions(for: nextObservation)
+        let nextMemory = memories[nextObservation.stateKey]
+
+        let bestFutureValue: Float
+
+        if nextActions.isEmpty {
+            bestFutureValue = 0
+        } else {
+            bestFutureValue = nextActions
+                .map { nextMemory?.value(for: $0) ?? 0 }
+                .max() ?? 0
+        }
+
+        let target = reward + discountFactor * bestFutureValue
+        let updatedValue = oldValue + learningRate * (target - oldValue)
+
+        memory.actionValues[action] = updatedValue
+
+        if succeeded {
+            memory.successes[action, default: 0] += 1
+        }
+
+        memories[state] = memory
+
+        lastReward = reward
+        learnedExperienceCount += 1
+
+        // Reduce random exploration gradually, but never eliminate it.
+        explorationRate = max(0.05, explorationRate * 0.999)
+
+        lastStateKey = nil
+        lastAction = nil
+    }
+
+    /// Convenience method for a successful action.
+    func recordSuccess(
+        nextObservation: FrankensteinObservation
+    ) {
+        recordOutcome(
+            reward: 1.0,
+            nextObservation: nextObservation,
+            succeeded: true
+        )
+    }
+
+    /// Convenience method for a failed or unsafe action.
+    func recordFailure(
+        nextObservation: FrankensteinObservation
+    ) {
+        recordOutcome(
+            reward: -1.0,
+            nextObservation: nextObservation,
+            succeeded: false
+        )
+    }
+
+    // MARK: Learning statistics
+
+    func learnedValue(
+        for action: FrankensteinLearningAction,
+        in observation: FrankensteinObservation
+    ) -> Float {
+        memories[observation.stateKey]?.value(for: action) ?? 0
+    }
+
+    func attemptCount(
+        for action: FrankensteinLearningAction,
+        in observation: FrankensteinObservation
+    ) -> Int {
+        memories[observation.stateKey]?.attempts[action, default: 0] ?? 0
+    }
+
+    func successCount(
+        for action: FrankensteinLearningAction,
+        in observation: FrankensteinObservation
+    ) -> Int {
+        memories[observation.stateKey]?.successes[action, default: 0] ?? 0
+    }
+
+    func visits(to objectID: String) -> Int {
+        objectVisits[objectID, default: 0]
+    }
+
+    // MARK: Reset
+
     func reset() {
         generation = 0
         time = 0
         motion = FrankensteinMotion()
+
         cells = Array(
             repeating: Array(repeating: false, count: columns),
             count: rows
         )
         seedPattern()
+
+        memories.removeAll()
+        objectVisits.removeAll()
+
+        lastStateKey = nil
+        lastAction = nil
+        currentAction = .explore
+        lastReward = 0
+        learnedExperienceCount = 0
+        explorationRate = 0.25
     }
 
     var liveCellCount: Int {
@@ -133,4 +342,3 @@ final class FrankensteinCA {
         generation
     }
 }
-

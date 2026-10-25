@@ -13,50 +13,32 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     private let locomotion: FrankensteinLocomotion
 
+    // Set to true when sensor rays are needed for debugging.
+    private let debugSensors: Bool
+
     private var lastUpdateTime: TimeInterval = 0
-    private var lastTerrainSample = FrankensteinTerrainSample(
-        terrain: .flat,
-        distance: 0,
-        obstacleHeight: 0,
-        gapWidth: 0,
-        groundHeight: 0,
-        nextGroundHeight: 0,
-        isGroundAhead: true,
-        isLandingAreaClear: true
-    )
     private var lastAction = "INITIALIZING"
     private var lastObstacleDistance: Float = 0
 
-    private var sensorNodes: [SCNNode] = []
-    private var debugUpdateCounter = 0
-
-    private var isJumping = false
-    private var jumpElapsed: Float = 0
-    private let jumpDuration: Float = 0.65
-    private let jumpHeight: Float = 1.0
-    private var jumpStartY: Float = 0
-
-    private var isStepping = false
-    private var stepStartY: Float = 0
-    private var stepTargetY: Float = 0
-    private var stepElapsed: Float = 0
-
-    private var obstacleCooldown: Float = 0
-    private var avoidanceDirection: Float = 1
-
     private let sensorDistance: Float = 1.5
     private let maximumSafeStep: Float = 0.45
+
+    // Reset requests are consumed by the renderer.
+    private let resetLock = NSLock()
+    private var resetRequested = false
 
     init(
         character: FrankensteinCharacter,
         ca: FrankensteinCA,
         onStats: ((Int, Int) -> Void)? = nil,
-        onDebugInfo: ((String) -> Void)? = nil
+        onDebugInfo: ((String) -> Void)? = nil,
+        debugSensors: Bool = false
     ) {
         self.character = character
         self.ca = ca
         self.onStats = onStats
         self.onDebugInfo = onDebugInfo
+        self.debugSensors = debugSensors
         self.locomotion = FrankensteinLocomotion()
 
         super.init()
@@ -68,6 +50,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         _ renderer: SCNSceneRenderer,
         updateAtTime time: TimeInterval
     ) {
+        processPendingReset()
+
         guard let scene = renderer.scene else { return }
 
         let deltaTime: Float
@@ -81,31 +65,28 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         }
 
         lastUpdateTime = time
-        obstacleCooldown = max(0, obstacleCooldown - deltaTime)
 
-        // 1. Advance CA animation.
-        let caMotion: FrankensteinMotion =
-            ca.step(deltaTime: deltaTime)
+        // 1. Advance the cellular automaton.
+        let caMotion = ca.step(deltaTime: deltaTime)
 
-        // 2. Sense the terrain and objects.
+        // 2. Read the current character transform.
         let position = character.root.presentation.position
         let heading = character.root.presentation.eulerAngles.y
 
+        // 3. Sense the terrain ahead.
         let terrainSample = sampleTerrain(
             in: scene,
             at: position,
             heading: heading
         )
 
-        lastTerrainSample = terrainSample
-
-        // 3. Ask the locomotion controller to choose movement.
+        // 4. Calculate the locomotion response.
         let locomotionOutput = locomotion.step(
             deltaTime: deltaTime,
             terrain: terrainSample
         )
 
-        // 4. Combine animation and navigation outputs.
+        // 5. Combine CA animation and locomotion.
         var output = FrankensteinLocomotionOutput()
 
         output.walkPhase = caMotion.walkPhase
@@ -123,28 +104,87 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         output.reward = locomotionOutput.reward
         output.status = locomotionOutput.status
 
-        // 5. Apply the output to the articulated character.
         character.applyLocomotion(output)
 
-        // 6. Display debug data at a reduced update rate.
-        debugUpdateCounter += 1
+        // 6. Move only when the path and supporting ground are safe.
+        // Save the original position so an unsafe step can be rejected.
+        let root = character.root
+        let oldPosition = root.position
 
-        if debugUpdateCounter % 3 == 0 {
-            onStats?(ca.generationCount, ca.liveCellCount)
-            publishDebugInfo(
-                position: position,
-                terrain: terrainSample,
-                output: locomotionOutput
+        let speed = max(0, locomotionOutput.speed)
+        let movementHeading = locomotionOutput.heading
+
+        if speed > 0.01 && deltaTime > 0 {
+            let stepDistance = min(speed * deltaTime, 0.04)
+
+            let proposedPosition = SCNVector3(
+                oldPosition.x + sin(movementHeading) * stepDistance,
+                oldPosition.y,
+                oldPosition.z - cos(movementHeading) * stepDistance
             )
+
+            // Sample just ahead of the proposed position.
+            let proposedTerrain = sampleTerrain(
+                in: scene,
+                at: proposedPosition,
+                heading: movementHeading
+            )
+
+            let hasSupportingGround =
+                proposedTerrain.isGroundAhead
+
+            let noDetectedObstacle =
+                proposedTerrain.obstacleHeight < 0.15
+
+            let terrainAllowsMovement =
+                proposedTerrain.terrain == .flat ||
+                proposedTerrain.terrain == .slope ||
+                proposedTerrain.terrain == .uneven
+
+            if hasSupportingGround &&
+                noDetectedObstacle &&
+                terrainAllowsMovement {
+
+                root.position = proposedPosition
+            } else {
+                // Stay in place if the proposed step is unsafe.
+                root.position = oldPosition
+            }
         }
 
-        // 7. Update optional sensor visualization.
-        visualizeSensorRays(
-            in: scene,
-            position: position,
-            heading: heading,
-            terrain: terrainSample
-        )
+        // 7. Publish UI information at a reduced update rate.
+        if onStats != nil || onDebugInfo != nil {
+            if Int(time * 20) !=
+                Int((time - Double(deltaTime)) * 20) {
+
+                let generation = ca.generationCount
+                let liveCells = ca.liveCellCount
+
+                if let onStats = onStats {
+                    DispatchQueue.main.async {
+                        onStats(generation, liveCells)
+                    }
+                }
+
+                if onDebugInfo != nil {
+                    publishDebugInfo(
+                        position: root.position,
+                        terrain: terrainSample,
+                        output: locomotionOutput
+                    )
+                }
+            }
+        }
+
+        // 8. Draw optional sensor visualization.
+        if debugSensors {
+            visualizeSensorRays(
+                in: scene,
+                position: root.presentation.position,
+                heading: root.presentation.eulerAngles.y,
+                terrain: terrainSample
+            )
+        }
     }
 
     // MARK: - Terrain sensing
@@ -158,34 +198,18 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         let forwardX = sin(heading)
         let forwardZ = -cos(heading)
 
-        let start = SCNVector3(
-            position.x,
-            position.y + 0.15,
-            position.z
-        )
-
-        let ahead = SCNVector3(
-            position.x + forwardX * sensorDistance,
-            position.y + 0.15,
-            position.z + forwardZ * sensorDistance
-        )
-
-        // Check whether the ground exists below the character.
-        let groundStart = SCNVector3(
-            position.x,
-            position.y + 1.0,
-            position.z
-        )
-
-        let groundEnd = SCNVector3(
-            position.x,
-            position.y - 2.0,
-            position.z
-        )
-
+        // Check ground directly beneath the character.
         let groundHits = scene.rootNode.hitTestWithSegment(
-            from: groundStart,
-            to: groundEnd,
+            from: SCNVector3(
+                position.x,
+                position.y + 1.0,
+                position.z
+            ),
+            to: SCNVector3(
+                position.x,
+                position.y - 2.0,
+                position.z
+            ),
             options: nil
         )
 
@@ -194,22 +218,21 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             isGroundNode(hit.node)
         }
 
-        // Check the ground ahead to identify a potential gap.
-        let aheadGroundStart = SCNVector3(
-            ahead.x,
-            position.y + 1.0,
-            ahead.z
-        )
-
-        let aheadGroundEnd = SCNVector3(
-            ahead.x,
-            position.y - 2.0,
-            ahead.z
-        )
+        // Check ground ahead. A missing surface may indicate a gap.
+        let aheadX = position.x + forwardX * sensorDistance
+        let aheadZ = position.z + forwardZ * sensorDistance
 
         let aheadHits = scene.rootNode.hitTestWithSegment(
-            from: aheadGroundStart,
-            to: aheadGroundEnd,
+            from: SCNVector3(
+                aheadX,
+                position.y + 1.0,
+                aheadZ
+            ),
+            to: SCNVector3(
+                aheadX,
+                position.y - 2.0,
+                aheadZ
+            ),
             options: nil
         )
 
@@ -218,7 +241,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             isGroundNode(hit.node)
         }
 
-        // Check for solid objects ahead at body height.
+        // Cast horizontal rays at several body heights.
         let bodyHeights: [Float] = [0.35, 0.8, 1.25]
 
         var detectedName: String?
@@ -232,9 +255,9 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             )
 
             let rayEnd = SCNVector3(
-                position.x + forwardX * sensorDistance,
+                aheadX,
                 position.y + height,
-                position.z + forwardZ * sensorDistance
+                aheadZ
             )
 
             let hits = scene.rootNode.hitTestWithSegment(
@@ -243,10 +266,11 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 options: nil
             )
 
-            if let hit = hits.first(where: {
-                !isCharacterNode($0.node) &&
-                !isGroundNode($0.node) &&
-                !isDecorativeNode($0.node)
+            if let hit = hits.first(where: { hit in
+                !isCharacterNode(hit.node) &&
+                !isGroundNode(hit.node) &&
+                !isDecorativeNode(hit.node) &&
+                !isBoundaryNode(hit.node)
             }) {
                 detectedName = nodeName(for: hit.node)
                 detectedDistance = distance(
@@ -257,11 +281,13 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             }
         }
 
-        lastObstacleDistance = detectedName == nil ? 0 : detectedDistance
+        lastObstacleDistance = detectedName == nil
+            ? 0
+            : detectedDistance
 
         let name = (detectedName ?? "").lowercased()
 
-        // Gaps take priority over other classifications.
+        // Classify a missing ground surface first.
         if !hasGroundAhead {
             lastAction = "GAP DETECTED"
 
@@ -323,7 +349,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         }
 
         if let detectedName = detectedName {
-            lastAction = "AVOID: \(detectedName)"
+            lastAction = "OBSTACLE: \(detectedName)"
 
             return FrankensteinTerrainSample(
                 terrain: .uneven,
@@ -390,8 +416,9 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             let name = (candidate.name ?? "").lowercased()
 
             if name.contains("ground") ||
-                name.contains("terrain") ||
-                name.contains("floor") {
+               name.contains("terrain") ||
+               name.contains("floor") ||
+               name.contains("platform") {
                 return true
             }
 
@@ -406,7 +433,25 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         return name.contains("marker") ||
                name.contains("camera") ||
-               name.contains("light")
+               name.contains("light") ||
+               name.contains("sensordebug")
+    }
+
+    private func isBoundaryNode(_ node: SCNNode) -> Bool {
+        var current: SCNNode? = node
+
+        while let candidate = current {
+            let name = (candidate.name ?? "").lowercased()
+
+            if name.contains("boundary") ||
+               name.contains("sidewall") {
+                return true
+            }
+
+            current = candidate.parent
+        }
+
+        return false
     }
 
     private func distance(
@@ -420,7 +465,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         return sqrt(dx * dx + dy * dy + dz * dz)
     }
 
-    // MARK: - Sensor visualization
+    // MARK: - Optional sensor visualization
 
     private func visualizeSensorRays(
         in scene: SCNScene,
@@ -428,8 +473,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         heading: Float,
         terrain: FrankensteinTerrainSample
     ) {
-        // Keep debug geometry optional to avoid unnecessary scene updates.
-   
         let root: SCNNode
 
         if let existingRoot = scene.rootNode.childNode(
@@ -441,10 +484,10 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             root = makeSensorDebugRoot(in: scene)
         }
 
-        root.childNodes.forEach { $0.removeFromParentNode() }
-
-
-        root.childNodes.forEach { $0.removeFromParentNode() }
+        // Only rebuild the ray when debug visualization is enabled.
+        root.childNodes.forEach {
+            $0.removeFromParentNode()
+        }
 
         let forwardX = sin(heading)
         let forwardZ = -cos(heading)
@@ -461,17 +504,24 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             position.z + forwardZ * sensorDistance
         )
 
-        let color: UIColor = terrain.terrain == .gap
-            ? .red
-            : (terrain.terrain == .flat ? .green : .orange)
+        let color: UIColor
 
-        let line = SCNGeometry.line(
-            from: start,
-            to: end,
-            color: color
+        if terrain.terrain == .gap {
+            color = .red
+        } else if terrain.terrain == .flat {
+            color = .green
+        } else {
+            color = .orange
+        }
+
+        let rayNode = SCNNode(
+            geometry: SCNGeometry.line(
+                from: start,
+                to: end,
+                color: color
+            )
         )
 
-        let rayNode = SCNNode(geometry: line)
         root.addChildNode(rayNode)
     }
 
@@ -491,6 +541,9 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         terrain: FrankensteinTerrainSample,
         output: FrankensteinLocomotionOutput
     ) {
+        // Avoid building strings if no UI is receiving them.
+        guard let callback = onDebugInfo else { return }
+
         let info = """
         Action: \(lastAction)
         Terrain: \(String(describing: terrain.terrain))
@@ -505,57 +558,51 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         Live cells: \(ca.liveCellCount)
         """
 
-        onDebugInfo?(info)
+        DispatchQueue.main.async {
+            callback(info)
+        }
     }
 
     // MARK: - Reset
 
     func resetCA() {
+        resetLock.lock()
+        resetRequested = true
+        resetLock.unlock()
+    }
+
+    private func processPendingReset() {
+        resetLock.lock()
+        let shouldReset = resetRequested
+        resetRequested = false
+        resetLock.unlock()
+
+        guard shouldReset else { return }
+
         ca.reset()
         locomotion.resetEpisode()
 
         lastUpdateTime = 0
- 
-        lastTerrainSample = FrankensteinTerrainSample(
-            terrain: .flat,
-            distance: 0,
-            obstacleHeight: 0,
-            gapWidth: 0,
-            groundHeight: 0,
-            nextGroundHeight: 0,
-            isGroundAhead: true,
-            isLandingAreaClear: true
-        )
         lastAction = "RESET"
         lastObstacleDistance = 0
-
-        isJumping = false
-        jumpElapsed = 0
-        stepElapsed = 0
-        isStepping = false
-
-        obstacleCooldown = 0
-        avoidanceDirection = 1
-        debugUpdateCounter = 0
     }
 }
 
 // MARK: - Debug line geometry
 
 private extension SCNGeometry {
+
     static func line(
         from start: SCNVector3,
         to end: SCNVector3,
         color: UIColor
     ) -> SCNGeometry {
-        let vertices = [start, end]
-
-        let source = SCNGeometrySource(vertices: vertices)
-
-        let indices: [Int32] = [0, 1]
+        let source = SCNGeometrySource(
+            vertices: [start, end]
+        )
 
         let element = SCNGeometryElement(
-            indices: indices,
+            indices: [Int32(0), Int32(1)],
             primitiveType: .line
         )
 
