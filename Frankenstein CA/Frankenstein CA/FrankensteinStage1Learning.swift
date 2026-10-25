@@ -77,7 +77,8 @@ final class FrankensteinStage1Learning {
         confirmedFall: Bool,
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
-        time: TimeInterval
+        time: TimeInterval,
+        bonus: Double = 0
     ) -> FrankensteinStage1Outcome? {
 
         guard let skill = activeSkill else {
@@ -122,10 +123,19 @@ final class FrankensteinStage1Learning {
             reward -= 5.0
         }
 
+        // A collision costs something even when he was not fully stopped.
+        if collisionObserved && !blocked {
+            reward -= 0.3
+        }
+
         // Small bonus for a safe, unblocked attempt.
         if !fell && !blocked {
             reward += 0.25
         }
+
+        // Task result measured by the caller: a jump that really cleared
+        // the gap, a roll that really passed under the barrier, and so on.
+        reward += bonus
 
         let outcome = FrankensteinStage1Outcome(
             skill: skill,

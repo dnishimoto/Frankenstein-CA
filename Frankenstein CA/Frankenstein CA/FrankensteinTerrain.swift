@@ -69,6 +69,7 @@ enum FrankensteinTerrainScene {
         let doorLeaf = SCNNode(geometry: doorPanel)
         doorLeaf.name = "DoorPanel"
         doorLeaf.position = SCNVector3(1.16, 2.10, 0)
+        doorLeaf.categoryBitMask = FrankensteinPhysicalBody.solidMask
         door.addChildNode(doorLeaf)
 
         // Enlarged metallic door handle.
@@ -84,6 +85,7 @@ enum FrankensteinTerrainScene {
         let handleNode = SCNNode(geometry: handle)
         handleNode.name = "DoorHandle"
         handleNode.position = SCNVector3(2.02, 1.98, 0.13)
+        handleNode.categoryBitMask = FrankensteinPhysicalBody.solidMask
         door.addChildNode(handleNode)
 
         // MARK: - Enlarged Table
@@ -205,6 +207,18 @@ enum FrankensteinTerrainScene {
             color: .systemPurple
         )
 
+        // MARK: - Crawl-Only Barrier
+        // Clearance of 1.45 above the ground: low enough that a roll
+        // (1.7 tall) cannot pass, so only crawling (1.3 tall) clears it.
+
+        addBox(
+            to: terrain,
+            name: "LowBarrier",
+            position: SCNVector3(-6.5, 1.60, -4.5),
+            size: SCNVector3(3.8, 0.3, 2.0),
+            color: .systemPink
+        )
+
         // MARK: - Raised Steps
 
         addBox(
@@ -266,7 +280,8 @@ enum FrankensteinTerrainScene {
             name: "GapMarkerNear",
             position: SCNVector3(0, 0.03, 0.0),
             size: SCNVector3(0.12, 0.06, 2.2),
-            color: .systemRed
+            color: .systemRed,
+            solid: false
         )
 
         // MARK: - Start and Finish
@@ -276,7 +291,8 @@ enum FrankensteinTerrainScene {
             name: "StartMarker",
             position: SCNVector3(0, 0.025, 7.5),
             size: SCNVector3(2.5, 0.05, 0.15),
-            color: .systemGreen
+            color: .systemGreen,
+            solid: false
         )
 
         addBox(
@@ -284,7 +300,8 @@ enum FrankensteinTerrainScene {
             name: "FinishMarker",
             position: SCNVector3(0, 0.025, -9.0),
             size: SCNVector3(3.0, 0.05, 0.15),
-            color: .systemGreen
+            color: .systemGreen,
+            solid: false
         )
 
         // MARK: - Lighting
@@ -307,7 +324,8 @@ enum FrankensteinTerrainScene {
         name: String,
         position: SCNVector3,
         size: SCNVector3,
-        color: UIColor
+        color: UIColor,
+        solid: Bool = true
     ) {
         let geometry = SCNBox(
             width: CGFloat(size.x),
@@ -324,6 +342,12 @@ enum FrankensteinTerrainScene {
         let node = SCNNode(geometry: geometry)
         node.name = name
         node.position = position
+
+        // Only geometry tagged solid is visible to his sensors and
+        // collision tests. Names are for labels and debugging only.
+        node.categoryBitMask = solid
+            ? FrankensteinPhysicalBody.solidMask
+            : FrankensteinPhysicalBody.decorationMask
 
         parent.addChildNode(node)
     }

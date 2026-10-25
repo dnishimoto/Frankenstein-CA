@@ -28,14 +28,41 @@ final class FrankensteinCharacter {
     private let shirt = UIColor(red: 0.36, green: 0.35, blue: 0.30, alpha: 1)
     private let metal = UIColor(red: 0.62, green: 0.65, blue: 0.61, alpha: 1)
 
+    // All body parts live under `poseNode`, which pivots about his chest so
+    // that crouching, crawling and rolling can rotate and shrink him
+    // without sinking through the floor. `root` stays at his feet; the
+    // coordinator moves it and this class turns it to face his heading.
+    private let poseNode = SCNNode()
+    private let poseCenterHeight: Float = 2.4
+    private var shownScale: Float = 1
+    private var shownPitch: Float = 0
+    private var wasRolling = false
+
     init() {
         buildBody()
         buildHead()
         buildArms()
         buildLegs()
+        wrapInPoseNode()
     }
 
-    
+    private func wrapInPoseNode() {
+        let parts = root.childNodes
+
+        poseNode.name = "FrankensteinPose"
+        poseNode.pivot = SCNMatrix4MakeTranslation(
+            0, poseCenterHeight, 0
+        )
+        poseNode.position = SCNVector3(0, poseCenterHeight, 0)
+
+        for part in parts {
+            part.removeFromParentNode()
+            poseNode.addChildNode(part)
+        }
+
+        root.addChildNode(poseNode)
+    }
+
     func applyLocomotion(_ motion: FrankensteinLocomotionOutput) {
         applyMotion(
             walkPhase: motion.walkPhase,
@@ -44,13 +71,62 @@ final class FrankensteinCharacter {
             mouthOpen: motion.mouthOpen
         )
 
-        // Lower the body for crouching and raise it during a jump.
-        root.position.y = Float(
-            -0.45 * motion.crouch + 0.55 * motion.jump
-        )
+        // Face the direction he is actually travelling (0 = toward -Z).
+        root.eulerAngles.y = motion.heading
 
-        // Counter-lean to help visually convey balance.
-        root.eulerAngles.z = Float(motion.lean)
+        // Posture. Visual approximations of the physical heights used by
+        // the body: crouch 3.2, roll 1.7, crawl 1.3 (standing 4.8).
+        var targetScale: Float = 1
+        var targetPitch: Float = 0
+        let rolling = motion.posture == .rolling
+
+        switch motion.posture {
+        case .standing:
+            targetScale = 1
+            targetPitch = 0
+
+        case .crouching:
+            targetScale = 0.8
+            targetPitch = -0.35
+
+        case .crawling:
+            targetScale = 0.65
+            targetPitch = -1.35
+
+        case .rolling:
+            targetScale = 0.32
+            targetPitch = -2 * Float.pi * motion.rollProgress
+        }
+
+        shownScale += (targetScale - shownScale) * 0.25
+
+        if rolling {
+            // A somersault follows the roll's progress exactly.
+            shownPitch = targetPitch
+        } else {
+            if wasRolling {
+                // A full turn has been made; start upright again.
+                shownPitch = 0
+            }
+
+            shownPitch += (targetPitch - shownPitch) * 0.25
+        }
+
+        wasRolling = rolling
+
+        // Keep the lowest point of the body on the ground.
+        let sine = abs(sin(shownPitch))
+        let cosine = abs(cos(shownPitch))
+
+        let centreY: Float = rolling
+            ? shownScale * 2.5
+            : shownScale * (2.33 * cosine + 0.4 * sine)
+
+        poseNode.scale = SCNVector3(shownScale, shownScale, shownScale)
+        poseNode.eulerAngles = SCNVector3(
+            shownPitch, 0, motion.lean
+        )
+        poseNode.position = SCNVector3(0, centreY, 0)
 
         // Coordinated opposing leg swing.
         let phase = motion.walkPhase

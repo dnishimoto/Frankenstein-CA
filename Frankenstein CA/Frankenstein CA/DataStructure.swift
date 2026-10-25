@@ -7,6 +7,161 @@
 
 import Foundation
 import Combine
+import SwiftUI
+import SceneKit
+
+// MARK: - Feedback
+
+enum FrankensteinFallReason: Equatable {
+    case void
+    case hardLanding
+}
+
+enum FrankensteinWorldEvent: Equatable {
+    case tookOff
+    case landed(drop: Float, horizontal: Float, rise: Float)
+    case steppedUp(rise: Float)
+    case collided
+    case fell(FrankensteinFallReason)
+    case reachedGoal
+}
+
+struct FrankensteinMotionFeedback {
+    var position = SCNVector3(0, 0, 0)
+    var grounded = true
+    var feetHeight: Float = 0
+    var verticalVelocity: Float = 0
+    var bodyHeight: Float = FrankensteinPhysicalBody.standingHeight
+
+    /// Free height above his feet at his current position (large when
+    /// nothing is overhead). This, not `bodyHeight`, says whether he is
+    /// forced to stay low.
+    var headroom: Float = 99
+
+    /// Horizontal distance he tried to cover this frame.
+    var intendedDistance: Float = 0
+    /// Horizontal distance he actually covered.
+    var movedDistance: Float = 0
+    /// Measured horizontal speed.
+    var speed: Float = 0
+    /// Distance gained toward the finish line this frame (negative = lost).
+    var goalProgress: Float = 0
+    var blocked = false
+
+    var events: [FrankensteinWorldEvent] = []
+
+    /// Optimistic feedback used only when no physical body is attached.
+    static func assumed(
+        speed: Float,
+        heading: Float,
+        dt: Float
+    ) -> FrankensteinMotionFeedback {
+        var feedback = FrankensteinMotionFeedback()
+        let distance = max(0, speed) * dt
+        feedback.intendedDistance = distance
+        feedback.movedDistance = distance
+        feedback.speed = speed
+        feedback.goalProgress = cos(heading) * distance
+        return feedback
+    }
+}
+
+struct FrankensteinBodyCommand {
+    var speed: Float
+    var heading: Float
+    var posture: FrankensteinPosture
+    var jumpRequested: Bool
+}
+
+
+enum FrankensteinPhysicalBody {
+
+    // The character model is about 4.9 units tall and the course (door,
+    // table, barriers) is built to that scale, so the physical body uses
+    // the same scale.
+    static let standingHeight: Float = 4.8
+    static let crouchHeight: Float = 3.2
+    static let rollHeight: Float = 1.7
+    static let crawlHeight: Float = 1.3
+    static let radius: Float = 0.5
+
+    // Capabilities of the body itself (not of the policy).
+    static let maxStepHeight: Float = 0.6
+    static let maxJumpableHeight: Float = 1.4
+    static let maxSafeDrop: Float = 2.0
+    static let fallDepth: Float = 2.6
+    static let gravity: Float = 9.8
+    static let jumpImpulse: Float = 6.0
+    static let climbRate: Float = 4.0
+
+    static let walkSpeed: Float = 1.6
+    static let runSpeed: Float = 3.4
+    static let crouchSpeed: Float = 1.2
+    static let crawlSpeed: Float = 1.0
+    static let rollSpeed: Float = 2.6
+    static let rollDuration: Float = 0.75
+
+    // Sensing.
+    static let lookAhead: Float = 4.0
+    static let profileSpacing: Float = 0.2
+    static let groundProbeRise: Float = maxStepHeight + 0.1
+    static let ceilingProbeRise: Float = maxStepHeight + 0.05
+    static let tallProbeRise: Float = 6.0
+
+    static let startPosition = SCNVector3(5.5, 0.0, 7.0)
+    
+    static let finishZ: Float = -8.6
+
+    // Category masks. Default node category is 1, which is neither.
+    static let solidMask: Int = 1 << 1
+    static let decorationMask: Int = 1 << 3
+
+    static func height(for posture: FrankensteinPosture) -> Float {
+        switch posture {
+        case .standing: return standingHeight
+        case .crouching: return crouchHeight
+        case .crawling: return crawlHeight
+        case .rolling: return rollHeight
+        }
+    }
+
+    /// Heights (above the feet) of the horizontal rays used for SENSING.
+    /// The lowest one sits under step height so steps can be seen and
+    /// measured; overhead clearance is measured with vertical rays.
+    static func bodyRayHeights(bodyHeight: Float) -> [Float] {
+        [0.3] + collisionRayHeights(bodyHeight: bodyHeight)
+    }
+
+    /// Heights of the horizontal rays used for COLLISION. The lowest one is
+    /// just above the tallest step he can climb, so a step is never treated
+    /// as a wall; steps are handled by the climb logic and a rise check.
+    static func collisionRayHeights(bodyHeight: Float) -> [Float] {
+        var heights: [Float] = [maxStepHeight + 0.05]
+
+        if bodyHeight > 1.4 {
+            heights.append(1.1)
+        }
+
+        if bodyHeight > 2.6 {
+            heights.append(bodyHeight * 0.5)
+        }
+
+        return heights
+    }
+}
+
+// MARK: - Pose
+
+struct FrankensteinWorldPose {
+    var x: Float
+    var z: Float
+    var feetY: Float
+    /// Height of the surface he is standing on (or last stood on).
+    var referenceY: Float
+    var heading: Float
+    var bodyHeight: Float
+    var grounded: Bool
+}
 
 enum FrankensteinTerrain: Int, CaseIterable {
     case flat, hurdle, gap, lowCeiling, raisedStep, slope, uneven
@@ -21,6 +176,11 @@ struct FrankensteinTerrainSample {
     var nextGroundHeight: Float = 0
     var isGroundAhead = true
     var isLandingAreaClear = true
+
+    /// Measured thickness of a raised obstacle along the direction of
+    /// travel. For `.lowCeiling`, `obstacleHeight` is the measured clearance
+    /// above his feet.
+    var obstacleDepth: Float = 0
 }
 
 struct FrankensteinBodyState {
@@ -31,6 +191,16 @@ struct FrankensteinBodyState {
     var grounded = true
     var fallen = false
     var distanceTravelled: Float = 0
+
+    /// Heading relative to the finish direction: 0 = facing it,
+    /// positive = turned to his left.
+    var headingError: Float = 0
+}
+
+/// How his body is held. Each posture has a physical height that is
+/// checked against real geometry overhead.
+enum FrankensteinPosture: Int {
+    case standing, crouching, crawling, rolling
 }
 
 
@@ -65,6 +235,13 @@ struct FrankensteinLocomotionOutput {
     var action: FrankensteinAction = .walk
     var reward: Float = 0
     var status = "Ready"
+
+    /// True for exactly one frame when a jump should leave the ground.
+    var jumpRequested = false
+
+    /// Posture the body should take, and progress (0...1) through a roll.
+    var posture: FrankensteinPosture = .standing
+    var rollProgress: Float = 0
 }
 
 enum FrankensteinStage1Skill: String, Codable, CaseIterable {
@@ -76,6 +253,7 @@ enum FrankensteinStage1Skill: String, Codable, CaseIterable {
     case roll
     case recover
     case crouch
+    case crawl
     case wait
 }
 
