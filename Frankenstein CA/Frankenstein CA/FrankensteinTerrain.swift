@@ -9,13 +9,141 @@ enum FrankensteinTerrainScene {
         terrain.name = "ObstacleCourse"
         scene.rootNode.addChildNode(terrain)
 
-        // Ground platform, leaving a visible gap in the center.
+        // MARK: - Enlarged Door and Frame
+
+        let doorFrameColor = UIColor(
+            red: 0.35,
+            green: 0.20,
+            blue: 0.10,
+            alpha: 1
+        )
+
+        // Wider frame, scaled to match the enlarged door.
+        addBox(
+            to: terrain,
+            name: "DoorFrameLeft",
+            position: SCNVector3(5.7, 2.25, -7.0),
+            size: SCNVector3(0.27, 4.5, 0.33),
+            color: doorFrameColor
+        )
+
+        addBox(
+            to: terrain,
+            name: "DoorFrameRight",
+            position: SCNVector3(8.3, 2.25, -7.0),
+            size: SCNVector3(0.27, 4.5, 0.33),
+            color: doorFrameColor
+        )
+
+        addBox(
+            to: terrain,
+            name: "DoorFrameTop",
+            position: SCNVector3(7.0, 4.45, -7.0),
+            size: SCNVector3(2.85, 0.27, 0.33),
+            color: doorFrameColor
+        )
+
+        // Door pivot: rotate this node later to open the door.
+        let door = SCNNode()
+        door.name = "Door"
+        door.position = SCNVector3(5.84, 0, -7.0)
+        terrain.addChildNode(door)
+
+        let doorPanel = SCNBox(
+            width: 2.32,
+            height: 4.20,
+            length: 0.15,
+            chamferRadius: 0.05
+        )
+
+        let doorMaterial = SCNMaterial()
+        doorMaterial.diffuse.contents = UIColor(
+            red: 0.48,
+            green: 0.27,
+            blue: 0.13,
+            alpha: 1
+        )
+        doorMaterial.roughness.contents = 0.72
+        doorPanel.materials = [doorMaterial]
+
+        let doorLeaf = SCNNode(geometry: doorPanel)
+        doorLeaf.name = "DoorPanel"
+        doorLeaf.position = SCNVector3(1.16, 2.10, 0)
+        door.addChildNode(doorLeaf)
+
+        // Enlarged metallic door handle.
+        let handle = SCNCylinder(
+            radius: 0.085,
+            height: 0.15
+        )
+
+        let handleMaterial = SCNMaterial()
+        handleMaterial.diffuse.contents = UIColor.systemYellow
+        handle.materials = [handleMaterial]
+
+        let handleNode = SCNNode(geometry: handle)
+        handleNode.name = "DoorHandle"
+        handleNode.position = SCNVector3(2.02, 1.98, 0.13)
+        door.addChildNode(handleNode)
+
+        // MARK: - Enlarged Table
+
+        let table = SCNNode()
+        table.name = "Table"
+        table.position = SCNVector3(5.5, 0, 1.0)
+        terrain.addChildNode(table)
+
+        // Tabletop: approximately 2.8 × 1.68 units.
+        addBox(
+            to: table,
+            name: "TableTop",
+            position: SCNVector3(0, 1.48, 0),
+            size: SCNVector3(2.8, 0.22, 1.68),
+            color: UIColor(
+                red: 0.48,
+                green: 0.29,
+                blue: 0.15,
+                alpha: 1
+            )
+        )
+
+        // Four legs, each approximately 1.4 units tall.
+        let legPositions: [SCNVector3] = [
+            SCNVector3(-1.15, 0.70, -0.66),
+            SCNVector3( 1.15, 0.70, -0.66),
+            SCNVector3(-1.15, 0.70,  0.66),
+            SCNVector3( 1.15, 0.70,  0.66)
+        ]
+
+        for (index, position) in legPositions.enumerated() {
+            addBox(
+                to: table,
+                name: "TableLeg\(index + 1)",
+                position: position,
+                size: SCNVector3(0.18, 1.4, 0.18),
+                color: UIColor(
+                    red: 0.34,
+                    green: 0.20,
+                    blue: 0.11,
+                    alpha: 1
+                )
+            )
+        }
+
+        // MARK: - Ground Platform
+        // Leaves the central gap visible.
+
         addBox(
             to: terrain,
             name: "GroundLeft",
             position: SCNVector3(-5.5, -0.2, 0),
             size: SCNVector3(9, 0.4, 18),
-            color: UIColor(red: 0.24, green: 0.30, blue: 0.25, alpha: 1)
+            color: UIColor(
+                red: 0.24,
+                green: 0.30,
+                blue: 0.25,
+                alpha: 1
+            )
         )
 
         addBox(
@@ -23,10 +151,16 @@ enum FrankensteinTerrainScene {
             name: "GroundRight",
             position: SCNVector3(5.5, -0.2, 0),
             size: SCNVector3(9, 0.4, 18),
-            color: UIColor(red: 0.24, green: 0.30, blue: 0.25, alpha: 1)
+            color: UIColor(
+                red: 0.24,
+                green: 0.30,
+                blue: 0.25,
+                alpha: 1
+            )
         )
 
-        // Course boundaries.
+        // MARK: - Course Boundaries
+
         addBox(
             to: terrain,
             name: "LeftBoundary",
@@ -43,7 +177,8 @@ enum FrankensteinTerrainScene {
             color: .darkGray
         )
 
-        // Hurdles: low barriers that can be jumped.
+        // MARK: - Hurdles
+
         addBox(
             to: terrain,
             name: "Hurdle1",
@@ -60,7 +195,8 @@ enum FrankensteinTerrainScene {
             color: .systemOrange
         )
 
-        // Low overhead platform: crouch underneath it.
+        // MARK: - Low Ceiling
+
         addBox(
             to: terrain,
             name: "LowCeiling",
@@ -69,7 +205,8 @@ enum FrankensteinTerrainScene {
             color: .systemPurple
         )
 
-        // Raised steps.
+        // MARK: - Raised Steps
+
         addBox(
             to: terrain,
             name: "Step1",
@@ -94,13 +231,19 @@ enum FrankensteinTerrainScene {
             color: .systemTeal
         )
 
-        // Uneven ground patches.
+        // MARK: - Uneven Ground
+
         addBox(
             to: terrain,
             name: "UnevenGround1",
             position: SCNVector3(3.0, 0.12, 1.8),
             size: SCNVector3(2.5, 0.25, 2.5),
-            color: UIColor(red: 0.48, green: 0.38, blue: 0.22, alpha: 1)
+            color: UIColor(
+                red: 0.48,
+                green: 0.38,
+                blue: 0.22,
+                alpha: 1
+            )
         )
 
         addBox(
@@ -108,10 +251,16 @@ enum FrankensteinTerrainScene {
             name: "UnevenGround2",
             position: SCNVector3(5.5, 0.30, 3.8),
             size: SCNVector3(2.5, 0.6, 2.5),
-            color: UIColor(red: 0.48, green: 0.38, blue: 0.22, alpha: 1)
+            color: UIColor(
+                red: 0.48,
+                green: 0.38,
+                blue: 0.22,
+                alpha: 1
+            )
         )
 
-        // Gap warning markers on either side of the gap.
+        // MARK: - Gap Warning Marker
+
         addBox(
             to: terrain,
             name: "GapMarkerNear",
@@ -120,7 +269,8 @@ enum FrankensteinTerrainScene {
             color: .systemRed
         )
 
-        // Starting position and finish marker.
+        // MARK: - Start and Finish
+
         addBox(
             to: terrain,
             name: "StartMarker",
@@ -137,7 +287,8 @@ enum FrankensteinTerrainScene {
             color: .systemGreen
         )
 
-        // Directional course lighting.
+        // MARK: - Lighting
+
         let light = SCNLight()
         light.type = .omni
         light.intensity = 900
@@ -148,6 +299,8 @@ enum FrankensteinTerrainScene {
         lightNode.position = SCNVector3(0, 8, 2)
         terrain.addChildNode(lightNode)
     }
+
+    // MARK: - Box Builder
 
     private static func addBox(
         to parent: SCNNode,
@@ -171,7 +324,7 @@ enum FrankensteinTerrainScene {
         let node = SCNNode(geometry: geometry)
         node.name = name
         node.position = position
+
         parent.addChildNode(node)
     }
 }
-

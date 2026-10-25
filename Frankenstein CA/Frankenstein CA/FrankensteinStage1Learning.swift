@@ -2,10 +2,11 @@
 import Foundation
 import SceneKit
 
-
 final class FrankensteinStage1Learning {
 
     private(set) var lastOutcome: FrankensteinStage1Outcome?
+
+    private let policy: FrankensteinLearningPolicy
 
     private var activeSkill: FrankensteinStage1Skill?
     private var startPosition: SCNVector3 = SCNVector3Zero
@@ -19,7 +20,13 @@ final class FrankensteinStage1Learning {
     private let blockedDisplacementThreshold: Float = 0.025
     private let fallGracePeriod: TimeInterval = 0.75
 
-    // Call once when the policy starts a new skill attempt.
+    // Inject the SAME policy instance used by locomotion.
+    init(policy: FrankensteinLearningPolicy) {
+        self.policy = policy
+    }
+
+    // MARK: - Begin Skill
+
     func begin(
         skill: FrankensteinStage1Skill,
         position: SCNVector3,
@@ -36,8 +43,8 @@ final class FrankensteinStage1Learning {
         fallObserved = false
     }
 
-    // Call from the scene update loop using measured scene observations.
-    // This function records evidence; it does not update the Q-table.
+    // MARK: - Observe Scene
+
     func observe(
         position: SCNVector3,
         observation: FrankensteinStage1Observation,
@@ -55,26 +62,31 @@ final class FrankensteinStage1Learning {
             airborneDuration = 0
         }
 
-        // Do not classify an ordinary jump or step as a fall.
-        // The caller must also confirm that the character is below
-        // the expected playable ground or has entered a fall state.
         if airborneDuration >= fallGracePeriod &&
             !observation.hasGroundAhead {
             fallObserved = true
         }
     }
 
-    // Call exactly once when the skill finishes, fails, or times out.
-    // progressMade is positive when distance to the goal decreases.
+    // MARK: - Finish and Learn
+
     @discardableResult
     func finish(
         finalPosition: SCNVector3,
         finalDistanceToGoal: Float,
         confirmedFall: Bool,
+        terrain: FrankensteinTerrainSample,
+        body: FrankensteinBodyState,
         time: TimeInterval
     ) -> FrankensteinStage1Outcome? {
 
-        guard let skill = activeSkill else { return nil }
+        guard let skill = activeSkill else {
+            return nil
+        }
+
+        // Close the attempt before learning so this outcome cannot
+        // accidentally be submitted twice.
+        activeSkill = nil
 
         let elapsed = max(0, time - startTime)
 
@@ -82,9 +94,10 @@ final class FrankensteinStage1Learning {
         let dy = finalPosition.y - startPosition.y
         let dz = finalPosition.z - startPosition.z
 
-        let actualDisplacement = sqrt(dx * dx + dy * dy + dz * dz)
+        let actualDisplacement = sqrt(
+            dx * dx + dy * dy + dz * dz
+        )
 
-        // Goal progress is more informative than raw distance travelled.
         let progress = Double(
             startDistanceToGoal - finalDistanceToGoal
         )
@@ -97,10 +110,10 @@ final class FrankensteinStage1Learning {
 
         var reward = 0.0
 
-        // Reward genuine progress toward the goal.
+        // Reward progress toward the goal.
         reward += max(-2.0, min(2.0, progress))
 
-        // Penalize failed attempts and dangerous outcomes.
+        // Penalize failure and unsafe outcomes.
         if blocked {
             reward -= 1.0
         }
@@ -109,7 +122,7 @@ final class FrankensteinStage1Learning {
             reward -= 5.0
         }
 
-        // Reward finishing a skill without a fall.
+        // Small bonus for a safe, unblocked attempt.
         if !fell && !blocked {
             reward += 0.25
         }
@@ -125,10 +138,21 @@ final class FrankensteinStage1Learning {
         )
 
         lastOutcome = outcome
-        activeSkill = nil
+
+        // THE MISSING CONNECTION:
+        // Send the completed attempt's reward to the existing policy.
+        // This must happen once per attempt, not once per frame.
+        policy.learn(
+            reward: Float(reward),
+            terrain: terrain,
+            body: body,
+            terminal: fell
+        )
 
         return outcome
     }
+
+    // MARK: - Reset
 
     func reset() {
         activeSkill = nil
@@ -136,6 +160,8 @@ final class FrankensteinStage1Learning {
         collisionObserved = false
         airborneDuration = 0
         fallObserved = false
+        startPosition = SCNVector3Zero
+        startDistanceToGoal = 0
+        startTime = 0
     }
 }
-
