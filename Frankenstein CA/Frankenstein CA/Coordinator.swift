@@ -97,6 +97,27 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     // MARK: Scene setup
 
+    /// Points the coordinator at the scene and character the view actually
+    /// displays. The weak references set in `init` are placeholders.
+    func attach(scene: SCNScene, characterNode: SCNNode) {
+        self.scene = scene
+        self.characterNode = characterNode
+
+        if let door = scene.rootNode.childNode(
+            withName: "Door",
+            recursively: true
+        ) {
+            doorNode = door
+        }
+
+        if let table = scene.rootNode.childNode(
+            withName: "Table",
+            recursively: true
+        ) {
+            tableNode = table
+        }
+    }
+
     func attachDoor(_ node: SCNNode) {
         doorNode = node
     }
@@ -294,12 +315,14 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             origin.z + direction.z * length
         )
 
-        let options: [SCNHitTestOption: Any] = [
-            .searchMode: SCNHitTestSearchMode.all.rawValue,
-            .ignoreHiddenNodes: true
+        let options: [String: Any] = [
+            SCNHitTestOption.searchMode.rawValue:
+                SCNHitTestSearchMode.all.rawValue,
+            SCNHitTestOption.ignoreHiddenNodes.rawValue:
+                true
         ]
 
-        let results = scene.rootNode.hitTestWithSegment(
+        let results: [SCNHitTestResult] = scene.rootNode.hitTestWithSegment(
             from: origin,
             to: end,
             options: options
@@ -308,7 +331,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         return results.first { hit in
             let node = hit.node
             return node !== character &&
-                   !node.isDescendant(of: character) &&
+                   !isDescendant(node, of: character) &&
                    node.opacity > 0.01
         }
     }
@@ -326,12 +349,14 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             origin.z
         )
 
-        let options: [SCNHitTestOption: Any] = [
-            .searchMode: SCNHitTestSearchMode.all.rawValue,
-            .ignoreHiddenNodes: true
+        let options: [String: Any] = [
+            SCNHitTestOption.searchMode.rawValue:
+                SCNHitTestSearchMode.all.rawValue,
+            SCNHitTestOption.ignoreHiddenNodes.rawValue:
+                true
         ]
 
-        let results = scene.rootNode.hitTestWithSegment(
+        let results: [SCNHitTestResult] = scene.rootNode.hitTestWithSegment(
             from: origin,
             to: end,
             options: options
@@ -340,7 +365,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         return results.first { hit in
             let node = hit.node
             return node !== character &&
-                   !node.isDescendant(of: character) &&
+                   !isDescendant(node, of: character) &&
                    node.physicsBody != nil
         }
     }
@@ -606,9 +631,31 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         return SCNVector3(scaleX, scaleY, scaleZ)
     }
 
+    private func isDescendant(
+        _ node: SCNNode,
+        of ancestor: SCNNode
+    ) -> Bool {
+        var current = node.parent
+
+        while let parent = current {
+            if parent === ancestor {
+                return true
+            }
+            current = parent.parent
+        }
+
+        return false
+    }
+
     private func isPickupable(_ node: SCNNode) -> Bool {
-        if node.userData?["pickupable"] as? Bool == true {
-            return true
+        // Split into small steps. The compiler fails to type-check the
+        // one-line optional-chained subscript on NSMutableDictionary.
+        if let data = node.userData {
+            let value: Any? = data.object(forKey: "pickupable")
+
+            if let flag = value as? NSNumber, flag.boolValue {
+                return true
+            }
         }
 
         let name = (node.name ?? "").lowercased()
@@ -618,7 +665,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                name.contains("carryable") ||
                name.contains("crate")
     }
-
     private func isLowCeiling(_ node: SCNNode) -> Bool {
         let name = (node.name ?? "").lowercased()
 

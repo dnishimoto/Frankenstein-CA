@@ -136,10 +136,14 @@ struct FrankensteinSceneView: UIViewRepresentable {
         )
         scene.rootNode.addChildNode(directionalNode)
 
-        // IMPORTANT:
-        // The current Coordinator keeps weak references to its scene and
-        // character node. It must be initialized with the same scene and
-        // character node used by this view. See the note below.
+        // The coordinator was created with placeholder objects, so point it
+        // at the scene and character node this view actually displays.
+        context.coordinator.attach(
+            scene: scene,
+            characterNode: characterNode
+        )
+        context.coordinator.start()
+
         view.delegate = context.coordinator
 
         return view
