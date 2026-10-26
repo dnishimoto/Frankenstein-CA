@@ -167,21 +167,6 @@ enum FrankensteinTerrain: Int, CaseIterable {
     case flat, hurdle, gap, lowCeiling, raisedStep, slope, uneven
 }
 
-struct FrankensteinTerrainSample {
-    var terrain: FrankensteinTerrain = .flat
-    var distance: Float = 5
-    var obstacleHeight: Float = 0
-    var gapWidth: Float = 0
-    var groundHeight: Float = 0
-    var nextGroundHeight: Float = 0
-    var isGroundAhead = true
-    var isLandingAreaClear = true
-
-    /// Measured thickness of a raised obstacle along the direction of
-    /// travel. For `.lowCeiling`, `obstacleHeight` is the measured clearance
-    /// above his feet.
-    var obstacleDepth: Float = 0
-}
 
 struct FrankensteinBodyState {
     var speed: Float = 0
@@ -257,21 +242,35 @@ enum FrankensteinStage1Skill: String, Codable, CaseIterable {
     case wait
 }
 
-// MARK: - What Frankenstein senses
 
 struct FrankensteinStage1Observation {
+
+    // MARK: - Goal and obstacle measurements
+
     var distanceToGoal: Float
     var obstacleDistance: Float
     var obstacleHeight: Float
     var gapWidth: Float
+
+    // MARK: - Ground and movement state
 
     var hasGroundAhead: Bool
     var isGrounded: Bool
     var hasCollision: Bool
     var landingAreaIsClear: Bool
 
+    // MARK: - Character and terrain state
+
     var currentHeight: Float
     var terrainType: String
+
+    // MARK: - Chasm measurements
+
+    var gapNearEdgeDistance: Float
+    var gapFarEdgeDistance: Float
+    var landingHeightDelta: Float
+
+    // MARK: - Initialization
 
     init(
         distanceToGoal: Float,
@@ -283,20 +282,30 @@ struct FrankensteinStage1Observation {
         hasCollision: Bool = false,
         landingAreaIsClear: Bool = true,
         currentHeight: Float = 0,
-        terrainType: String = "unknown"
+        terrainType: String = "unknown",
+        gapNearEdgeDistance: Float = .infinity,
+        gapFarEdgeDistance: Float = .infinity,
+        landingHeightDelta: Float = 0
     ) {
         self.distanceToGoal = distanceToGoal
         self.obstacleDistance = obstacleDistance
         self.obstacleHeight = obstacleHeight
         self.gapWidth = gapWidth
+
         self.hasGroundAhead = hasGroundAhead
         self.isGrounded = isGrounded
         self.hasCollision = hasCollision
         self.landingAreaIsClear = landingAreaIsClear
+
         self.currentHeight = currentHeight
         self.terrainType = terrainType
+
+        self.gapNearEdgeDistance = gapNearEdgeDistance
+        self.gapFarEdgeDistance = gapFarEdgeDistance
+        self.landingHeightDelta = landingHeightDelta
     }
 }
+
 
 // MARK: - Outcome of one completed skill attempt
 

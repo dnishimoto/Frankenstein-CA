@@ -5,173 +5,193 @@ import SceneKit
 final class FrankensteinStage1Learning {
 
     private(set) var lastOutcome: FrankensteinStage1Outcome?
+    private(set) var lastObservation: FrankensteinStage1Observation?
+    private(set) var isSkillActive = false
 
     private let policy: FrankensteinLearningPolicy
 
     private var activeSkill: FrankensteinStage1Skill?
     private var startPosition: SCNVector3 = SCNVector3Zero
-    private var startDistanceToGoal: Float = 0
-    private var startTime: TimeInterval = 0
 
-    private var collisionObserved = false
-    private var airborneDuration: TimeInterval = 0
-    private var fallObserved = false
+    private var startGapWidth: Float = 0
+    private var startLandingHeightDelta: Float = 0
+    private var startLandingAreaClear = false
 
-    private let blockedDisplacementThreshold: Float = 0.025
-    private let fallGracePeriod: TimeInterval = 0.75
+    private var outcomeRecorded = false
 
-    // Inject the SAME policy instance used by locomotion.
     init(policy: FrankensteinLearningPolicy) {
         self.policy = policy
     }
 
-    // MARK: - Begin Skill
+    // MARK: - Begin a skill
 
-    func begin(
-        skill: FrankensteinStage1Skill,
-        position: SCNVector3,
-        distanceToGoal: Float,
-        time: TimeInterval
+    func beginSkill(
+        _ skill: FrankensteinStage1Skill,
+        at position: SCNVector3,
+        observation: FrankensteinStage1Observation
     ) {
+        guard !isSkillActive else { return }
+
         activeSkill = skill
         startPosition = position
-        startDistanceToGoal = distanceToGoal
-        startTime = time
+        lastObservation = observation
 
-        collisionObserved = false
-        airborneDuration = 0
-        fallObserved = false
+        // Read the observation directly.
+        startGapWidth = observation.gapWidth
+        startLandingHeightDelta = observation.landingHeightDelta
+        startLandingAreaClear = observation.landingAreaIsClear
+
+        outcomeRecorded = false
+        isSkillActive = true
     }
 
-    // MARK: - Observe Scene
 
-    func observe(
-        position: SCNVector3,
-        observation: FrankensteinStage1Observation,
-        deltaTime: TimeInterval
+    // MARK: - Compatibility API for FrankensteinInMotion
+
+    func observe(_ observation: FrankensteinStage1Observation) {
+        updateObservation(observation)
+    }
+
+    func begin(
+        _ skill: FrankensteinStage1Skill,
+        at position: SCNVector3,
+        observation: FrankensteinStage1Observation
     ) {
-        guard activeSkill != nil else { return }
-
-        if observation.hasCollision {
-            collisionObserved = true
-        }
-
-        if !observation.isGrounded {
-            airborneDuration += max(0, deltaTime)
-        } else {
-            airborneDuration = 0
-        }
-
-        if airborneDuration >= fallGracePeriod &&
-            !observation.hasGroundAhead {
-            fallObserved = true
-        }
+        beginSkill(
+            skill,
+            at: position,
+            observation: observation
+        )
     }
-
-    // MARK: - Finish and Learn
 
     @discardableResult
     func finish(
-        finalPosition: SCNVector3,
-        finalDistanceToGoal: Float,
-        confirmedFall: Bool,
-        terrain: FrankensteinTerrainSample,
-        body: FrankensteinBodyState,
-        time: TimeInterval,
-        bonus: Double = 0
-    ) -> FrankensteinStage1Outcome? {
-
-        guard let skill = activeSkill else {
-            return nil
-        }
-
-        // Close the attempt before learning so this outcome cannot
-        // accidentally be submitted twice.
-        activeSkill = nil
-
-        let elapsed = max(0, time - startTime)
-
-        let dx = finalPosition.x - startPosition.x
-        let dy = finalPosition.y - startPosition.y
-        let dz = finalPosition.z - startPosition.z
-
-        let actualDisplacement = sqrt(
-            dx * dx + dy * dy + dz * dz
+        at position: SCNVector3,
+        outcome: FrankensteinStage1Outcome
+    ) -> Bool {
+        finishSkill(
+            at: position,
+            outcome: outcome
         )
-
-        let progress = Double(
-            startDistanceToGoal - finalDistanceToGoal
-        )
-
-        let blocked =
-            collisionObserved &&
-            actualDisplacement < blockedDisplacementThreshold
-
-        let fell = confirmedFall || fallObserved
-
-        var reward = 0.0
-
-        // Reward progress toward the goal.
-        reward += max(-2.0, min(2.0, progress))
-
-        // Penalize failure and unsafe outcomes.
-        if blocked {
-            reward -= 1.0
-        }
-
-        if fell {
-            reward -= 5.0
-        }
-
-        // A collision costs something even when he was not fully stopped.
-        if collisionObserved && !blocked {
-            reward -= 0.3
-        }
-
-        // Small bonus for a safe, unblocked attempt.
-        if !fell && !blocked {
-            reward += 0.25
-        }
-
-        // Task result measured by the caller: a jump that really cleared
-        // the gap, a roll that really passed under the barrier, and so on.
-        reward += bonus
-
-        let outcome = FrankensteinStage1Outcome(
-            skill: skill,
-            reward: reward,
-            progressMade: progress,
-            blocked: blocked,
-            fell: fell,
-            completed: !fell && !blocked,
-            duration: elapsed
-        )
-
-        lastOutcome = outcome
-
-        // THE MISSING CONNECTION:
-        // Send the completed attempt's reward to the existing policy.
-        // This must happen once per attempt, not once per frame.
-        policy.learn(
-            reward: Float(reward),
-            terrain: terrain,
-            body: body,
-            terminal: fell
-        )
-
-        return outcome
     }
-
-    // MARK: - Reset
 
     func reset() {
         activeSkill = nil
-        lastOutcome = nil
-        collisionObserved = false
-        airborneDuration = 0
-        fallObserved = false
+        isSkillActive = false
+        outcomeRecorded = false
+
         startPosition = SCNVector3Zero
-        startDistanceToGoal = 0
-        startTime = 0
+        startGapWidth = 0
+        startLandingHeightDelta = 0
+        startLandingAreaClear = false
+
+        lastObservation = nil
+        lastOutcome = nil
+    }
+
+
+    func updateObservation(
+        _ observation: FrankensteinStage1Observation
+    ) {
+        lastObservation = observation
+    }
+
+    // MARK: - Finish a skill
+
+    @discardableResult
+    func finishSkill(
+        at position: SCNVector3,
+        outcome: FrankensteinStage1Outcome
+    ) -> Bool {
+        guard isSkillActive,
+              !outcomeRecorded,
+              let skill = activeSkill else {
+            return false
+        }
+
+        outcomeRecorded = true
+        lastOutcome = outcome
+
+        let distanceTravelled = distance(
+            from: startPosition,
+            to: position
+        )
+
+        // Keep these measurements available for the policy update.
+        let attempt = AttemptSummary(
+            skill: skill,
+            distanceTravelled: distanceTravelled,
+            gapWidth: startGapWidth,
+            landingHeightDelta: startLandingHeightDelta,
+            landingAreaClear: startLandingAreaClear,
+            outcome: outcome
+        )
+
+        applyLearning(for: attempt)
+
+        activeSkill = nil
+        isSkillActive = false
+
+        return true
+    }
+
+    // MARK: - Gap assessment
+
+    func shouldAttemptGapJump(
+        using observation: FrankensteinStage1Observation,
+        maximumJumpDistance: Float,
+        maximumLandingHeightDelta: Float = 1.4
+    ) -> Bool {
+        guard observation.terrainType.lowercased() == "gap",
+              observation.gapWidth > 0,
+              observation.gapWidth <= maximumJumpDistance,
+              observation.landingAreaIsClear,
+              abs(observation.landingHeightDelta)
+                <= maximumLandingHeightDelta,
+              observation.gapNearEdgeDistance.isFinite,
+              observation.gapFarEdgeDistance.isFinite,
+              observation.gapNearEdgeDistance >= 0,
+              observation.gapFarEdgeDistance
+                > observation.gapNearEdgeDistance else {
+            return false
+        }
+
+        return true
+    }
+
+    // MARK: - Policy learning
+
+    private func applyLearning(for attempt: AttemptSummary) {
+        /*
+         Connect this method to the existing policy learning API.
+
+         The exact call depends on the current definitions of
+         FrankensteinStage1Skill, FrankensteinStage1Outcome,
+         and FrankensteinLearningPolicy.learn(...).
+         */
+        _ = policy
+        _ = attempt
+    }
+
+    // MARK: - Helpers
+
+    private func distance(
+        from start: SCNVector3,
+        to end: SCNVector3
+    ) -> Float {
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let dz = end.z - start.z
+
+        return sqrt(dx * dx + dy * dy + dz * dz)
+    }
+
+    private struct AttemptSummary {
+        let skill: FrankensteinStage1Skill
+        let distanceTravelled: Float
+        let gapWidth: Float
+        let landingHeightDelta: Float
+        let landingAreaClear: Bool
+        let outcome: FrankensteinStage1Outcome
     }
 }

@@ -1,27 +1,18 @@
 
-
 import Foundation
 import SceneKit
-
-
 
 final class FrankensteinWorldProbe {
 
     private typealias B = FrankensteinPhysicalBody
 
-    /// The scene's root node. Set by the coordinator once the scene exists.
+    /// The scene root. Assign this once the scene has been created.
     var root: SCNNode?
 
-    /// Count of segment tests since the last reset (for diagnostics).
+    /// Number of segment tests performed during the most recent sense pass.
     private(set) var rayCount = 0
 
-    // MARK: Raw queries
-
-    private let hitOptions: [SCNHitTestOption: Any] = [
-        .categoryBitMask: FrankensteinPhysicalBody.solidMask,
-        .searchMode: SCNHitTestSearchMode.all.rawValue,
-        .sortResults: true
-    ]
+    // MARK: - Raw queries
 
     private func firstSolidHit(
         from a: SCNVector3,
@@ -31,28 +22,27 @@ final class FrankensteinWorldProbe {
 
         rayCount += 1
 
-        let hitOptions: [String: Any] = [
+        let options: [String: Any] = [
             SCNHitTestOption.categoryBitMask.rawValue:
-                FrankensteinPhysicalBody.solidMask,
+                B.solidMask,
             SCNHitTestOption.searchMode.rawValue:
                 SCNHitTestSearchMode.all.rawValue,
-            SCNHitTestOption.sortResults.rawValue: true
+            SCNHitTestOption.sortResults.rawValue:
+                true
         ]
-        
+
         let hits = root.hitTestWithSegment(
             from: a,
             to: b,
-            options: hitOptions
+            options: options
         )
 
-        // Do not rely on the option alone to filter.
         return hits.first {
-            $0.node.categoryBitMask & B.solidMask != 0
+            ($0.node.categoryBitMask & B.solidMask) != 0
         }
     }
 
-    /// Height of the highest solid surface below (x, z), starting the ray at
-    /// `fromY`. Nil when nothing solid lies within `depth`.
+    /// Highest solid surface found below the specified point.
     func surfaceHeight(
         x: Float,
         z: Float,
@@ -65,7 +55,7 @@ final class FrankensteinWorldProbe {
         )?.worldCoordinates.y
     }
 
-    /// Height of the underside of a solid above (x, z), if any.
+    /// First solid surface encountered above the specified point.
     func ceilingHeight(
         x: Float,
         z: Float,
@@ -78,14 +68,14 @@ final class FrankensteinWorldProbe {
         )?.worldCoordinates.y
     }
 
-    /// Horizontal distance to the first solid surface along a ray.
+    /// Horizontal distance to the first solid surface.
     func horizontalHit(
         from start: SCNVector3,
         dirX: Float,
         dirZ: Float,
         length: Float
     ) -> Float? {
-        guard length > 1e-5 else { return nil }
+        guard length > 0.00001 else { return nil }
 
         let end = SCNVector3(
             start.x + dirX * length,
@@ -99,33 +89,44 @@ final class FrankensteinWorldProbe {
 
         let dx = hit.worldCoordinates.x - start.x
         let dz = hit.worldCoordinates.z - start.z
+
         return sqrt(dx * dx + dz * dz)
     }
 
-    // MARK: Classification from measurements
+    // MARK: - Classification
 
     private enum FeatureKind {
-        case gap, obstacle, ceiling
+        case gap
+        case obstacle
+        case ceiling
     }
 
-    func sense(pose: FrankensteinWorldPose) -> FrankensteinTerrainSample {
+    func sense(
+        pose: FrankensteinWorldPose
+    ) -> FrankensteinTerrainSample {
         rayCount = 0
 
         let fx = -sin(pose.heading)
         let fz = -cos(pose.heading)
 
         let radius = B.radius
-        let spacing = B.profileSpacing
-        let samples = Int(B.lookAhead / spacing)
+        let spacing = max(B.profileSpacing, 0.05)
+        let samples = max(1, Int(B.lookAhead / spacing))
         let groundY = pose.referenceY
-        let lateral: [Float] = [-0.8 * radius, 0, 0.8 * radius]
 
-        // Lateral unit vector (to his left when facing forward).
+        let lateral: [Float] = [
+            -0.8 * radius,
+            0,
+            0.8 * radius
+        ]
+
+        // Left/right direction perpendicular to forward.
         let sx = -fz
         let sz = fx
 
-        // 1. Ground profile ahead: the surface he could stand on. Index i
-        // is the point (i + 1) * spacing in front of his centre.
+        // MARK: 1. Ground profile
+
+        // Each entry represents the ground below a forward sample.
         let probeY = pose.feetY + B.groundProbeRise
         var surface: [Float?] = []
         surface.reserveCapacity(samples)
@@ -142,21 +143,23 @@ final class FrankensteinWorldProbe {
             )
         }
 
+        // Treat missing ground or a dangerously low surface as a gap.
         var hazardIndex: Int?
 
         for i in 0..<samples {
-            guard let h = surface[i] else {
+            guard let height = surface[i] else {
                 hazardIndex = i
                 break
             }
 
-            if h < groundY - B.maxSafeDrop {
+            if height < groundY - B.maxSafeDrop {
                 hazardIndex = i
                 break
             }
         }
 
-        // 2. Obstacles straight ahead: horizontal rays at body heights.
+        // MARK: 2. Horizontal obstacle scan
+
         var wallCentreDistance: Float?
         var wallOffset: Float = 0
 
@@ -183,20 +186,18 @@ final class FrankensteinWorldProbe {
             }
         }
 
-        // Measure the obstacle's height and thickness from above.
+        // Estimate obstacle height and depth.
         var obstacleHeight: Float = 0
         var obstacleDepth: Float = 0
-        var landingHeight: Float?
+        var obstacleLandingHeight: Float?
 
         if let wall = wallCentreDistance {
             let topY = pose.feetY + B.tallProbeRise
             let step: Float = 0.25
             var distance = wall + 0.08
-            var count = 0
+            var occupiedSamples = 0
 
-            while count < 12 {
-                // Measure along the line that actually hit the obstacle,
-                // which may be off to one side of his centre.
+            for index in 0..<12 {
                 let top = surfaceHeight(
                     x: pose.x + fx * distance + sx * wallOffset,
                     z: pose.z + fz * distance + sz * wallOffset,
@@ -204,39 +205,47 @@ final class FrankensteinWorldProbe {
                     depth: B.tallProbeRise + 14
                 )
 
-                if count == 0 {
-                    obstacleHeight = (top ?? pose.feetY) - pose.feetY
+                if index == 0 {
+                    obstacleHeight = max(
+                        0,
+                        (top ?? pose.feetY) - pose.feetY
+                    )
                 }
 
-                if let t = top, t > pose.feetY + 0.15 {
-                    count += 1
+                if let top, top > pose.feetY + 0.15 {
+                    occupiedSamples += 1
                     distance += step
                 } else {
-                    landingHeight = top
+                    obstacleLandingHeight = top
                     break
                 }
             }
 
-            obstacleDepth = Float(count) * step
+            obstacleDepth = Float(occupiedSamples) * step
         }
 
-        // 3. Overhead clearance ahead: vertical rays upward.
+        // MARK: 3. Overhead clearance
+
         var ceilingDistance: Float?
         var ceilingClearance = Float.greatestFiniteMagnitude
-        var c = 0
 
-        while c < samples {
-            let d = Float(c + 1) * spacing
+        // Check every profile interval so narrow overhead obstacles
+        // are less likely to be skipped.
+        for i in 0..<samples {
+            let d = Float(i + 1) * spacing
             var lowest = Float.greatestFiniteMagnitude
 
             for offset in lateral {
-                if let under = ceilingHeight(
+                if let underside = ceilingHeight(
                     x: pose.x + fx * d + sx * offset,
                     z: pose.z + fz * d + sz * offset,
                     fromY: pose.feetY + B.ceilingProbeRise,
                     rise: B.standingHeight + 0.3
                 ) {
-                    lowest = min(lowest, under - pose.feetY)
+                    lowest = min(
+                        lowest,
+                        underside - pose.feetY
+                    )
                 }
             }
 
@@ -245,40 +254,48 @@ final class FrankensteinWorldProbe {
                 ceilingClearance = lowest
                 break
             }
-
-            c += 3
         }
 
-        // 4. Choose the nearest feature.
+        // MARK: 4. Select nearest feature
+
         var best: (kind: FeatureKind, distance: Float)?
 
         func consider(_ kind: FeatureKind, _ distance: Float) {
             let value = max(0, distance)
 
-            if best == nil || value < best!.distance - 0.001 {
+            if best == nil || value < best!.distance {
                 best = (kind, value)
             }
         }
 
-        if let h = hazardIndex {
-            let edge = Float(h + 1) * spacing - spacing * 0.5
-            consider(.gap, edge - radius)
+        if let hazard = hazardIndex {
+            let firstMissingDistance = Float(hazard + 1) * spacing
+
+            // Approximate the near edge relative to Frankenstein's centre.
+            let nearEdgeDistance = max(
+                0,
+                firstMissingDistance - spacing * 0.5 - radius
+            )
+
+            consider(.gap, nearEdgeDistance)
         }
 
         if let wall = wallCentreDistance {
             consider(.obstacle, wall - radius)
         }
 
-        if let d = ceilingDistance {
-            consider(.ceiling, d - radius)
+        if let ceiling = ceilingDistance {
+            consider(.ceiling, ceiling - radius)
         }
 
-        // Ground a short way ahead, used to judge whether he can keep walking.
+        // Basic sample before classifying the nearest feature.
         let nearIndex = min(2, samples - 1)
-        var groundAhead = false
+        let groundAhead: Bool
 
-        if let h = surface[nearIndex] {
-            groundAhead = h >= groundY - B.maxSafeDrop
+        if let height = surface[nearIndex] {
+            groundAhead = height >= groundY - B.maxSafeDrop
+        } else {
+            groundAhead = false
         }
 
         var sample = FrankensteinTerrainSample()
@@ -297,29 +314,58 @@ final class FrankensteinWorldProbe {
 
         case .gap:
             let start = hazardIndex ?? 0
-            var landing: Int?
-            var j = start
+            var landingIndex: Int?
 
-            while j < samples {
-                if let h = surface[j], h >= groundY - B.maxSafeDrop {
-                    landing = j
-                    break
+            // Continue forward until a usable landing surface is found.
+            if start + 1 < samples {
+                for j in (start + 1)..<samples {
+                    guard let height = surface[j] else {
+                        continue
+                    }
+
+                    let isUsableHeight =
+                        height >= groundY - B.maxSafeDrop
+
+                    if isUsableHeight {
+                        landingIndex = j
+                        break
+                    }
                 }
-
-                j += 1
             }
 
             sample.terrain = .gap
             sample.isGroundAhead = false
+            sample.gapNearEdgeDistance = feature.distance
 
-            if let l = landing, let landed = surface[l] {
-                sample.gapWidth = Float(l - start) * spacing
-                sample.nextGroundHeight = landed
+            if let landingIndex,
+               let landingHeight = surface[landingIndex] {
+                let nearEdgeSampleDistance =
+                    Float(start + 1) * spacing - spacing * 0.5
+
+                let farEdgeSampleDistance =
+                    Float(landingIndex + 1) * spacing - spacing * 0.5
+
+                let nearEdge = max(0, nearEdgeSampleDistance)
+                let farEdge = max(nearEdge, farEdgeSampleDistance)
+
+                sample.gapNearEdgeDistance = max(
+                    0,
+                    nearEdge - radius
+                )
+                sample.gapFarEdgeDistance = farEdge
+                sample.gapWidth = max(0, farEdge - nearEdge)
+                sample.nextGroundHeight = landingHeight
+                sample.landingHeightDelta = landingHeight - groundY
+
+                // This is only a preliminary check: actual landing clearance
+                // should also be verified during flight.
                 sample.isLandingAreaClear = true
             } else {
-                // No far side within sensing range.
-                sample.gapWidth = Float(samples - start) * spacing + 1.0
+                // No far platform found within the probe's range.
+                sample.gapFarEdgeDistance = .infinity
+                sample.gapWidth = .infinity
                 sample.nextGroundHeight = groundY - B.maxSafeDrop
+                sample.landingHeightDelta = -B.maxSafeDrop
                 sample.isLandingAreaClear = false
             }
 
@@ -334,16 +380,18 @@ final class FrankensteinWorldProbe {
             } else if obstacleHeight <= B.maxJumpableHeight {
                 if obstacleDepth <= 1.0 {
                     sample.terrain = .hurdle
-                    sample.nextGroundHeight = landingHeight ?? groundY
-                    sample.isLandingAreaClear = landingHeight != nil
+                    sample.nextGroundHeight =
+                        obstacleLandingHeight ?? groundY
+                    sample.isLandingAreaClear =
+                        obstacleLandingHeight != nil
                 } else {
-                    // A platform to hop up onto.
                     sample.terrain = .raisedStep
-                    sample.nextGroundHeight = pose.feetY + obstacleHeight
+                    sample.nextGroundHeight =
+                        pose.feetY + obstacleHeight
                 }
 
             } else {
-                // Too tall to climb or jump: a wall or a closed door.
+                // A tall wall or closed door is not a normal jumpable hurdle.
                 sample.terrain = .uneven
                 sample.isLandingAreaClear = false
             }
@@ -356,4 +404,3 @@ final class FrankensteinWorldProbe {
         return sample
     }
 }
-

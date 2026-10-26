@@ -5,20 +5,22 @@ import UIKit
 enum FrankensteinTerrainScene {
 
     static func build(in scene: SCNScene) {
+        // Prevent duplicate course geometry if build is called again.
+        scene.rootNode.childNode(
+            withName: "ObstacleCourse",
+            recursively: false
+        )?.removeFromParentNode()
+
         let terrain = SCNNode()
         terrain.name = "ObstacleCourse"
         scene.rootNode.addChildNode(terrain)
 
-        // MARK: - Enlarged Door and Frame
+        // MARK: - Door and Frame
 
         let doorFrameColor = UIColor(
-            red: 0.35,
-            green: 0.20,
-            blue: 0.10,
-            alpha: 1
+            red: 0.35, green: 0.20, blue: 0.10, alpha: 1
         )
 
-        // Wider frame, scaled to match the enlarged door.
         addBox(
             to: terrain,
             name: "DoorFrameLeft",
@@ -43,7 +45,6 @@ enum FrankensteinTerrainScene {
             color: doorFrameColor
         )
 
-        // Door pivot: rotate this node later to open the door.
         let door = SCNNode()
         door.name = "Door"
         door.position = SCNVector3(5.84, 0, -7.0)
@@ -58,10 +59,7 @@ enum FrankensteinTerrainScene {
 
         let doorMaterial = SCNMaterial()
         doorMaterial.diffuse.contents = UIColor(
-            red: 0.48,
-            green: 0.27,
-            blue: 0.13,
-            alpha: 1
+            red: 0.48, green: 0.27, blue: 0.13, alpha: 1
         )
         doorMaterial.roughness.contents = 0.72
         doorPanel.materials = [doorMaterial]
@@ -72,12 +70,7 @@ enum FrankensteinTerrainScene {
         doorLeaf.categoryBitMask = FrankensteinPhysicalBody.solidMask
         door.addChildNode(doorLeaf)
 
-        // Enlarged metallic door handle.
-        let handle = SCNCylinder(
-            radius: 0.085,
-            height: 0.15
-        )
-
+        let handle = SCNCylinder(radius: 0.085, height: 0.15)
         let handleMaterial = SCNMaterial()
         handleMaterial.diffuse.contents = UIColor.systemYellow
         handle.materials = [handleMaterial]
@@ -88,28 +81,23 @@ enum FrankensteinTerrainScene {
         handleNode.categoryBitMask = FrankensteinPhysicalBody.solidMask
         door.addChildNode(handleNode)
 
-        // MARK: - Enlarged Table
+        // MARK: - Table
 
         let table = SCNNode()
         table.name = "Table"
         table.position = SCNVector3(5.5, 0, 1.0)
         terrain.addChildNode(table)
 
-        // Tabletop: approximately 2.8 × 1.68 units.
         addBox(
             to: table,
             name: "TableTop",
             position: SCNVector3(0, 1.48, 0),
             size: SCNVector3(2.8, 0.22, 1.68),
             color: UIColor(
-                red: 0.48,
-                green: 0.29,
-                blue: 0.15,
-                alpha: 1
+                red: 0.48, green: 0.29, blue: 0.15, alpha: 1
             )
         )
 
-        // Four legs, each approximately 1.4 units tall.
         let legPositions: [SCNVector3] = [
             SCNVector3(-1.15, 0.70, -0.66),
             SCNVector3( 1.15, 0.70, -0.66),
@@ -124,41 +112,66 @@ enum FrankensteinTerrainScene {
                 position: position,
                 size: SCNVector3(0.18, 1.4, 0.18),
                 color: UIColor(
-                    red: 0.34,
-                    green: 0.20,
-                    blue: 0.11,
-                    alpha: 1
+                    red: 0.34, green: 0.20, blue: 0.11, alpha: 1
                 )
             )
         }
 
-        // MARK: - Ground Platform
-        // Leaves the central gap visible.
+        // MARK: - Ground Platforms and Chasm
 
+        // Left platform: x spans approximately -10 to -1.
         addBox(
             to: terrain,
             name: "GroundLeft",
             position: SCNVector3(-5.5, -0.2, 0),
             size: SCNVector3(9, 0.4, 18),
             color: UIColor(
-                red: 0.24,
-                green: 0.30,
-                blue: 0.25,
-                alpha: 1
+                red: 0.24, green: 0.30, blue: 0.25, alpha: 1
             )
         )
 
+        // Right platform: x spans approximately 1 to 10.
         addBox(
             to: terrain,
             name: "GroundRight",
             position: SCNVector3(5.5, -0.2, 0),
             size: SCNVector3(9, 0.4, 18),
             color: UIColor(
-                red: 0.24,
-                green: 0.30,
-                blue: 0.25,
-                alpha: 1
+                red: 0.24, green: 0.30, blue: 0.25, alpha: 1
             )
+        )
+
+        // The open chasm is between x = -1 and x = 1.
+        // This low floor is intentionally below the safe-drop threshold.
+        // The probe should recognize it as a dangerous lower surface,
+        // not as a valid landing platform.
+        addBox(
+            to: terrain,
+            name: "ChasmPitFloor",
+            position: SCNVector3(0, -3.5, 0),
+            size: SCNVector3(1.9, 0.2, 18),
+            color: UIColor(
+                red: 0.12, green: 0.12, blue: 0.14, alpha: 1
+            )
+        )
+
+        // Non-solid visual markers at the edges of the chasm.
+        addBox(
+            to: terrain,
+            name: "ChasmNearEdgeMarker",
+            position: SCNVector3(1.0, 0.025, 0),
+            size: SCNVector3(0.08, 0.05, 18),
+            color: .systemRed,
+            solid: false
+        )
+
+        addBox(
+            to: terrain,
+            name: "ChasmFarEdgeMarker",
+            position: SCNVector3(-1.0, 0.025, 0),
+            size: SCNVector3(0.08, 0.05, 18),
+            color: .systemGreen,
+            solid: false
         )
 
         // MARK: - Course Boundaries
@@ -208,8 +221,6 @@ enum FrankensteinTerrainScene {
         )
 
         // MARK: - Crawl-Only Barrier
-        // Clearance of 1.45 above the ground: low enough that a roll
-        // (1.7 tall) cannot pass, so only crawling (1.3 tall) clears it.
 
         addBox(
             to: terrain,
@@ -253,10 +264,7 @@ enum FrankensteinTerrainScene {
             position: SCNVector3(3.0, 0.12, 1.8),
             size: SCNVector3(2.5, 0.25, 2.5),
             color: UIColor(
-                red: 0.48,
-                green: 0.38,
-                blue: 0.22,
-                alpha: 1
+                red: 0.48, green: 0.38, blue: 0.22, alpha: 1
             )
         )
 
@@ -266,22 +274,8 @@ enum FrankensteinTerrainScene {
             position: SCNVector3(5.5, 0.30, 3.8),
             size: SCNVector3(2.5, 0.6, 2.5),
             color: UIColor(
-                red: 0.48,
-                green: 0.38,
-                blue: 0.22,
-                alpha: 1
+                red: 0.48, green: 0.38, blue: 0.22, alpha: 1
             )
-        )
-
-        // MARK: - Gap Warning Marker
-
-        addBox(
-            to: terrain,
-            name: "GapMarkerNear",
-            position: SCNVector3(0, 0.03, 0.0),
-            size: SCNVector3(0.12, 0.06, 2.2),
-            color: .systemRed,
-            solid: false
         )
 
         // MARK: - Start and Finish
@@ -312,6 +306,7 @@ enum FrankensteinTerrainScene {
         light.color = UIColor.white
 
         let lightNode = SCNNode()
+        lightNode.name = "CourseLight"
         lightNode.light = light
         lightNode.position = SCNVector3(0, 8, 2)
         terrain.addChildNode(lightNode)
@@ -343,8 +338,6 @@ enum FrankensteinTerrainScene {
         node.name = name
         node.position = position
 
-        // Only geometry tagged solid is visible to his sensors and
-        // collision tests. Names are for labels and debugging only.
         node.categoryBitMask = solid
             ? FrankensteinPhysicalBody.solidMask
             : FrankensteinPhysicalBody.decorationMask
