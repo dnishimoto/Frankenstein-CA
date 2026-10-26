@@ -42,7 +42,7 @@ final class FrankensteinLearningPolicy {
         body: FrankensteinBodyState
     ) -> State {
         State(
-            terrain: terrain.terrain.rawValue,
+            terrain: terrainID(terrain.terrain.rawValue),
             distanceBand: terrain.distance < 0.8 ? 0 :
                 (terrain.distance < 2.0 ? 1 : 2),
             tiltBand: abs(body.tilt) < 0.12 ? 0 :
@@ -50,7 +50,20 @@ final class FrankensteinLearningPolicy {
             grounded: body.grounded
         )
     }
-
+    
+    private func terrainID(_ name: String) -> Int {
+        switch name {
+        case "flat":       return 0
+        case "hurdle":     return 1
+        case "gap":        return 2
+        case "lowCeiling": return 3
+        case "raisedStep": return 4
+        case "slope":      return 5
+        case "uneven":     return 6
+        case "unknown":    return 7
+        default:           return 8
+        }
+    }
     // MARK: - Action Selection
 
     func choose(
@@ -380,4 +393,28 @@ extension FrankensteinLearningPolicy:
             terminal: terminal
         )
     }
+    
+    // MARK: - Jump Outcome Reporting
+
+    func reportJumpOutcome(
+        succeeded: Bool,
+        terrain: FrankensteinTerrainSample,
+        body: FrankensteinBodyState,
+        terminal: Bool = false
+    ) {
+        guard actionPendingLearning,
+              lastAction == .jump else {
+            return
+        }
+
+        let reward: Float = succeeded ? 3.0 : -2.0
+
+        learn(
+            reward: reward,
+            terrain: terrain,
+            body: body,
+            terminal: terminal
+        )
+    }
+
 }

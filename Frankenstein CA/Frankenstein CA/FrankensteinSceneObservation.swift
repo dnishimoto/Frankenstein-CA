@@ -1,5 +1,4 @@
 
-
 import Foundation
 import SceneKit
 
@@ -13,8 +12,11 @@ struct FrankensteinSceneObservation {
     let isSolid: Bool
     let suggestedActions: [FrankensteinLearningAction]
 
+    // MARK: - Observe a Ray Hit
+
     static func observe(
-        hit: SCNHitTestResult
+        hit: SCNHitTestResult,
+        origin: SCNVector3
     ) -> FrankensteinSceneObservation {
 
         let node = hit.node
@@ -27,12 +29,26 @@ struct FrankensteinSceneObservation {
         )
 
         let isSolid =
-            node.categoryBitMask &
-            FrankensteinPhysicalBody.solidMask != 0
+            (node.categoryBitMask &
+             FrankensteinPhysicalBody.solidMask) != 0
+
+        // SCNHitTestResult has no `distance` property.
+        // Measure from the ray origin to the actual world-space hit point.
+        let point = hit.worldCoordinates
+
+        let dx = point.x - origin.x
+        let dy = point.y - origin.y
+        let dz = point.z - origin.z
+
+        let distance = sqrt(
+            dx * dx +
+            dy * dy +
+            dz * dz
+        )
 
         return FrankensteinSceneObservation(
             objectName: node.name ?? "Unnamed object",
-            distance: hit.distance,
+            distance: distance,
             width: dimensions.width,
             height: dimensions.height,
             length: dimensions.length,
@@ -41,6 +57,8 @@ struct FrankensteinSceneObservation {
             suggestedActions: terrain.suggestedActions
         )
     }
+
+    // MARK: - Object Dimensions
 
     private static func dimensionsOf(
         _ node: SCNNode
@@ -54,8 +72,7 @@ struct FrankensteinSceneObservation {
             )
         }
 
-        // Fallback for non-box geometry:
-        // use the node's actual local geometry bounds.
+        // Fallback for non-box geometry.
         if let geometry = node.geometry {
             let bounds = geometry.boundingBox
 
@@ -69,6 +86,8 @@ struct FrankensteinSceneObservation {
         return (0, 0, 0)
     }
 
+    // MARK: - Terrain Classification
+
     private static func classify(
         nodeName: String,
         dimensions: (width: Float, height: Float, length: Float),
@@ -77,13 +96,13 @@ struct FrankensteinSceneObservation {
 
         let name = nodeName.lowercased()
 
-        // A detected chasm edge is evidence of a gap.
+        // A detected chasm or gap marker.
         if name.contains("chasm") ||
            name.contains("gap") {
             return .gap
         }
 
-        // Overhead objects may require a lower posture.
+        // Objects that may require a lower posture.
         if name.contains("lowceiling") ||
            name.contains("lowbarrier") {
             return .lowCeiling
@@ -101,7 +120,7 @@ struct FrankensteinSceneObservation {
             return .uneven
         }
 
-        if name.lowercased().contains("slope") {
+        if name.contains("slope") {
             return .slope
         }
 
@@ -111,8 +130,8 @@ struct FrankensteinSceneObservation {
             return .flat
         }
 
-        // Unknown objects remain unknown rather than being
-        // incorrectly labeled as safe ground.
+        // Do not treat an unrecognized object as safe ground.
         return .unknown
     }
 }
+

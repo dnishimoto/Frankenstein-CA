@@ -2,19 +2,12 @@
 import Foundation
 import SceneKit
 import simd
+import SwiftUI
+
 
 // MARK: - Coordinator
 
 /// Coordinates perception, action selection, locomotion, and UI reporting.
-///
-/// Intended frame sequence:
-/// 1. Sense the scene.
-/// 2. Convert sensor results into a terrain sample.
-/// 3. Ask locomotion for an action.
-/// 4. Apply the movement command.
-/// 5. Report the observed state to the UI.
-///
-/// Adapt the integration points to match the actual project interfaces.
 final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     // MARK: Public callbacks
@@ -146,29 +139,23 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         lastDetectedObject = sensed.object
         publishDetectedObject(sensed.object)
 
-        // 2. Interactions that do not require a new locomotion API.
+        // 2. Interactions
         updateHeldObject()
         updateDoorInteraction(character: character, sensedObject: sensed.object)
 
-        // 3. Convert sensing into the existing terrain-sample type.
-        // The exact fields and enum cases must match the project's definition.
+        // 3. Terrain sample
         let terrainSample = makeTerrainSample(from: sensed)
 
-        // 4. Existing locomotion controller chooses movement.
-        // This call assumes the project uses step(deltaTime:terrain:).
-        // If your current controller uses a feedback argument, adapt this line.
+        // 4. Locomotion decision
         let output = locomotion.step(
-            deltaTime: dt,
+            deltaTime: Float(dt),
             terrain: terrainSample
         )
 
         currentAction = locomotion.activeActionName
         onActionChanged?(currentAction)
 
-        // 5. Apply the locomotion output to the character node.
-        // This reference implementation applies horizontal movement directly.
-        // If FrankensteinBodyDynamics already owns physics, use that instead
-        // to avoid two systems moving the same character.
+        // 5. Apply movement
         applyMovement(
             output: output,
             character: character,
@@ -207,6 +194,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         let start = character.presentation.worldPosition
         let direction = normalizedForward(for: character)
+
         let rayOrigin = SCNVector3(
             start.x,
             start.y + rayStartHeight,
@@ -220,13 +208,15 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             length: rayLength,
             excluding: character
         ) {
-            let distance = distanceBetween(rayOrigin, hit.worldPosition)
+            let hitPosition = hit.worldCoordinates
+            let distance = distanceBetween(rayOrigin, hitPosition)
+
             result.obstacleDistance = distance
             result.hitNode = hit.node
 
             let info = makeDetectedObjectInfo(
                 node: hit.node,
-                hitPosition: hit.worldPosition,
+                hitPosition: hitPosition,
                 distance: distance
             )
             result.object = info
@@ -247,7 +237,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             }
         }
 
-        // Probe for ground ahead to help distinguish a gap.
+        // Probe for ground ahead.
         let groundProbeOrigin = SCNVector3(
             start.x + direction.x * 1.0,
             start.y + rayStartHeight,
@@ -260,25 +250,29 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             excluding: character
         ) {
             result.groundAhead = true
-            result.groundHeight = groundHit.worldPosition.y
+            result.groundHeight = groundHit.worldCoordinates.y
         } else {
             result.groundAhead = false
             result.terrain = "gap"
         }
 
-        // If no obstacle was found but the table is directly ahead,
-        // explicitly expose the low-ceiling context.
+        // Explicitly expose table / low-ceiling context.
         if result.object == nil,
            let table = tableNode,
            isInFront(table, of: character, within: rayLength) {
+
+            let characterPosition = character.presentation.worldPosition
+            let tablePosition = table.presentation.worldPosition
+
             let info = makeDetectedObjectInfo(
                 node: table,
-                hitPosition: table.presentation.worldPosition,
+                hitPosition: tablePosition,
                 distance: distanceBetween(
-                    character.presentation.worldPosition,
-                    table.presentation.worldPosition
+                    characterPosition,
+                    tablePosition
                 )
             )
+
             result.object = info
             result.terrain = "low ceiling"
         }
@@ -300,13 +294,15 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             origin.z + direction.z * length
         )
 
+        let options: [SCNHitTestOption: Any] = [
+            .searchMode: SCNHitTestSearchMode.all.rawValue,
+            .ignoreHiddenNodes: true
+        ]
+
         let results = scene.rootNode.hitTestWithSegment(
             from: origin,
             to: end,
-            options: [
-                .searchMode: SCNHitTestSearchMode.all.rawValue,
-                .ignoreHiddenNodes: true
-            ]
+            options: options
         )
 
         return results.first { hit in
@@ -324,22 +320,28 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     ) -> SCNHitTestResult? {
         guard let scene else { return nil }
 
-        let end = SCNVector3(origin.x, origin.y - length, origin.z)
+        let end = SCNVector3(
+            origin.x,
+            origin.y - length,
+            origin.z
+        )
+
+        let options: [SCNHitTestOption: Any] = [
+            .searchMode: SCNHitTestSearchMode.all.rawValue,
+            .ignoreHiddenNodes: true
+        ]
 
         let results = scene.rootNode.hitTestWithSegment(
             from: origin,
             to: end,
-            options: [
-                .searchMode: SCNHitTestSearchMode.all.rawValue,
-                .ignoreHiddenNodes: true
-            ]
+            options: options
         )
 
         return results.first { hit in
             let node = hit.node
             return node !== character &&
                    !node.isDescendant(of: character) &&
-                   node.physicsBody?.categoryBitMask != 0
+                   node.physicsBody != nil
         }
     }
 
@@ -395,8 +397,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     ) {
         let dt = Float(deltaTime)
 
-        // Avoid moving the character here if the project already has a
-        // dedicated dynamics/physics controller applying this output.
         let heading = output.heading
         let speed = output.speed
 
@@ -406,8 +406,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         character.position.x += dx
         character.position.z += dz
 
-        // Use the output's jump/crouch signals if the actual character rig
-        // has corresponding animation handlers.
         if output.jump > 0 {
             lastStatus = "Jump requested"
         } else if output.crouch > 0 {
@@ -432,9 +430,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         guard distance <= objectInteractionDistance else { return }
 
-        // Do not rotate a door unless the node is attached and the door has
-        // been explicitly registered with attachDoor(_:).
         openedDoor = true
+
         door.runAction(
             SCNAction.rotateBy(
                 x: 0,
@@ -443,15 +440,13 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 duration: 0.7
             )
         )
+
         lastStatus = "Door opening"
         publishDebug("Door interaction triggered")
     }
 
     // MARK: - Pickup, carry, place
 
-    /// Picks up a registered pickupable object when it is within reach.
-    /// This simple reference version attaches it to the supplied hand node.
-    /// Prefer a dedicated object-manipulation module for physics restoration.
     @discardableResult
     func pickUp(_ node: SCNNode) -> Bool {
         guard !isHoldingObject,
@@ -464,18 +459,21 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             hand.presentation.worldPosition,
             node.presentation.worldPosition
         )
+
         guard distance <= objectInteractionDistance else {
             lastStatus = "Object too far away to pick up"
             return false
         }
 
-        node.physicsBody?.velocity = .zero
-        node.physicsBody?.angularVelocity = .zero
+        node.physicsBody?.velocity = SCNVector3(0, 0, 0)
+        node.physicsBody?.angularVelocity = SCNVector4(0, 0, 0, 0)
         node.physicsBody?.type = .kinematic
 
         let worldTransform = node.presentation.worldTransform
+
         node.removeFromParentNode()
         hand.addChildNode(node)
+
         node.transform = hand.convertTransform(
             worldTransform,
             from: scene?.rootNode
@@ -495,22 +493,24 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         return true
     }
 
-    /// Places a held object at a world-space position.
     func placeHeldObject(at worldPosition: SCNVector3) {
-        guard let object = heldObject, let root = scene?.rootNode else {
+        guard let object = heldObject,
+              let root = scene?.rootNode else {
             return
         }
 
         let worldTransform = object.presentation.worldTransform
+
         object.removeFromParentNode()
         root.addChildNode(object)
+
         object.transform = worldTransform
         object.position = worldPosition
 
         if let body = object.physicsBody {
             body.type = .dynamic
-            body.velocity = .zero
-            body.angularVelocity = .zero
+            body.velocity = SCNVector3(0, 0, 0)
+            body.angularVelocity = SCNVector4(0, 0, 0, 0)
         }
 
         heldObject = nil
@@ -533,6 +533,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     private func normalizedForward(for node: SCNNode) -> SCNVector3 {
         let transform = node.presentation.worldTransform
+
         let raw = SCNVector3(
             -transform.m31,
             -transform.m32,
@@ -543,7 +544,9 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             raw.x * raw.x + raw.y * raw.y + raw.z * raw.z
         )
 
-        guard length > 0.0001 else { return forwardDirection }
+        guard length > 0.0001 else {
+            return forwardDirection
+        }
 
         return SCNVector3(
             raw.x / length,
@@ -570,7 +573,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     private func worldDimensions(of node: SCNNode) -> SCNVector3 {
         let (minBound, maxBound) = node.boundingBox
-        let scale = node.presentation.worldScale
+        let scale = worldScale(of: node)
 
         return SCNVector3(
             abs((maxBound.x - minBound.x) * scale.x),
@@ -579,12 +582,37 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         )
     }
 
+    private func worldScale(of node: SCNNode) -> SCNVector3 {
+        let transform = node.presentation.worldTransform
+
+        let scaleX = sqrt(
+            transform.m11 * transform.m11 +
+            transform.m21 * transform.m21 +
+            transform.m31 * transform.m31
+        )
+
+        let scaleY = sqrt(
+            transform.m12 * transform.m12 +
+            transform.m22 * transform.m22 +
+            transform.m32 * transform.m32
+        )
+
+        let scaleZ = sqrt(
+            transform.m13 * transform.m13 +
+            transform.m23 * transform.m23 +
+            transform.m33 * transform.m33
+        )
+
+        return SCNVector3(scaleX, scaleY, scaleZ)
+    }
+
     private func isPickupable(_ node: SCNNode) -> Bool {
         if node.userData?["pickupable"] as? Bool == true {
             return true
         }
 
         let name = (node.name ?? "").lowercased()
+
         return name.contains("pickup") ||
                name.contains("movable") ||
                name.contains("carryable") ||
@@ -593,6 +621,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     private func isLowCeiling(_ node: SCNNode) -> Bool {
         let name = (node.name ?? "").lowercased()
+
         return name.contains("table") ||
                name.contains("ceiling") ||
                name.contains("lowbarrier")
@@ -607,7 +636,11 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         let t = target.presentation.worldPosition
 
         let direction = normalizedForward(for: character)
-        let toTarget = SCNVector3(t.x - c.x, t.y - c.y, t.z - c.z)
+        let toTarget = SCNVector3(
+            t.x - c.x,
+            t.y - c.y,
+            t.z - c.z
+        )
 
         let targetDistance = sqrt(
             toTarget.x * toTarget.x +

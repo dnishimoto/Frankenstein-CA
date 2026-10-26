@@ -629,6 +629,7 @@ final class FrankensteinLocomotion {
         return 0
     }
 
+
     private func statusDescription(
         terrain: FrankensteinTerrainSample
     ) -> String {
@@ -639,6 +640,7 @@ final class FrankensteinLocomotion {
         if jumpInProgress {
             return "Jumping — adaptive attempt \(jumpAttempts + 1)"
         }
+
 
         switch terrain.terrain {
         case .gap:
@@ -661,8 +663,12 @@ final class FrankensteinLocomotion {
 
         case .flat:
             return "Walking"
+
+        default:
+            return "Unknown terrain — assessing environment"
         }
     }
+
 
     // MARK: - Reset
 
@@ -703,5 +709,20 @@ final class FrankensteinLocomotion {
         lastActualDisplacement = 0
 
         // Keep policy learning intact across episodes.
+    }
+    func reportJumpOutcome(
+        succeeded: Bool,
+        terrain: FrankensteinTerrainSample,
+        body: FrankensteinBodyState,
+        terminal: Bool = false
+    ) {
+        let reward: Float = succeeded ? 3.0 : -2.0
+
+        policy.recordCompletedAction(
+            reward: reward,
+            terrain: terrain,
+            body: body,
+            terminal: terminal
+        )
     }
 }

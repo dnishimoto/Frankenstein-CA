@@ -1,8 +1,26 @@
 
 import SceneKit
 import UIKit
+import Foundation
 
 enum FrankensteinTerrainScene {
+
+    // MARK: - Alleya CA Metadata Store
+
+    private final class MetadataStorage: @unchecked Sendable {
+        let lock = NSLock()
+        var values: [ObjectIdentifier: [String: Any]] = [:]
+    }
+
+    private static let metadataStorage = MetadataStorage()
+
+    /// Returns metadata registered for a detected SceneKit node.
+    static func metadata(for node: SCNNode) -> [String: Any]? {
+        metadataStorage.lock.lock()
+        defer { metadataStorage.lock.unlock() }
+
+        return metadataStorage.values[ObjectIdentifier(node)]
+    }
 
     // MARK: - Build Course
 
@@ -21,7 +39,10 @@ enum FrankensteinTerrainScene {
         // MARK: - Door and Frame
 
         let doorFrameColor = UIColor(
-            red: 0.35, green: 0.20, blue: 0.10, alpha: 1
+            red: 0.35,
+            green: 0.20,
+            blue: 0.10,
+            alpha: 1
         )
 
         addBox(
@@ -72,7 +93,10 @@ enum FrankensteinTerrainScene {
 
         let doorMaterial = SCNMaterial()
         doorMaterial.diffuse.contents = UIColor(
-            red: 0.48, green: 0.27, blue: 0.13, alpha: 1
+            red: 0.48,
+            green: 0.27,
+            blue: 0.13,
+            alpha: 1
         )
         doorMaterial.roughness.contents = 0.72
         doorPanel.materials = [doorMaterial]
@@ -145,7 +169,10 @@ enum FrankensteinTerrainScene {
             position: SCNVector3(0, 1.48, 0),
             size: SCNVector3(2.8, 0.22, 1.68),
             color: UIColor(
-                red: 0.48, green: 0.29, blue: 0.15, alpha: 1
+                red: 0.48,
+                green: 0.29,
+                blue: 0.15,
+                alpha: 1
             ),
             objectType: "tableTop",
             canCrawlUnder: true
@@ -165,7 +192,10 @@ enum FrankensteinTerrainScene {
                 position: position,
                 size: SCNVector3(0.18, 1.4, 0.18),
                 color: UIColor(
-                    red: 0.34, green: 0.20, blue: 0.11, alpha: 1
+                    red: 0.34,
+                    green: 0.20,
+                    blue: 0.11,
+                    alpha: 1
                 ),
                 objectType: "tableLeg"
             )
@@ -179,7 +209,10 @@ enum FrankensteinTerrainScene {
             position: SCNVector3(-5.5, -0.2, 0),
             size: SCNVector3(9, 0.4, 18),
             color: UIColor(
-                red: 0.24, green: 0.30, blue: 0.25, alpha: 1
+                red: 0.24,
+                green: 0.30,
+                blue: 0.25,
+                alpha: 1
             ),
             objectType: "ground"
         )
@@ -190,7 +223,10 @@ enum FrankensteinTerrainScene {
             position: SCNVector3(5.5, -0.2, 0),
             size: SCNVector3(9, 0.4, 18),
             color: UIColor(
-                red: 0.24, green: 0.30, blue: 0.25, alpha: 1
+                red: 0.24,
+                green: 0.30,
+                blue: 0.25,
+                alpha: 1
             ),
             objectType: "ground"
         )
@@ -203,7 +239,10 @@ enum FrankensteinTerrainScene {
             position: SCNVector3(0, -3.5, 0),
             size: SCNVector3(1.9, 0.2, 18),
             color: UIColor(
-                red: 0.12, green: 0.12, blue: 0.14, alpha: 1
+                red: 0.12,
+                green: 0.12,
+                blue: 0.14,
+                alpha: 1
             ),
             objectType: "dangerousLowerGround"
         )
@@ -329,7 +368,10 @@ enum FrankensteinTerrainScene {
             position: SCNVector3(3.0, 0.12, 1.8),
             size: SCNVector3(2.5, 0.25, 2.5),
             color: UIColor(
-                red: 0.48, green: 0.38, blue: 0.22, alpha: 1
+                red: 0.48,
+                green: 0.38,
+                blue: 0.22,
+                alpha: 1
             ),
             objectType: "unevenGround"
         )
@@ -340,7 +382,10 @@ enum FrankensteinTerrainScene {
             position: SCNVector3(5.5, 0.30, 3.8),
             size: SCNVector3(2.5, 0.6, 2.5),
             color: UIColor(
-                red: 0.48, green: 0.38, blue: 0.22, alpha: 1
+                red: 0.48,
+                green: 0.38,
+                blue: 0.22,
+                alpha: 1
             ),
             objectType: "unevenGround"
         )
@@ -378,6 +423,7 @@ enum FrankensteinTerrainScene {
         lightNode.name = "CourseLight"
         lightNode.light = light
         lightNode.position = SCNVector3(0, 8, 2)
+
         terrain.addChildNode(lightNode)
     }
 
@@ -444,23 +490,22 @@ enum FrankensteinTerrainScene {
         canOpen: Bool = false,
         canCrawlUnder: Bool = false
     ) {
-        let data = node.userData ?? NSMutableDictionary()
+        let data: [String: Any] = [
+            "objectName": name,
+            "objectType": type,
+            "width": Double(size.x),
+            "height": Double(size.y),
+            "length": Double(size.z),
+            "isSolid": solid,
+            "isTraversable": !solid,
+            "canOpen": canOpen,
+            "canCrawlUnder": canCrawlUnder,
+            "alleyaObservationEnabled": true
+        ]
 
-        data["objectName"] = name
-        data["objectType"] = type
-
-        data["width"] = NSNumber(value: Double(size.x))
-        data["height"] = NSNumber(value: Double(size.y))
-        data["length"] = NSNumber(value: Double(size.z))
-
-        data["isSolid"] = NSNumber(value: solid)
-        data["isTraversable"] = NSNumber(value: !solid)
-        data["canOpen"] = NSNumber(value: canOpen)
-        data["canCrawlUnder"] = NSNumber(value: canCrawlUnder)
-
-        data["alleyaObservationEnabled"] = NSNumber(value: true)
-
-        node.userData = data
+        metadataStorage.lock.lock()
+        metadataStorage.values[ObjectIdentifier(node)] = data
+        metadataStorage.lock.unlock()
     }
 
     // MARK: - Physics
