@@ -1,395 +1,672 @@
 
 import Foundation
 import SceneKit
-import UIKit
+import simd
 
-/// Runs the simulation each frame:
+// MARK: - Coordinator
+
+/// Coordinates perception, action selection, locomotion, and UI reporting.
 ///
-///   1. sense the world from his true pose (rays against solid geometry)
-///   2. locomotion asks the Q policy for a skill and drives the body
-///   3. the physical body moves through the real scene and reports what
-///      actually happened (collisions, landings, falls, goal)
-///   4. that report is fed back to locomotion on the next frame, which
-///      measures each finished skill and teaches the policy once.
+/// Intended frame sequence:
+/// 1. Sense the scene.
+/// 2. Convert sensor results into a terrain sample.
+/// 3. Ask locomotion for an action.
+/// 4. Apply the movement command.
+/// 5. Report the observed state to the UI.
+///
+/// Adapt the integration points to match the actual project interfaces.
 final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
-    private typealias B = FrankensteinPhysicalBody
+    // MARK: Public callbacks
 
-    let character: FrankensteinCharacter
-    let ca: FrankensteinCA
-
-    var onStats: ((Int, Int) -> Void)?
+    var onStats: ((String) -> Void)?
     var onDebugInfo: ((String) -> Void)?
+    var onDetectedObject: ((DetectedObjectInfo?) -> Void)?
+    var onActionChanged: ((String) -> Void)?
+
+    // MARK: Scene references
+
+    private weak var scene: SCNScene?
+    private weak var characterNode: SCNNode?
+    private weak var doorNode: SCNNode?
+    private weak var tableNode: SCNNode?
+
+    /// Set this to the character's actual hand/grip node to enable pickup.
+    private weak var handNode: SCNNode?
+
+    // MARK: Runtime state
 
     private let locomotion: FrankensteinLocomotion
-    private let dynamics = FrankensteinBodyDynamics()
-    private let probe = FrankensteinWorldProbe()
 
-    // Set to true when sensor rays are needed for debugging.
-    private let debugSensors: Bool
+    private var isRunning = false
+    private var previousTime: TimeInterval = 0
 
-    private var lastUpdateTime: TimeInterval = 0
-    private var lastFeedback = FrankensteinMotionFeedback()
-    private var lastTerrain = FrankensteinTerrainSample()
-    private var frameCounter = 0
+    private(set) var lastDetectedObject: DetectedObjectInfo?
+    private(set) var currentAction = "idle"
+    private(set) var currentTerrain = "unknown"
+    private(set) var lastStatus = "Ready"
 
-    // Sensing is the most expensive part of a frame; every other frame
-    // is plenty at 60 fps.
-    private let senseEveryNFrames = 2
+    // MARK: Configuration
 
-    // Reset requests are consumed by the renderer.
-    private let resetLock = NSLock()
-    private var resetRequested = false
+    var rayLength: Float = 3.0
+    var rayStartHeight: Float = 0.9
+    var groundRayLength: Float = 4.0
+    var objectInteractionDistance: Float = 1.25
+
+    /// SceneKit's forward direction for a character facing -Z.
+    var forwardDirection = SCNVector3(0, 0, -1)
+
+    private var openedDoor = false
+    private var isHoldingObject = false
+    private weak var heldObject: SCNNode?
+
+    // MARK: Initialization
 
     init(
-        character: FrankensteinCharacter,
-        ca: FrankensteinCA,
-        onStats: ((Int, Int) -> Void)? = nil,
-        onDebugInfo: ((String) -> Void)? = nil,
-        debugSensors: Bool = false
+        scene: SCNScene,
+        characterNode: SCNNode,
+        locomotion: FrankensteinLocomotion
     ) {
-        self.character = character
-        self.ca = ca
-        self.onStats = onStats
-        self.onDebugInfo = onDebugInfo
-        self.debugSensors = debugSensors
-        self.locomotion = FrankensteinLocomotion()
-
+        self.scene = scene
+        self.characterNode = characterNode
+        self.locomotion = locomotion
         super.init()
-
-        lastFeedback = idleFeedback()
-        character.root.position = dynamics.position
     }
 
-    // MARK: - Scene update
+    // MARK: Lifecycle
+
+    func start() {
+        isRunning = true
+        previousTime = 0
+        lastStatus = "Running"
+        publishDebug("Coordinator started")
+    }
+
+    func stop() {
+        isRunning = false
+        lastStatus = "Stopped"
+        publishDebug("Coordinator stopped")
+    }
+
+    func reset() {
+        isRunning = false
+        previousTime = 0
+        lastDetectedObject = nil
+        currentAction = "idle"
+        currentTerrain = "unknown"
+        openedDoor = false
+        isHoldingObject = false
+        heldObject = nil
+        lastStatus = "Reset"
+        publishDetectedObject(nil)
+        publishDebug("Coordinator reset")
+    }
+
+    // MARK: Scene setup
+
+    func attachDoor(_ node: SCNNode) {
+        doorNode = node
+    }
+
+    func attachTable(_ node: SCNNode) {
+        tableNode = node
+    }
+
+    func attachHand(_ node: SCNNode) {
+        handNode = node
+    }
+
+    // MARK: Scene renderer
 
     func renderer(
         _ renderer: SCNSceneRenderer,
         updateAtTime time: TimeInterval
     ) {
-        processPendingReset()
+        guard isRunning,
+              let character = characterNode,
+              let sceneRoot = scene?.rootNode else {
+            return
+        }
 
-        guard let scene = renderer.scene else { return }
-
-        probe.root = scene.rootNode
-
-        let deltaTime: Float
-
-        if lastUpdateTime == 0 {
-            deltaTime = 1.0 / 60.0
+        let dt: TimeInterval
+        if previousTime == 0 {
+            dt = 1.0 / 60.0
         } else {
-            deltaTime = Float(
-                min(max(time - lastUpdateTime, 0), 0.05)
-            )
+            dt = min(max(time - previousTime, 1.0 / 240.0), 0.05)
         }
+        previousTime = time
 
-        lastUpdateTime = time
-        frameCounter += 1
-
-        // 1. Advance the cellular automaton (drives the body animation).
-        let caMotion = ca.step(deltaTime: deltaTime)
-
-        // 2. Sense the world from his true physical pose.
-        let heading = locomotion.output.heading
-
-        if frameCounter % senseEveryNFrames == 1 {
-            lastTerrain = probe.sense(
-                pose: dynamics.pose(heading: heading)
-            )
-        }
-
-        let terrain = lastTerrain
-
-        // 3. The Q policy chooses and runs skills; the previous frame's
-        // measured result is what it learns from.
-        let locomotionOutput = locomotion.step(
-            deltaTime: deltaTime,
-            terrain: terrain,
-            feedback: lastFeedback
+        // 1. Perception
+        let sensed = senseEnvironment(
+            character: character,
+            sceneRoot: sceneRoot
         )
 
-        // 4. The body tries to do it against real geometry.
-        let feedback = dynamics.advance(
-            deltaTime: deltaTime,
-            command: FrankensteinBodyCommand(
-                speed: locomotionOutput.speed,
-                heading: locomotionOutput.heading,
-                posture: locomotionOutput.posture,
-                jumpRequested: locomotionOutput.jumpRequested
-            ),
-            probe: probe
+        currentTerrain = sensed.terrain
+        lastDetectedObject = sensed.object
+        publishDetectedObject(sensed.object)
+
+        // 2. Interactions that do not require a new locomotion API.
+        updateHeldObject()
+        updateDoorInteraction(character: character, sensedObject: sensed.object)
+
+        // 3. Convert sensing into the existing terrain-sample type.
+        // The exact fields and enum cases must match the project's definition.
+        let terrainSample = makeTerrainSample(from: sensed)
+
+        // 4. Existing locomotion controller chooses movement.
+        // This call assumes the project uses step(deltaTime:terrain:).
+        // If your current controller uses a feedback argument, adapt this line.
+        let output = locomotion.step(
+            deltaTime: dt,
+            terrain: terrainSample
         )
 
-        lastFeedback = feedback
+        currentAction = locomotion.activeActionName
+        onActionChanged?(currentAction)
 
-        // 5. Show him where the body really is.
-        var visual = locomotionOutput
-        visual.walkPhase = caMotion.walkPhase
-        visual.armLift = caMotion.armLift
-        visual.headTurn = caMotion.headTurn
-        visual.mouthOpen = caMotion.mouthOpen
+        // 5. Apply the locomotion output to the character node.
+        // This reference implementation applies horizontal movement directly.
+        // If FrankensteinBodyDynamics already owns physics, use that instead
+        // to avoid two systems moving the same character.
+        applyMovement(
+            output: output,
+            character: character,
+            deltaTime: dt
+        )
 
-        character.root.position = dynamics.position
-        character.applyLocomotion(visual)
+        // 6. UI diagnostics
+        publishDebug(
+            """
+            Action: \(currentAction)
+            Terrain: \(currentTerrain)
+            Object: \(sensed.object?.name ?? "none")
+            Distance: \(sensed.object.map { String(format: "%.2f", $0.distance) } ?? "—")
+            Status: \(lastStatus)
+            """
+        )
+    }
 
-        // 6. A finished attempt (goal or fall) starts a new one from the
-        // start line. What he has learned is kept.
-        if let end = locomotion.pendingEpisodeEnd {
-            logEpisode(end)
-            locomotion.resetEpisode()
-            dynamics.teleport(to: B.startPosition)
-            lastFeedback = idleFeedback()
-            lastTerrain = FrankensteinTerrainSample()
-            character.root.position = dynamics.position
-        }
+    // MARK: - Perception
 
-        // 7. Publish UI information at a reduced update rate.
-        if onStats != nil || onDebugInfo != nil {
-            if Int(time * 20) !=
-                Int((time - Double(deltaTime)) * 20) {
+    private struct SensorResult {
+        var terrain: String = "flat"
+        var obstacleDistance: Float = .infinity
+        var obstacleHeight: Float = 0
+        var groundAhead: Bool = true
+        var groundHeight: Float = 0
+        var object: DetectedObjectInfo?
+        var hitNode: SCNNode?
+    }
 
-                let generation = ca.generationCount
-                let liveCells = ca.liveCellCount
+    private func senseEnvironment(
+        character: SCNNode,
+        sceneRoot: SCNNode
+    ) -> SensorResult {
+        var result = SensorResult()
 
-                if let onStats = onStats {
-                    DispatchQueue.main.async {
-                        onStats(generation, liveCells)
-                    }
-                }
+        let start = character.presentation.worldPosition
+        let direction = normalizedForward(for: character)
+        let rayOrigin = SCNVector3(
+            start.x,
+            start.y + rayStartHeight,
+            start.z
+        )
 
-                if onDebugInfo != nil {
-                    publishDebugInfo(
-                        terrain: terrain,
-                        output: locomotionOutput,
-                        feedback: feedback
-                    )
-                }
+        // Raycast forward at torso height.
+        if let hit = firstHit(
+            from: rayOrigin,
+            direction: direction,
+            length: rayLength,
+            excluding: character
+        ) {
+            let distance = distanceBetween(rayOrigin, hit.worldPosition)
+            result.obstacleDistance = distance
+            result.hitNode = hit.node
+
+            let info = makeDetectedObjectInfo(
+                node: hit.node,
+                hitPosition: hit.worldPosition,
+                distance: distance
+            )
+            result.object = info
+
+            let dimensions = worldDimensions(of: hit.node)
+            result.obstacleHeight = dimensions.y
+
+            if dimensions.y < 0.65 {
+                result.terrain = "low obstacle"
+            } else if dimensions.y < 1.25 {
+                result.terrain = "hurdle"
+            } else {
+                result.terrain = "wall or object"
+            }
+
+            if isLowCeiling(hit.node) {
+                result.terrain = "low ceiling"
             }
         }
 
-        // 8. Draw optional sensor visualization.
-        if debugSensors {
-            visualizeSensorRays(
-                in: scene,
-                position: dynamics.position,
-                heading: locomotionOutput.heading,
-                terrain: terrain
-            )
-        }
-    }
-
-    private func idleFeedback() -> FrankensteinMotionFeedback {
-        var feedback = FrankensteinMotionFeedback()
-        feedback.position = dynamics.position
-        feedback.grounded = true
-        feedback.feetHeight = dynamics.feetY
-        feedback.bodyHeight = dynamics.bodyHeight
-        return feedback
-    }
-
-    // MARK: - Learning log
-
-    private func logEpisode(_ end: FrankensteinEpisodeEnd) {
-        let policy = locomotion.policy
-
-        let result = end == .reachedGoal ? "REACHED GOAL" : "FELL"
-
-        let explore = String(format: "%.2f", policy.exploration)
-        let jumps = "\(locomotion.successfulJumps)/\(locomotion.jumpAttempts)"
-
-        let line = """
-        [Q] attempt \(locomotion.episodes): \(result) | \
-        skills \(locomotion.actionsCompleted) | \
-        states \(policy.learnedStateCount) | \
-        updates \(policy.updateCount) | explore \(explore) | \
-        jumps \(jumps) | collisions \(locomotion.collisions) | \
-        falls \(locomotion.falls) | goals \(locomotion.goalsReached)
-        """
-
-        print(line)
-    }
-
-    // MARK: - Optional sensor visualization
-
-    private func visualizeSensorRays(
-        in scene: SCNScene,
-        position: SCNVector3,
-        heading: Float,
-        terrain: FrankensteinTerrainSample
-    ) {
-        let root: SCNNode
-
-        if let existingRoot = scene.rootNode.childNode(
-            withName: "SensorDebug",
-            recursively: false
-        ) {
-            root = existingRoot
-        } else {
-            root = makeSensorDebugRoot(in: scene)
-        }
-
-        // Only rebuild the ray when debug visualization is enabled.
-        root.childNodes.forEach {
-            $0.removeFromParentNode()
-        }
-
-        let forwardX = -sin(heading)
-        let forwardZ = -cos(heading)
-
-        let start = SCNVector3(
-            position.x,
-            position.y + 0.8,
-            position.z
+        // Probe for ground ahead to help distinguish a gap.
+        let groundProbeOrigin = SCNVector3(
+            start.x + direction.x * 1.0,
+            start.y + rayStartHeight,
+            start.z + direction.z * 1.0
         )
 
-        let length = min(terrain.distance + B.radius, B.lookAhead)
+        if let groundHit = firstGroundHit(
+            from: groundProbeOrigin,
+            length: groundRayLength,
+            excluding: character
+        ) {
+            result.groundAhead = true
+            result.groundHeight = groundHit.worldPosition.y
+        } else {
+            result.groundAhead = false
+            result.terrain = "gap"
+        }
+
+        // If no obstacle was found but the table is directly ahead,
+        // explicitly expose the low-ceiling context.
+        if result.object == nil,
+           let table = tableNode,
+           isInFront(table, of: character, within: rayLength) {
+            let info = makeDetectedObjectInfo(
+                node: table,
+                hitPosition: table.presentation.worldPosition,
+                distance: distanceBetween(
+                    character.presentation.worldPosition,
+                    table.presentation.worldPosition
+                )
+            )
+            result.object = info
+            result.terrain = "low ceiling"
+        }
+
+        return result
+    }
+
+    private func firstHit(
+        from origin: SCNVector3,
+        direction: SCNVector3,
+        length: Float,
+        excluding character: SCNNode
+    ) -> SCNHitTestResult? {
+        guard let scene else { return nil }
 
         let end = SCNVector3(
-            position.x + forwardX * length,
-            position.y + 0.8,
-            position.z + forwardZ * length
+            origin.x + direction.x * length,
+            origin.y + direction.y * length,
+            origin.z + direction.z * length
         )
 
-        let color: UIColor
+        let results = scene.rootNode.hitTestWithSegment(
+            from: origin,
+            to: end,
+            options: [
+                .searchMode: SCNHitTestSearchMode.all.rawValue,
+                .ignoreHiddenNodes: true
+            ]
+        )
 
-        switch terrain.terrain {
-        case .gap:
-            color = .red
-        case .flat:
-            color = .green
-        case .lowCeiling:
-            color = .purple
+        return results.first { hit in
+            let node = hit.node
+            return node !== character &&
+                   !node.isDescendant(of: character) &&
+                   node.opacity > 0.01
+        }
+    }
+
+    private func firstGroundHit(
+        from origin: SCNVector3,
+        length: Float,
+        excluding character: SCNNode
+    ) -> SCNHitTestResult? {
+        guard let scene else { return nil }
+
+        let end = SCNVector3(origin.x, origin.y - length, origin.z)
+
+        let results = scene.rootNode.hitTestWithSegment(
+            from: origin,
+            to: end,
+            options: [
+                .searchMode: SCNHitTestSearchMode.all.rawValue,
+                .ignoreHiddenNodes: true
+            ]
+        )
+
+        return results.first { hit in
+            let node = hit.node
+            return node !== character &&
+                   !node.isDescendant(of: character) &&
+                   node.physicsBody?.categoryBitMask != 0
+        }
+    }
+
+    // MARK: - Terrain adapter
+
+    private func makeTerrainSample(
+        from sensor: SensorResult
+    ) -> FrankensteinTerrainSample {
+        var sample = FrankensteinTerrainSample()
+
+        sample.distance = sensor.obstacleDistance.isFinite
+            ? sensor.obstacleDistance
+            : rayLength
+
+        sample.obstacleHeight = sensor.obstacleHeight
+        sample.groundHeight = sensor.groundHeight
+        sample.nextGroundHeight = sensor.groundHeight
+        sample.isGroundAhead = sensor.groundAhead
+
+        switch sensor.terrain.lowercased() {
+        case "gap":
+            sample.terrain = .gap
+            sample.gapWidth = 2.0
+            sample.gapNearEdgeDistance = max(0, sample.distance)
+            sample.gapFarEdgeDistance = sample.gapNearEdgeDistance + sample.gapWidth
+            sample.isLandingAreaClear = true
+
+        case "hurdle":
+            sample.terrain = .hurdle
+
+        case "low ceiling":
+            sample.terrain = .lowCeiling
+
+        case "raised step":
+            sample.terrain = .raisedStep
+
+        case "uneven":
+            sample.terrain = .uneven
+
         default:
-            color = .orange
+            sample.terrain = .flat
         }
 
-        let rayNode = SCNNode(
-            geometry: SCNGeometry.line(
-                from: start,
-                to: end,
-                color: color
+        return sample
+    }
+
+    // MARK: - Movement adapter
+
+    private func applyMovement(
+        output: FrankensteinLocomotionOutput,
+        character: SCNNode,
+        deltaTime: TimeInterval
+    ) {
+        let dt = Float(deltaTime)
+
+        // Avoid moving the character here if the project already has a
+        // dedicated dynamics/physics controller applying this output.
+        let heading = output.heading
+        let speed = output.speed
+
+        let dx = sin(heading) * speed * dt
+        let dz = -cos(heading) * speed * dt
+
+        character.position.x += dx
+        character.position.z += dz
+
+        // Use the output's jump/crouch signals if the actual character rig
+        // has corresponding animation handlers.
+        if output.jump > 0 {
+            lastStatus = "Jump requested"
+        } else if output.crouch > 0 {
+            lastStatus = "Crouching or crawling"
+        } else {
+            lastStatus = "Moving"
+        }
+    }
+
+    // MARK: - Door interaction
+
+    private func updateDoorInteraction(
+        character: SCNNode,
+        sensedObject: DetectedObjectInfo?
+    ) {
+        guard let door = doorNode, !openedDoor else { return }
+
+        let distance = distanceBetween(
+            character.presentation.worldPosition,
+            door.presentation.worldPosition
+        )
+
+        guard distance <= objectInteractionDistance else { return }
+
+        // Do not rotate a door unless the node is attached and the door has
+        // been explicitly registered with attachDoor(_:).
+        openedDoor = true
+        door.runAction(
+            SCNAction.rotateBy(
+                x: 0,
+                y: -.pi / 2,
+                z: 0,
+                duration: 0.7
+            )
+        )
+        lastStatus = "Door opening"
+        publishDebug("Door interaction triggered")
+    }
+
+    // MARK: - Pickup, carry, place
+
+    /// Picks up a registered pickupable object when it is within reach.
+    /// This simple reference version attaches it to the supplied hand node.
+    /// Prefer a dedicated object-manipulation module for physics restoration.
+    @discardableResult
+    func pickUp(_ node: SCNNode) -> Bool {
+        guard !isHoldingObject,
+              let hand = handNode,
+              isPickupable(node) else {
+            return false
+        }
+
+        let distance = distanceBetween(
+            hand.presentation.worldPosition,
+            node.presentation.worldPosition
+        )
+        guard distance <= objectInteractionDistance else {
+            lastStatus = "Object too far away to pick up"
+            return false
+        }
+
+        node.physicsBody?.velocity = .zero
+        node.physicsBody?.angularVelocity = .zero
+        node.physicsBody?.type = .kinematic
+
+        let worldTransform = node.presentation.worldTransform
+        node.removeFromParentNode()
+        hand.addChildNode(node)
+        node.transform = hand.convertTransform(
+            worldTransform,
+            from: scene?.rootNode
+        )
+
+        node.runAction(
+            SCNAction.move(
+                to: SCNVector3(0, -0.08, -0.18),
+                duration: 0.2
             )
         )
 
-        root.addChildNode(rayNode)
+        heldObject = node
+        isHoldingObject = true
+        lastStatus = "Holding \(node.name ?? "object")"
+        publishDebug(lastStatus)
+        return true
     }
 
-    private func makeSensorDebugRoot(
-        in scene: SCNScene
-    ) -> SCNNode {
-        let node = SCNNode()
-        node.name = "SensorDebug"
-        scene.rootNode.addChildNode(node)
-        return node
-    }
-
-    // MARK: - Debug information
-
-    private func publishDebugInfo(
-        terrain: FrankensteinTerrainSample,
-        output: FrankensteinLocomotionOutput,
-        feedback: FrankensteinMotionFeedback
-    ) {
-        // Avoid building strings if no UI is receiving them.
-        guard let callback = onDebugInfo else { return }
-
-        let policy = locomotion.policy
-        let position = feedback.position
-
-        var preferred = "none yet"
-
-        if let best = policy.preferredAction(
-            terrain: terrain,
-            body: locomotion.body
-        ) {
-            let value = String(format: "%.2f", best.value)
-            preferred = "\(best.action) (Q \(value), tried \(best.tries)x)"
+    /// Places a held object at a world-space position.
+    func placeHeldObject(at worldPosition: SCNVector3) {
+        guard let object = heldObject, let root = scene?.rootNode else {
+            return
         }
 
-        let info = """
-        Skill: \(locomotion.activeActionName)  (\(output.status))
-        Posture: \(output.posture)
-        Sees: \(terrain.terrain) at \(String(format: "%.2f", terrain.distance))
-        Size: height/clearance \(String(format: "%.2f", terrain.obstacleHeight)), \
-        gap \(String(format: "%.2f", terrain.gapWidth))
-        Would choose now: \(preferred)
-        Position: (\(String(format: "%.2f", position.x)), \
-        \(String(format: "%.2f", position.y)), \
-        \(String(format: "%.2f", position.z)))
-        Measured speed: \(String(format: "%.2f", feedback.speed))
-        Learned states: \(policy.learnedStateCount)  \
-        updates: \(policy.updateCount)  \
-        explore: \(String(format: "%.2f", policy.exploration))
-        Jumps: \(locomotion.successfulJumps)/\(locomotion.jumpAttempts)  \
-        falls: \(locomotion.falls)  goals: \(locomotion.goalsReached)
-        CA generation: \(ca.generationCount)
-        Live cells: \(ca.liveCellCount)
-        """
+        let worldTransform = object.presentation.worldTransform
+        object.removeFromParentNode()
+        root.addChildNode(object)
+        object.transform = worldTransform
+        object.position = worldPosition
 
-        DispatchQueue.main.async {
-            callback(info)
+        if let body = object.physicsBody {
+            body.type = .dynamic
+            body.velocity = .zero
+            body.angularVelocity = .zero
         }
+
+        heldObject = nil
+        isHoldingObject = false
+        lastStatus = "Object placed"
+        publishDebug(lastStatus)
     }
 
-    // MARK: - Reset
-
-    func resetCA() {
-        resetLock.lock()
-        resetRequested = true
-        resetLock.unlock()
+    func dropHeldObject() {
+        guard let object = heldObject else { return }
+        placeHeldObject(at: object.presentation.worldPosition)
     }
 
-    private func processPendingReset() {
-        resetLock.lock()
-        let shouldReset = resetRequested
-        resetRequested = false
-        resetLock.unlock()
+    private func updateHeldObject() {
+        guard isHoldingObject, heldObject != nil else { return }
+        // The object is parented to the hand node, so it follows the hand.
+    }
 
-        guard shouldReset else { return }
+    // MARK: - Helpers
 
-        ca.reset()
-        locomotion.resetEpisode()
-        dynamics.teleport(to: B.startPosition)
+    private func normalizedForward(for node: SCNNode) -> SCNVector3 {
+        let transform = node.presentation.worldTransform
+        let raw = SCNVector3(
+            -transform.m31,
+            -transform.m32,
+            -transform.m33
+        )
 
-        lastUpdateTime = 0
-        lastFeedback = idleFeedback()
-        lastTerrain = FrankensteinTerrainSample()
-        frameCounter = 0
+        let length = sqrt(
+            raw.x * raw.x + raw.y * raw.y + raw.z * raw.z
+        )
 
-        character.root.position = dynamics.position
+        guard length > 0.0001 else { return forwardDirection }
+
+        return SCNVector3(
+            raw.x / length,
+            raw.y / length,
+            raw.z / length
+        )
+    }
+
+    private func makeDetectedObjectInfo(
+        node: SCNNode,
+        hitPosition: SCNVector3,
+        distance: Float
+    ) -> DetectedObjectInfo {
+        let dimensions = worldDimensions(of: node)
+
+        return DetectedObjectInfo(
+            name: node.name ?? "Unnamed object",
+            dimensions: dimensions,
+            distance: distance,
+            worldPosition: hitPosition,
+            pickupable: isPickupable(node)
+        )
+    }
+
+    private func worldDimensions(of node: SCNNode) -> SCNVector3 {
+        let (minBound, maxBound) = node.boundingBox
+        let scale = node.presentation.worldScale
+
+        return SCNVector3(
+            abs((maxBound.x - minBound.x) * scale.x),
+            abs((maxBound.y - minBound.y) * scale.y),
+            abs((maxBound.z - minBound.z) * scale.z)
+        )
+    }
+
+    private func isPickupable(_ node: SCNNode) -> Bool {
+        if node.userData?["pickupable"] as? Bool == true {
+            return true
+        }
+
+        let name = (node.name ?? "").lowercased()
+        return name.contains("pickup") ||
+               name.contains("movable") ||
+               name.contains("carryable") ||
+               name.contains("crate")
+    }
+
+    private func isLowCeiling(_ node: SCNNode) -> Bool {
+        let name = (node.name ?? "").lowercased()
+        return name.contains("table") ||
+               name.contains("ceiling") ||
+               name.contains("lowbarrier")
+    }
+
+    private func isInFront(
+        _ target: SCNNode,
+        of character: SCNNode,
+        within distance: Float
+    ) -> Bool {
+        let c = character.presentation.worldPosition
+        let t = target.presentation.worldPosition
+
+        let direction = normalizedForward(for: character)
+        let toTarget = SCNVector3(t.x - c.x, t.y - c.y, t.z - c.z)
+
+        let targetDistance = sqrt(
+            toTarget.x * toTarget.x +
+            toTarget.y * toTarget.y +
+            toTarget.z * toTarget.z
+        )
+
+        guard targetDistance <= distance, targetDistance > 0 else {
+            return false
+        }
+
+        let dot = (
+            toTarget.x * direction.x +
+            toTarget.y * direction.y +
+            toTarget.z * direction.z
+        ) / targetDistance
+
+        return dot > 0.5
+    }
+
+    private func distanceBetween(
+        _ a: SCNVector3,
+        _ b: SCNVector3
+    ) -> Float {
+        let dx = a.x - b.x
+        let dy = a.y - b.y
+        let dz = a.z - b.z
+
+        return sqrt(dx * dx + dy * dy + dz * dz)
+    }
+
+    private func publishDetectedObject(_ object: DetectedObjectInfo?) {
+        onDetectedObject?(object)
+    }
+
+    private func publishDebug(_ message: String) {
+        onDebugInfo?(message)
     }
 }
 
-// MARK: - Debug line geometry
+// MARK: - UI data model
 
-private extension SCNGeometry {
+struct DetectedObjectInfo {
+    let name: String
+    let dimensions: SCNVector3
+    let distance: Float
+    let worldPosition: SCNVector3
+    let pickupable: Bool
 
-    static func line(
-        from start: SCNVector3,
-        to end: SCNVector3,
-        color: UIColor
-    ) -> SCNGeometry {
-        let source = SCNGeometrySource(
-            vertices: [start, end]
+    var dimensionsText: String {
+        String(
+            format: "%.2f × %.2f × %.2f",
+            dimensions.x,
+            dimensions.y,
+            dimensions.z
         )
+    }
 
-        let element = SCNGeometryElement(
-            indices: [Int32(0), Int32(1)],
-            primitiveType: .line
-        )
-
-        let geometry = SCNGeometry(
-            sources: [source],
-            elements: [element]
-        )
-
-        let material = SCNMaterial()
-        material.diffuse.contents = color
-        material.emission.contents = color
-        material.lightingModel = .constant
-
-        geometry.materials = [material]
-
-        return geometry
+    var distanceText: String {
+        String(format: "%.2f m", distance)
     }
 }

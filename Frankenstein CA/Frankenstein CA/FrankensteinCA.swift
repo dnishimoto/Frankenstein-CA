@@ -1,343 +1,276 @@
 
 import Foundation
+import Combine
 
+/// An 18 × 18 cellular automaton used as an animation signal source.
+///
+/// The CA controls animation signals only. Actual walking, turning,
+/// jumping, crawling, collision handling, and environmental learning
+/// belong to the locomotion and learning systems.
+final class FrankensteinCA: ObservableObject {
 
+    // MARK: - Configuration
 
-final class FrankensteinCA {
-    let rows = 18
-    let columns = 18
+    let size = 18
 
-    private var cells: [[Bool]]
-    private var generation = 0
-    private var time: Float = 0
+    /// Conway-style survival range.
+    private let survivalNeighbors = 2...3
 
-    private(set) var motion = FrankensteinMotion()
+    /// A dead cell becomes alive when exactly three neighbors are alive.
+    private let birthNeighbors = 3
 
-    // Reinforcement learning parameters.
-    private var memories: [String: FrankensteinLearningMemory] = [:]
-    private var lastStateKey: String?
-    private var lastAction: FrankensteinLearningAction?
-    private var explorationRate: Float = 0.25
-    private let learningRate: Float = 0.25
-    private let discountFactor: Float = 0.80
+    // MARK: - Published State
 
-    private var objectVisits: [String: Int] = [:]
+    @Published private(set) var grid: [[Bool]] = []
+    @Published private(set) var generation: Int = 0
+    @Published private(set) var isRunning: Bool = false
 
-    private(set) var currentAction: FrankensteinLearningAction = .explore
-    private(set) var lastReward: Float = 0
-    private(set) var learnedExperienceCount = 0
+    // MARK: - Working Buffer
 
-    init() {
-        cells = Array(
-            repeating: Array(repeating: false, count: 18),
-            count: 18
-        )
-        seedPattern()
-    }
+    private var nextGrid: [[Bool]] = []
 
-    // MARK: Cellular automaton
+    // MARK: - Animation Signals
 
-    private func seedPattern() {
-        let pattern: [(Int, Int)] = [
-            (1, 0), (2, 1), (0, 2), (1, 2), (2, 2)
-        ]
+    /// These are visual signals, not physical movement commands.
+    @Published private(set) var walkPhase: Float = 0
+    @Published private(set) var armLift: Float = 0
+    @Published private(set) var headTurn: Float = 0
+    @Published private(set) var mouthOpen: Float = 0
 
-        for (x, y) in pattern {
-            cells[y + 2][x + 2] = true
-        }
+    // MARK: - Initialization
 
-        for x in 0..<3 {
-            cells[6][7 + x] = true
-            cells[10][11 + x] = true
-        }
+    init(randomizeOnStart: Bool = true) {
+        grid = Self.makeEmptyGrid(size: size)
+        nextGrid = Self.makeEmptyGrid(size: size)
 
-        for y in 0..<rows {
-            for x in 0..<columns {
-                let value = (x * 17 + y * 31 + x * y * 3) % 23
-
-                if value == 0 || value == 7 {
-                    cells[y][x] = true
-                }
-            }
-        }
-    }
-
-    func step(deltaTime: Float) -> FrankensteinMotion {
-        let dt = min(max(deltaTime, 0), 0.05)
-        time += dt
-
-        updateCells()
-
-        let alive = liveCellCount
-        let activity = Float(alive) / Float(rows * columns)
-        let intensity = min(max(activity * 3.0, 0.15), 1.0)
-
-        motion.walkPhase += dt * (1.4 + intensity * 2.2)
-        motion.armLift = sin(time * 1.2) * 0.20 + intensity * 0.18
-        motion.headTurn = sin(time * 0.75) * 0.28
-
-        let speechPulse = max(0, sin(time * 4.0))
-        motion.mouthOpen = speechPulse * 0.35 * intensity
-
-        return motion
-    }
-
-    private func updateCells() {
-        var next = cells
-
-        for y in 0..<rows {
-            for x in 0..<columns {
-                var neighbors = 0
-
-                for dy in -1...1 {
-                    for dx in -1...1 {
-                        if dx == 0 && dy == 0 {
-                            continue
-                        }
-
-                        let nx = x + dx
-                        let ny = y + dy
-
-                        if nx >= 0 && nx < columns &&
-                            ny >= 0 && ny < rows &&
-                            cells[ny][nx] {
-                            neighbors += 1
-                        }
-                    }
-                }
-
-                if cells[y][x] {
-                    next[y][x] = neighbors == 2 || neighbors == 3
-                } else {
-                    next[y][x] = neighbors == 3
-                }
-            }
-        }
-
-        cells = next
-        generation += 1
-
-        if generation % 80 == 0 {
-            let x = (generation * 7) % columns
-            let y = (generation * 11) % rows
-            cells[y][x] = true
-        }
-    }
-
-    // MARK: Action selection
-
-    func chooseAction(
-        for observation: FrankensteinObservation
-    ) -> FrankensteinLearningAction {
-        let state = observation.stateKey
-        var memory = memories[state] ?? FrankensteinLearningMemory()
-
-        // Track how often Frankenstein encounters each object.
-        if observation.objectNearby && !observation.objectID.isEmpty {
-            objectVisits[observation.objectID, default: 0] += 1
-        }
-
-        let legalActions = availableActions(for: observation)
-
-        guard !legalActions.isEmpty else {
-            currentAction = .stop
-            return .stop
-        }
-
-        // Explore occasionally; otherwise choose the best learned action.
-        if Float.random(in: 0...1) < explorationRate {
-            currentAction = legalActions.randomElement() ?? .stop
+        if randomizeOnStart {
+            randomize()
         } else {
-            currentAction = legalActions.max {
-                memory.value(for: $0) < memory.value(for: $1)
-            } ?? .stop
+            seedDefaultPattern()
         }
 
-        lastStateKey = state
-        lastAction = currentAction
-
-        memory.attempts[currentAction, default: 0] += 1
-        memories[state] = memory
-
-        return currentAction
+        refreshAnimationSignals()
     }
 
-    private func availableActions(
-        for observation: FrankensteinObservation
-    ) -> [FrankensteinLearningAction] {
-        // Never intentionally move forward without supporting ground.
-        guard observation.groundSupported else {
-            if observation.dropAhead {
-                return [.stop, .jumpDown, .explore]
-            }
-            return [.stop]
-        }
-
-        // An opening or door can be interacted with only when detected.
-        if observation.objectNearby && observation.objectCanOpen {
-            return [.stop, .open, .explore]
-        }
-
-        // Low ceilings favor crouched movement or rolling.
-        if observation.lowCeiling {
-            return [.roll, .walk, .stop]
-        }
-
-        // A gap requires a specific jump decision or stopping.
-        if observation.gapAhead {
-            return [.stop, .jump]
-        }
-
-        if observation.dropAhead {
-            return [.stop, .jumpDown, .explore]
-        }
-
-        if observation.stepAhead {
-            return [.stop, .stepUp, .jump]
-        }
-
-        if observation.obstacleAhead || !observation.pathClear {
-            return [.stop, .jump, .roll, .explore]
-        }
-
-        if observation.objectNearby {
-            return [.explore, .walk, .stop]
-        }
-
-        return [.walk, .run, .explore, .stop]
+    private static func makeEmptyGrid(size: Int) -> [[Bool]] {
+        Array(
+            repeating: Array(repeating: false, count: size),
+            count: size
+        )
     }
 
-    // MARK: Learning from outcomes
+    // MARK: - Run Controls
 
-    /// Call after an action has actually completed.
-    /// Positive reward means success; negative reward means failure.
-    func recordOutcome(
-        reward: Float,
-        nextObservation: FrankensteinObservation,
-        succeeded: Bool
-    ) {
-        guard let state = lastStateKey,
-              let action = lastAction else {
+    func start() {
+        isRunning = true
+    }
+
+    func stop() {
+        isRunning = false
+    }
+
+    func toggleRunning() {
+        isRunning.toggle()
+    }
+
+    /// Advances one generation, whether or not continuous running is enabled.
+    func step() {
+        update()
+    }
+
+    /// Called by a timer or display loop when continuous running is enabled.
+    func tick() {
+        guard isRunning else { return }
+        update()
+    }
+
+    // MARK: - Cellular Automaton
+
+    func update() {
+        guard grid.count == size,
+              grid.allSatisfy({ $0.count == size }) else {
+            grid = Self.makeEmptyGrid(size: size)
+            nextGrid = Self.makeEmptyGrid(size: size)
+            generation = 0
             return
         }
 
-        var memory = memories[state] ?? FrankensteinLearningMemory()
-        let oldValue = memory.value(for: action)
+        for y in 0..<size {
+            for x in 0..<size {
+                let neighbors = countLiveNeighbors(x: x, y: y)
+                let currentlyAlive = grid[y][x]
 
-        let nextActions = availableActions(for: nextObservation)
-        let nextMemory = memories[nextObservation.stateKey]
-
-        let bestFutureValue: Float
-
-        if nextActions.isEmpty {
-            bestFutureValue = 0
-        } else {
-            bestFutureValue = nextActions
-                .map { nextMemory?.value(for: $0) ?? 0 }
-                .max() ?? 0
+                if currentlyAlive {
+                    nextGrid[y][x] = survivalNeighbors.contains(neighbors)
+                } else {
+                    nextGrid[y][x] = neighbors == birthNeighbors
+                }
+            }
         }
 
-        let target = reward + discountFactor * bestFutureValue
-        let updatedValue = oldValue + learningRate * (target - oldValue)
+        // Swap buffers instead of allocating a new grid every generation.
+        swap(&grid, &nextGrid)
 
-        memory.actionValues[action] = updatedValue
+        generation += 1
+        refreshAnimationSignals()
+    }
 
-        if succeeded {
-            memory.successes[action, default: 0] += 1
+    /// Returns whether a cell is alive.
+    ///
+    /// Coordinates outside the grid return false rather than crashing.
+    func isActive(_ x: Int, _ y: Int) -> Bool {
+        guard (0..<size).contains(x),
+              (0..<size).contains(y) else {
+            return false
         }
 
-        memories[state] = memory
-
-        lastReward = reward
-        learnedExperienceCount += 1
-
-        // Reduce random exploration gradually, but never eliminate it.
-        explorationRate = max(0.05, explorationRate * 0.999)
-
-        lastStateKey = nil
-        lastAction = nil
+        return grid[y][x]
     }
 
-    /// Convenience method for a successful action.
-    func recordSuccess(
-        nextObservation: FrankensteinObservation
-    ) {
-        recordOutcome(
-            reward: 1.0,
-            nextObservation: nextObservation,
-            succeeded: true
-        )
+    /// Sets a cell directly. Useful for tests and interactive editing.
+    func setActive(_ active: Bool, x: Int, y: Int) {
+        guard (0..<size).contains(x),
+              (0..<size).contains(y) else {
+            return
+        }
+
+        grid[y][x] = active
+        refreshAnimationSignals()
     }
 
-    /// Convenience method for a failed or unsafe action.
-    func recordFailure(
-        nextObservation: FrankensteinObservation
-    ) {
-        recordOutcome(
-            reward: -1.0,
-            nextObservation: nextObservation,
-            succeeded: false
-        )
+    func toggleCell(x: Int, y: Int) {
+        guard (0..<size).contains(x),
+              (0..<size).contains(y) else {
+            return
+        }
+
+        grid[y][x].toggle()
+        refreshAnimationSignals()
     }
 
-    // MARK: Learning statistics
+    // MARK: - Neighbor Counting
 
-    func learnedValue(
-        for action: FrankensteinLearningAction,
-        in observation: FrankensteinObservation
-    ) -> Float {
-        memories[observation.stateKey]?.value(for: action) ?? 0
+    /// Uses wrapping boundaries, matching the recovered reference code.
+    private func countLiveNeighbors(x: Int, y: Int) -> Int {
+        var count = 0
+
+        for dy in -1...1 {
+            for dx in -1...1 {
+                if dx == 0 && dy == 0 {
+                    continue
+                }
+
+                let nx = (x + dx + size) % size
+                let ny = (y + dy + size) % size
+
+                if grid[ny][nx] {
+                    count += 1
+                }
+            }
+        }
+
+        return count
     }
 
-    func attemptCount(
-        for action: FrankensteinLearningAction,
-        in observation: FrankensteinObservation
-    ) -> Int {
-        memories[observation.stateKey]?.attempts[action, default: 0] ?? 0
-    }
-
-    func successCount(
-        for action: FrankensteinLearningAction,
-        in observation: FrankensteinObservation
-    ) -> Int {
-        memories[observation.stateKey]?.successes[action, default: 0] ?? 0
-    }
-
-    func visits(to objectID: String) -> Int {
-        objectVisits[objectID, default: 0]
-    }
-
-    // MARK: Reset
+    // MARK: - Reset and Seeding
 
     func reset() {
+        isRunning = false
         generation = 0
-        time = 0
-        motion = FrankensteinMotion()
 
-        cells = Array(
-            repeating: Array(repeating: false, count: columns),
-            count: rows
-        )
-        seedPattern()
+        grid = Self.makeEmptyGrid(size: size)
+        nextGrid = Self.makeEmptyGrid(size: size)
 
-        memories.removeAll()
-        objectVisits.removeAll()
-
-        lastStateKey = nil
-        lastAction = nil
-        currentAction = .explore
-        lastReward = 0
-        learnedExperienceCount = 0
-        explorationRate = 0.25
+        seedDefaultPattern()
+        refreshAnimationSignals()
     }
 
+    func randomize() {
+        for y in 0..<size {
+            for x in 0..<size {
+                grid[y][x] = Bool.random()
+            }
+        }
+
+        generation = 0
+        refreshAnimationSignals()
+    }
+
+    /// Creates a repeatable starter pattern with several active regions.
+    func seedDefaultPattern() {
+        grid = Self.makeEmptyGrid(size: size)
+        nextGrid = Self.makeEmptyGrid(size: size)
+
+        // Glider near the upper-left area.
+        let glider: [(Int, Int)] = [
+            (2, 1),
+            (3, 2),
+            (1, 3),
+            (2, 3),
+            (3, 3)
+        ]
+
+        // Blinker near the center.
+        let blinker: [(Int, Int)] = [
+            (8, 8),
+            (8, 9),
+            (8, 10)
+        ]
+
+        // Small oscillator toward the lower-right.
+        let oscillator: [(Int, Int)] = [
+            (13, 12),
+            (14, 12),
+            (15, 12),
+            (14, 13),
+            (14, 14)
+        ]
+
+        for (x, y) in glider + blinker + oscillator {
+            if (0..<size).contains(x), (0..<size).contains(y) {
+                grid[y][x] = true
+            }
+        }
+
+        generation = 0
+        refreshAnimationSignals()
+    }
+
+    // MARK: - Statistics
+
     var liveCellCount: Int {
-        cells.reduce(0) { total, row in
+        grid.reduce(0) { total, row in
             total + row.filter { $0 }.count
         }
     }
 
-    var generationCount: Int {
-        generation
+    var liveCellFraction: Float {
+        let total = size * size
+        guard total > 0 else { return 0 }
+        return Float(liveCellCount) / Float(total)
+    }
+
+    // MARK: - Animation Signal Mapping
+
+    /// Maps selected CA cells to bounded animation values.
+    ///
+    /// These values can animate FrankensteinCharacter's limbs and face.
+    /// They do not move the character through the SceneKit world.
+    private func refreshAnimationSignals() {
+        walkPhase = isActive(8, 8) ? 1.0 : 0.0
+        armLift = isActive(4, 4) ? 1.0 : 0.0
+        headTurn = isActive(2, 2) ? 1.0 : 0.0
+        mouthOpen = isActive(10, 10) ? 1.0 : 0.0
+    }
+
+    /// Allows an external animation system to read all four signals at once.
+    var animationSignals: FrankensteinMotion {
+        FrankensteinMotion(
+            walkPhase: walkPhase,
+            armLift: armLift,
+            headTurn: headTurn,
+            mouthOpen: mouthOpen
+        )
     }
 }
+

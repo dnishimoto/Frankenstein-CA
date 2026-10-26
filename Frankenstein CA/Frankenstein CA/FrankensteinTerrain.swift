@@ -4,8 +4,11 @@ import UIKit
 
 enum FrankensteinTerrainScene {
 
+    // MARK: - Build Course
+
     static func build(in scene: SCNScene) {
-        // Prevent duplicate course geometry if build is called again.
+
+        // Prevent duplicate course geometry.
         scene.rootNode.childNode(
             withName: "ObstacleCourse",
             recursively: false
@@ -48,6 +51,16 @@ enum FrankensteinTerrainScene {
         let door = SCNNode()
         door.name = "Door"
         door.position = SCNVector3(5.84, 0, -7.0)
+
+        setMetadata(
+            on: door,
+            name: "Door",
+            type: "door",
+            size: SCNVector3(2.32, 4.20, 0.15),
+            solid: true,
+            canOpen: true
+        )
+
         terrain.addChildNode(door)
 
         let doorPanel = SCNBox(
@@ -67,10 +80,26 @@ enum FrankensteinTerrainScene {
         let doorLeaf = SCNNode(geometry: doorPanel)
         doorLeaf.name = "DoorPanel"
         doorLeaf.position = SCNVector3(1.16, 2.10, 0)
-        doorLeaf.categoryBitMask = FrankensteinPhysicalBody.solidMask
+        doorLeaf.categoryBitMask =
+            FrankensteinPhysicalBody.solidMask
+
+        setMetadata(
+            on: doorLeaf,
+            name: "DoorPanel",
+            type: "door",
+            size: SCNVector3(2.32, 4.20, 0.15),
+            solid: true,
+            canOpen: true
+        )
+
+        addStaticPhysics(to: doorLeaf)
         door.addChildNode(doorLeaf)
 
-        let handle = SCNCylinder(radius: 0.085, height: 0.15)
+        let handle = SCNCylinder(
+            radius: 0.085,
+            height: 0.15
+        )
+
         let handleMaterial = SCNMaterial()
         handleMaterial.diffuse.contents = UIColor.systemYellow
         handle.materials = [handleMaterial]
@@ -78,7 +107,19 @@ enum FrankensteinTerrainScene {
         let handleNode = SCNNode(geometry: handle)
         handleNode.name = "DoorHandle"
         handleNode.position = SCNVector3(2.02, 1.98, 0.13)
-        handleNode.categoryBitMask = FrankensteinPhysicalBody.solidMask
+        handleNode.categoryBitMask =
+            FrankensteinPhysicalBody.solidMask
+
+        setMetadata(
+            on: handleNode,
+            name: "DoorHandle",
+            type: "doorHandle",
+            size: SCNVector3(0.17, 0.15, 0.17),
+            solid: true,
+            canOpen: true
+        )
+
+        addStaticPhysics(to: handleNode)
         door.addChildNode(handleNode)
 
         // MARK: - Table
@@ -86,6 +127,16 @@ enum FrankensteinTerrainScene {
         let table = SCNNode()
         table.name = "Table"
         table.position = SCNVector3(5.5, 0, 1.0)
+
+        setMetadata(
+            on: table,
+            name: "Table",
+            type: "table",
+            size: SCNVector3(2.8, 1.59, 1.68),
+            solid: true,
+            canCrawlUnder: true
+        )
+
         terrain.addChildNode(table)
 
         addBox(
@@ -95,7 +146,9 @@ enum FrankensteinTerrainScene {
             size: SCNVector3(2.8, 0.22, 1.68),
             color: UIColor(
                 red: 0.48, green: 0.29, blue: 0.15, alpha: 1
-            )
+            ),
+            objectType: "tableTop",
+            canCrawlUnder: true
         )
 
         let legPositions: [SCNVector3] = [
@@ -113,13 +166,13 @@ enum FrankensteinTerrainScene {
                 size: SCNVector3(0.18, 1.4, 0.18),
                 color: UIColor(
                     red: 0.34, green: 0.20, blue: 0.11, alpha: 1
-                )
+                ),
+                objectType: "tableLeg"
             )
         }
 
-        // MARK: - Ground Platforms and Chasm
+        // MARK: - Ground Platforms
 
-        // Left platform: x spans approximately -10 to -1.
         addBox(
             to: terrain,
             name: "GroundLeft",
@@ -127,10 +180,10 @@ enum FrankensteinTerrainScene {
             size: SCNVector3(9, 0.4, 18),
             color: UIColor(
                 red: 0.24, green: 0.30, blue: 0.25, alpha: 1
-            )
+            ),
+            objectType: "ground"
         )
 
-        // Right platform: x spans approximately 1 to 10.
         addBox(
             to: terrain,
             name: "GroundRight",
@@ -138,13 +191,12 @@ enum FrankensteinTerrainScene {
             size: SCNVector3(9, 0.4, 18),
             color: UIColor(
                 red: 0.24, green: 0.30, blue: 0.25, alpha: 1
-            )
+            ),
+            objectType: "ground"
         )
 
-        // The open chasm is between x = -1 and x = 1.
-        // This low floor is intentionally below the safe-drop threshold.
-        // The probe should recognize it as a dangerous lower surface,
-        // not as a valid landing platform.
+        // MARK: - Chasm
+
         addBox(
             to: terrain,
             name: "ChasmPitFloor",
@@ -152,17 +204,18 @@ enum FrankensteinTerrainScene {
             size: SCNVector3(1.9, 0.2, 18),
             color: UIColor(
                 red: 0.12, green: 0.12, blue: 0.14, alpha: 1
-            )
+            ),
+            objectType: "dangerousLowerGround"
         )
 
-        // Non-solid visual markers at the edges of the chasm.
         addBox(
             to: terrain,
             name: "ChasmNearEdgeMarker",
             position: SCNVector3(1.0, 0.025, 0),
             size: SCNVector3(0.08, 0.05, 18),
             color: .systemRed,
-            solid: false
+            solid: false,
+            objectType: "chasmEdge"
         )
 
         addBox(
@@ -171,7 +224,8 @@ enum FrankensteinTerrainScene {
             position: SCNVector3(-1.0, 0.025, 0),
             size: SCNVector3(0.08, 0.05, 18),
             color: .systemGreen,
-            solid: false
+            solid: false,
+            objectType: "chasmEdge"
         )
 
         // MARK: - Course Boundaries
@@ -181,7 +235,8 @@ enum FrankensteinTerrainScene {
             name: "LeftBoundary",
             position: SCNVector3(-9.5, 0.5, 0),
             size: SCNVector3(0.35, 1, 20),
-            color: .darkGray
+            color: .darkGray,
+            objectType: "boundary"
         )
 
         addBox(
@@ -189,7 +244,8 @@ enum FrankensteinTerrainScene {
             name: "RightBoundary",
             position: SCNVector3(9.5, 0.5, 0),
             size: SCNVector3(0.35, 1, 20),
-            color: .darkGray
+            color: .darkGray,
+            objectType: "boundary"
         )
 
         // MARK: - Hurdles
@@ -199,7 +255,8 @@ enum FrankensteinTerrainScene {
             name: "Hurdle1",
             position: SCNVector3(-2.5, 0.35, -3.0),
             size: SCNVector3(2.2, 0.7, 0.35),
-            color: .systemOrange
+            color: .systemOrange,
+            objectType: "hurdle"
         )
 
         addBox(
@@ -207,7 +264,8 @@ enum FrankensteinTerrainScene {
             name: "Hurdle2",
             position: SCNVector3(3.5, 0.45, -6.0),
             size: SCNVector3(2.2, 0.9, 0.35),
-            color: .systemOrange
+            color: .systemOrange,
+            objectType: "hurdle"
         )
 
         // MARK: - Low Ceiling
@@ -217,7 +275,9 @@ enum FrankensteinTerrainScene {
             name: "LowCeiling",
             position: SCNVector3(0, 2.05, -8),
             size: SCNVector3(3.8, 0.3, 2.0),
-            color: .systemPurple
+            color: .systemPurple,
+            objectType: "lowCeiling",
+            canCrawlUnder: true
         )
 
         // MARK: - Crawl-Only Barrier
@@ -227,7 +287,9 @@ enum FrankensteinTerrainScene {
             name: "LowBarrier",
             position: SCNVector3(-6.5, 1.60, -4.5),
             size: SCNVector3(3.8, 0.3, 2.0),
-            color: .systemPink
+            color: .systemPink,
+            objectType: "lowBarrier",
+            canCrawlUnder: true
         )
 
         // MARK: - Raised Steps
@@ -237,7 +299,8 @@ enum FrankensteinTerrainScene {
             name: "Step1",
             position: SCNVector3(-3.5, 0.25, 2.5),
             size: SCNVector3(2.0, 0.5, 1.5),
-            color: .systemTeal
+            color: .systemTeal,
+            objectType: "raisedStep"
         )
 
         addBox(
@@ -245,7 +308,8 @@ enum FrankensteinTerrainScene {
             name: "Step2",
             position: SCNVector3(-3.5, 0.65, 4.0),
             size: SCNVector3(2.0, 0.8, 1.5),
-            color: .systemTeal
+            color: .systemTeal,
+            objectType: "raisedStep"
         )
 
         addBox(
@@ -253,7 +317,8 @@ enum FrankensteinTerrainScene {
             name: "Step3",
             position: SCNVector3(-3.5, 1.05, 5.5),
             size: SCNVector3(2.0, 1.0, 1.5),
-            color: .systemTeal
+            color: .systemTeal,
+            objectType: "raisedStep"
         )
 
         // MARK: - Uneven Ground
@@ -265,7 +330,8 @@ enum FrankensteinTerrainScene {
             size: SCNVector3(2.5, 0.25, 2.5),
             color: UIColor(
                 red: 0.48, green: 0.38, blue: 0.22, alpha: 1
-            )
+            ),
+            objectType: "unevenGround"
         )
 
         addBox(
@@ -275,7 +341,8 @@ enum FrankensteinTerrainScene {
             size: SCNVector3(2.5, 0.6, 2.5),
             color: UIColor(
                 red: 0.48, green: 0.38, blue: 0.22, alpha: 1
-            )
+            ),
+            objectType: "unevenGround"
         )
 
         // MARK: - Start and Finish
@@ -286,7 +353,8 @@ enum FrankensteinTerrainScene {
             position: SCNVector3(0, 0.025, 7.5),
             size: SCNVector3(2.5, 0.05, 0.15),
             color: .systemGreen,
-            solid: false
+            solid: false,
+            objectType: "startMarker"
         )
 
         addBox(
@@ -295,7 +363,8 @@ enum FrankensteinTerrainScene {
             position: SCNVector3(0, 0.025, -9.0),
             size: SCNVector3(3.0, 0.05, 0.15),
             color: .systemGreen,
-            solid: false
+            solid: false,
+            objectType: "finishMarker"
         )
 
         // MARK: - Lighting
@@ -320,7 +389,10 @@ enum FrankensteinTerrainScene {
         position: SCNVector3,
         size: SCNVector3,
         color: UIColor,
-        solid: Bool = true
+        solid: Bool = true,
+        objectType: String? = nil,
+        canOpen: Bool = false,
+        canCrawlUnder: Bool = false
     ) {
         let geometry = SCNBox(
             width: CGFloat(size.x),
@@ -342,6 +414,137 @@ enum FrankensteinTerrainScene {
             ? FrankensteinPhysicalBody.solidMask
             : FrankensteinPhysicalBody.decorationMask
 
+        let resolvedType = objectType ?? inferObjectType(name)
+
+        setMetadata(
+            on: node,
+            name: name,
+            type: resolvedType,
+            size: size,
+            solid: solid,
+            canOpen: canOpen,
+            canCrawlUnder: canCrawlUnder
+        )
+
+        if solid {
+            addStaticPhysics(to: node)
+        }
+
         parent.addChildNode(node)
+    }
+
+    // MARK: - Alleya CA Object Metadata
+
+    private static func setMetadata(
+        on node: SCNNode,
+        name: String,
+        type: String,
+        size: SCNVector3,
+        solid: Bool,
+        canOpen: Bool = false,
+        canCrawlUnder: Bool = false
+    ) {
+        let data = node.userData ?? NSMutableDictionary()
+
+        data["objectName"] = name
+        data["objectType"] = type
+
+        data["width"] = NSNumber(value: Double(size.x))
+        data["height"] = NSNumber(value: Double(size.y))
+        data["length"] = NSNumber(value: Double(size.z))
+
+        data["isSolid"] = NSNumber(value: solid)
+        data["isTraversable"] = NSNumber(value: !solid)
+        data["canOpen"] = NSNumber(value: canOpen)
+        data["canCrawlUnder"] = NSNumber(value: canCrawlUnder)
+
+        data["alleyaObservationEnabled"] = NSNumber(value: true)
+
+        node.userData = data
+    }
+
+    // MARK: - Physics
+
+    private static func addStaticPhysics(to node: SCNNode) {
+        guard node.geometry != nil else { return }
+
+        let body = SCNPhysicsBody.static()
+        body.categoryBitMask = FrankensteinPhysicalBody.solidMask
+        node.physicsBody = body
+    }
+
+    // MARK: - Object Classification
+
+    private static func inferObjectType(_ name: String) -> String {
+        let value = name.lowercased()
+
+        if value.contains("doorhandle") {
+            return "doorHandle"
+        }
+
+        if value.contains("door") {
+            return "door"
+        }
+
+        if value.contains("tabletop") {
+            return "tableTop"
+        }
+
+        if value.contains("tableleg") {
+            return "tableLeg"
+        }
+
+        if value == "table" {
+            return "table"
+        }
+
+        if value.contains("chasm") {
+            return value.contains("marker")
+                ? "chasmEdge"
+                : "dangerousLowerGround"
+        }
+
+        if value.contains("groundleft") ||
+            value.contains("groundright") {
+            return "ground"
+        }
+
+        if value.contains("hurdle") {
+            return "hurdle"
+        }
+
+        if value.contains("lowceiling") {
+            return "lowCeiling"
+        }
+
+        if value.contains("lowbarrier") {
+            return "lowBarrier"
+        }
+
+        if value.contains("step") {
+            return "raisedStep"
+        }
+
+        if value.contains("uneven") {
+            return "unevenGround"
+        }
+
+        if value.contains("boundary") {
+            return "boundary"
+        }
+
+        if value.contains("startmarker") {
+            return "startMarker"
+        }
+
+        if value.contains("finishmarker") {
+            return "finishMarker"
+        }
+
+        if value.contains("doorframe") {
+            return "doorFrame"
+        }
+
+        return "obstacle"
     }
 }

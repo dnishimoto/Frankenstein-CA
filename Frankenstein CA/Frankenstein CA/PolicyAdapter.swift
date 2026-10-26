@@ -2,24 +2,17 @@
 import Foundation
 
 final class FrankensteinLearningPolicy {
-    
-    // MARK: State
 
-    /// What he knows when he decides. Everything here comes from
-    /// measurement: the kind of feature ahead, how far away it is, how big
-    /// it is (height, gap width or clearance), how fast he is moving, which
-    /// way he faces relative to the goal, and whether he is on the ground.
+    // MARK: - Q-Learning State
+
     private struct State: Hashable {
         let terrain: Int
         let distanceBand: Int
-        let magnitudeBand: Int
-        let speedBand: Int
-        let headingBand: Int
+        let tiltBand: Int
         let grounded: Bool
     }
 
     private var values: [State: [Float]] = [:]
-    private var visits: [State: [Int]] = [:]
 
     private var lastState: State?
     private var lastAction: FrankensteinAction?
@@ -27,11 +20,12 @@ final class FrankensteinLearningPolicy {
     // Prevent repeated learning updates for one completed action.
     private var actionPendingLearning = false
 
-    var learningRate: Float = 0.25
+    var learningRate: Float = 0.12
     var discount: Float = 0.9
-    var exploration: Float = 0.25
+    var exploration: Float = 0.2
 
-    private(set) var updateCount = 0
+    // Alleya CA learning diagnostics.
+    private(set) var updateCount: Int = 0
 
     private var actionCount: Int {
         FrankensteinAction.allCases.count
@@ -41,82 +35,30 @@ final class FrankensteinLearningPolicy {
         Array(repeating: 0, count: actionCount)
     }
 
-    private func emptyVisits() -> [Int] {
-        Array(repeating: 0, count: actionCount)
-    }
+    // MARK: - State Encoding
 
     private func state(
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState
     ) -> State {
-        let distance = terrain.distance
-
-        let distanceBand =
-            distance < 0.4 ? 0 :
-            distance < 1.0 ? 1 :
-            distance < 2.0 ? 2 : 3
-
-        let magnitudeBand: Int
-
-        switch terrain.terrain {
-        case .gap:
-            let w = terrain.gapWidth
-            magnitudeBand =
-                w < 1.5 ? 0 :
-                w < 2.6 ? 1 :
-                w < 3.6 ? 2 : 3
-
-        case .lowCeiling:
-            // Clearance above his feet versus his postures:
-            // crawl 1.3, roll 1.7, crouch 3.2.
-            let c = terrain.obstacleHeight
-            magnitudeBand =
-                c < 1.3 ? 0 :
-                c < 1.7 ? 1 :
-                c < 3.2 ? 2 : 3
-
-        case .flat:
-            magnitudeBand = 0
-
-        default:
-            let h = terrain.obstacleHeight
-            magnitudeBand =
-                h < 0.35 ? 0 :
-                h < 0.7 ? 1 :
-                h < 1.0 ? 2 :
-                h < 1.5 ? 3 : 4
-        }
-
-        let speedBand =
-            body.speed < 0.4 ? 0 :
-            body.speed < 2.2 ? 1 : 2
-
-        let error = body.headingError
-        let headingBand =
-            error < -1.0 ? 0 :
-            error < -0.3 ? 1 :
-            error <= 0.3 ? 2 :
-            error <= 1.0 ? 3 : 4
-
-        return State(
+        State(
             terrain: terrain.terrain.rawValue,
-            distanceBand: distanceBand,
-            magnitudeBand: magnitudeBand,
-            speedBand: speedBand,
-            headingBand: headingBand,
+            distanceBand: terrain.distance < 0.8 ? 0 :
+                (terrain.distance < 2.0 ? 1 : 2),
+            tiltBand: abs(body.tilt) < 0.12 ? 0 :
+                (abs(body.tilt) < 0.35 ? 1 : 2),
             grounded: body.grounded
         )
     }
 
-    // MARK: - Action selection
+    // MARK: - Action Selection
 
     func choose(
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState
     ) -> FrankensteinAction {
 
-        // Do not overwrite the active state/action while waiting
-        // for the current skill to finish and produce its reward.
+        // Keep the active action until its outcome is recorded.
         if actionPendingLearning, let lastAction {
             return lastAction
         }
@@ -157,16 +99,13 @@ final class FrankensteinLearningPolicy {
         return action
     }
 
-    // MARK: - Learning from a completed action
+    // MARK: - Learning From a Completed Action
 
-    /// Call exactly once when the chosen action has finished. `duration` is
-    /// the time the action took, so long actions discount the future more.
     func learn(
         reward: Float,
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
-        terminal: Bool,
-        duration: Float = 0.6
+        terminal: Bool
     ) {
         guard actionPendingLearning,
               let previousState = lastState,
@@ -175,7 +114,6 @@ final class FrankensteinLearningPolicy {
         }
 
         var q = values[previousState] ?? emptyQValues()
-        var n = visits[previousState] ?? emptyVisits()
 
         let index = action.rawValue
 
@@ -189,35 +127,34 @@ final class FrankensteinLearningPolicy {
             body: body
         )
 
-        // The best value among actions that are actually available next.
-        // (Taking the max over every slot would let never-used, disallowed
-        // actions hold the value at 0 and hide how bad a state is.)
         let futureValue: Float
 
         if terminal {
             futureValue = 0
         } else {
             let nextQ = values[nextState] ?? emptyQValues()
-            let next = allowedActions(terrain: terrain, body: body)
 
-            futureValue = next
+            let nextActions = allowedActions(
+                terrain: terrain,
+                body: body
+            )
+
+            futureValue = nextActions
+                .filter { nextQ.indices.contains($0.rawValue) }
                 .map { nextQ[$0.rawValue] }
                 .max() ?? 0
         }
 
-        let gamma = pow(discount, max(duration, 0.1) / 0.6)
-        let target = reward + gamma * futureValue
+        let target = reward + discount * futureValue
 
         q[index] += learningRate * (target - q[index])
-        n[index] += 1
-
         values[previousState] = q
-        visits[previousState] = n
 
-        // Decay exploration per completed learning update,
-        // not per rendered frame.
-        exploration = max(0.05, exploration * 0.998)
+        // Count actual Q-learning updates, not rendered frames.
         updateCount += 1
+
+        // Decay exploration after each completed learning update.
+        exploration = max(0.03, exploration * 0.9995)
 
         // This action has now been learned from exactly once.
         clearPendingAction()
@@ -233,11 +170,8 @@ final class FrankensteinLearningPolicy {
         actionPendingLearning = false
     }
 
-    // MARK: - Action constraints
+    // MARK: - Action Constraints
 
-    /// Which actions make sense in a kind of situation. Whether an action
-    /// actually works is not decided here: he finds out by trying it and
-    /// seeing what the body does.
     private func allowedActions(
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState
@@ -253,45 +187,96 @@ final class FrankensteinLearningPolicy {
 
         switch terrain.terrain {
 
-        case .flat, .slope:
-            return [.walk, .run, .turnLeft, .turnRight]
-
         case .hurdle:
+            if terrain.obstacleHeight <= 0.75 {
+                return [
+                    .jump,
+                    .stepUp,
+                    .turnLeft,
+                    .turnRight,
+                    .walk
+                ]
+            }
+
             return [
-                .jump, .stepUp, .walk, .run,
-                .turnLeft, .turnRight
+                .turnLeft,
+                .turnRight,
+                .walk
             ]
 
         case .gap:
+            if terrain.gapWidth <= 1.8 &&
+                terrain.isLandingAreaClear {
+                return [
+                    .jump,
+                    .turnLeft,
+                    .turnRight
+                ]
+            }
+
             return [
-                .jump, .walk, .run,
-                .turnLeft, .turnRight
+                .turnLeft,
+                .turnRight,
+                .walk
             ]
 
         case .lowCeiling:
             return [
-                .crouch, .roll, .crawl, .walk,
-                .turnLeft, .turnRight
+                .crouch,
+                .turnLeft,
+                .turnRight
             ]
 
         case .raisedStep:
+            if terrain.nextGroundHeight -
+                terrain.groundHeight <= 0.55 {
+                return [
+                    .stepUp,
+                    .jump,
+                    .turnLeft,
+                    .turnRight,
+                    .walk
+                ]
+            }
+
             return [
-                .stepUp, .jump, .walk,
-                .turnLeft, .turnRight
+                .turnLeft,
+                .turnRight,
+                .walk
             ]
 
-        case .uneven:
-            return [.turnLeft, .turnRight, .walk, .jump]
+        case .slope, .uneven:
+            return [
+                .walk,
+                .run,
+                .turnLeft,
+                .turnRight,
+                .recover
+            ]
+
+        case .flat:
+            return abs(body.tilt) > 0.35
+                ? [.recover, .walk]
+                : [.walk, .run, .turnLeft, .turnRight]
+
+        default:
+            // Safe fallback for an unclassified terrain case,
+            // including .unknown if the terrain enum defines it.
+            return [
+                .turnLeft,
+                .turnRight,
+                .walk
+            ]
         }
     }
 
-    // MARK: - Episode management
+    // MARK: - Episode Management
 
     func resetEpisode() {
         clearPendingAction()
     }
 
-    // MARK: - Diagnostics
+    // MARK: - Alleya CA Diagnostics
 
     var isAwaitingOutcome: Bool {
         actionPendingLearning
@@ -306,7 +291,11 @@ final class FrankensteinLearningPolicy {
         body: FrankensteinBodyState,
         action: FrankensteinAction
     ) -> Float {
-        let currentState = state(terrain: terrain, body: body)
+        let currentState = state(
+            terrain: terrain,
+            body: body
+        )
+
         let q = values[currentState] ?? emptyQValues()
 
         guard q.indices.contains(action.rawValue) else {
@@ -316,17 +305,22 @@ final class FrankensteinLearningPolicy {
         return q[action.rawValue]
     }
 
-    /// The action he would take right now if he stopped exploring, and
-    /// how many times he has tried it in this situation.
     func preferredAction(
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState
-    ) -> (action: FrankensteinAction, value: Float, tries: Int)? {
-        let s = state(terrain: terrain, body: body)
-        let q = values[s] ?? emptyQValues()
-        let n = visits[s] ?? emptyVisits()
+    ) -> (action: FrankensteinAction, value: Float)? {
 
-        let candidates = allowedActions(terrain: terrain, body: body)
+        let currentState = state(
+            terrain: terrain,
+            body: body
+        )
+
+        let q = values[currentState] ?? emptyQValues()
+
+        let candidates = allowedActions(
+            terrain: terrain,
+            body: body
+        )
 
         guard let best = candidates.max(by: {
             q[$0.rawValue] < q[$1.rawValue]
@@ -334,13 +328,17 @@ final class FrankensteinLearningPolicy {
             return nil
         }
 
-        return (best, q[best.rawValue], n[best.rawValue])
+        return (
+            action: best,
+            value: q[best.rawValue]
+        )
     }
 }
 
-// MARK: - Adapter implemented by the existing policy
+// MARK: - Alleya CA Policy Adapter Protocol
 
 protocol FrankensteinStage1PolicyAdapter {
+
     func chooseAction(
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState
@@ -354,6 +352,8 @@ protocol FrankensteinStage1PolicyAdapter {
     )
 }
 
+// MARK: - Connect Adapter to the Existing Policy
+
 extension FrankensteinLearningPolicy:
     FrankensteinStage1PolicyAdapter {
 
@@ -361,7 +361,10 @@ extension FrankensteinLearningPolicy:
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState
     ) -> FrankensteinAction {
-        choose(terrain: terrain, body: body)
+        choose(
+            terrain: terrain,
+            body: body
+        )
     }
 
     func recordCompletedAction(

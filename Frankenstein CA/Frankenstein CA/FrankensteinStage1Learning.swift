@@ -4,14 +4,33 @@ import SceneKit
 
 final class FrankensteinStage1Learning {
 
+    // MARK: - Public learning state
+
     private(set) var lastOutcome: FrankensteinStage1Outcome?
     private(set) var lastObservation: FrankensteinStage1Observation?
     private(set) var isSkillActive = false
 
+    private(set) var lastEffectiveReward: Double = 0
+    private(set) var totalAttempts = 0
+    private(set) var totalSuccesses = 0
+
+    private(set) var attemptsBySkill:
+        [FrankensteinStage1Skill: Int] = [:]
+
+    private(set) var successesBySkill:
+        [FrankensteinStage1Skill: Int] = [:]
+
+    private(set) var averageRewardBySkill:
+        [FrankensteinStage1Skill: Double] = [:]
+
     private let policy: FrankensteinLearningPolicy
+
+    // MARK: - Active attempt
 
     private var activeSkill: FrankensteinStage1Skill?
     private var startPosition: SCNVector3 = SCNVector3Zero
+    private var startObservation: FrankensteinStage1Observation?
+    private var startTime: TimeInterval = 0
 
     private var startGapWidth: Float = 0
     private var startLandingHeightDelta: Float = 0
@@ -34,9 +53,10 @@ final class FrankensteinStage1Learning {
 
         activeSkill = skill
         startPosition = position
+        startObservation = observation
         lastObservation = observation
+        startTime = ProcessInfo.processInfo.systemUptime
 
-        // Read the observation directly.
         startGapWidth = observation.gapWidth
         startLandingHeightDelta = observation.landingHeightDelta
         startLandingAreaClear = observation.landingAreaIsClear
@@ -45,8 +65,7 @@ final class FrankensteinStage1Learning {
         isSkillActive = true
     }
 
-
-    // MARK: - Compatibility API for FrankensteinInMotion
+    // MARK: - Compatibility API
 
     func observe(_ observation: FrankensteinStage1Observation) {
         updateObservation(observation)
@@ -69,10 +88,7 @@ final class FrankensteinStage1Learning {
         at position: SCNVector3,
         outcome: FrankensteinStage1Outcome
     ) -> Bool {
-        finishSkill(
-            at: position,
-            outcome: outcome
-        )
+        finishSkill(at: position, outcome: outcome)
     }
 
     func reset() {
@@ -81,14 +97,21 @@ final class FrankensteinStage1Learning {
         outcomeRecorded = false
 
         startPosition = SCNVector3Zero
+        startObservation = nil
+        startTime = 0
+
         startGapWidth = 0
         startLandingHeightDelta = 0
         startLandingAreaClear = false
 
         lastObservation = nil
         lastOutcome = nil
+        lastEffectiveReward = 0
+
+        // Keep accumulated learning statistics.
     }
 
+    // MARK: - Observation updates
 
     func updateObservation(
         _ observation: FrankensteinStage1Observation
@@ -96,7 +119,7 @@ final class FrankensteinStage1Learning {
         lastObservation = observation
     }
 
-    // MARK: - Finish a skill
+    // MARK: - Finish and evaluate a skill
 
     @discardableResult
     func finishSkill(
@@ -109,30 +132,134 @@ final class FrankensteinStage1Learning {
             return false
         }
 
+        // Mark the attempt before learning to prevent duplicate updates.
         outcomeRecorded = true
-        lastOutcome = outcome
+
+        let endTime = ProcessInfo.processInfo.systemUptime
+        let measuredDuration = max(0, endTime - startTime)
 
         let distanceTravelled = distance(
             from: startPosition,
             to: position
         )
 
-        // Keep these measurements available for the policy update.
+        let effectiveReward = calculateReward(
+            outcome: outcome,
+            distanceTravelled: distanceTravelled
+        )
+
         let attempt = AttemptSummary(
             skill: skill,
             distanceTravelled: distanceTravelled,
             gapWidth: startGapWidth,
             landingHeightDelta: startLandingHeightDelta,
             landingAreaClear: startLandingAreaClear,
-            outcome: outcome
+            effectiveReward: effectiveReward,
+            outcome: outcome,
+            measuredDuration: measuredDuration
         )
 
+        lastOutcome = outcome
+        lastEffectiveReward = effectiveReward
+
+        recordStatistics(for: attempt)
         applyLearning(for: attempt)
 
         activeSkill = nil
         isSkillActive = false
 
         return true
+    }
+
+    // MARK: - Alleya CA reward evaluation
+
+    private func calculateReward(
+        outcome: FrankensteinStage1Outcome,
+        distanceTravelled: Float
+    ) -> Double {
+        var reward = outcome.reward
+
+        // Progress is based on the reported outcome and measured movement.
+        // Do not award progress for a blocked or fallen attempt.
+        if !outcome.blocked && !outcome.fell {
+            reward += max(0, outcome.progressMade) * 2.0
+            reward += Double(max(0, distanceTravelled)) * 0.25
+        }
+
+        if outcome.blocked {
+            reward -= 1.5
+        }
+
+        if outcome.fell {
+            reward -= 8.0
+        }
+
+        if outcome.completed {
+            reward += 5.0
+        }
+
+        return reward
+    }
+
+    // MARK: - Record experience
+
+    private func recordStatistics(for attempt: AttemptSummary) {
+        totalAttempts += 1
+
+        attemptsBySkill[attempt.skill, default: 0] += 1
+
+        if attempt.outcome.completed &&
+            !attempt.outcome.fell &&
+            !attempt.outcome.blocked {
+            totalSuccesses += 1
+            successesBySkill[attempt.skill, default: 0] += 1
+        }
+
+        let oldAverage =
+            averageRewardBySkill[attempt.skill] ?? 0
+
+        let count = Double(attemptsBySkill[attempt.skill] ?? 1)
+
+        averageRewardBySkill[attempt.skill] =
+            oldAverage + (attempt.effectiveReward - oldAverage) / count
+    }
+
+    // MARK: - Policy learning
+
+    private func applyLearning(for attempt: AttemptSummary) {
+        /*
+         Alleya learning sequence:
+
+         1. Observe the starting environment.
+         2. Execute a skill.
+         3. Measure displacement and duration.
+         4. Evaluate progress, blockage, falling and completion.
+         5. Record the experience and reward.
+         6. Send feedback to the underlying policy where its API supports it.
+
+         The available policy feedback API is reportJumpOutcome(...).
+         A general learn(state:action:reward:nextState:) API is not
+         assumed here because its signature has not been verified.
+         */
+
+        guard attempt.skill == .jump else { return }
+
+        let successfulJump =
+            attempt.outcome.completed &&
+            !attempt.outcome.fell &&
+            !attempt.outcome.blocked &&
+            attempt.landingAreaClear
+
+        let forwardError =
+            attempt.distanceTravelled - attempt.gapWidth
+
+        let heightError = attempt.landingHeightDelta
+
+        policy.reportJumpOutcome(
+            success: successfulJump,
+            forwardError: forwardError,
+            heightError: heightError
+        )
     }
 
     // MARK: - Gap assessment
@@ -159,20 +286,6 @@ final class FrankensteinStage1Learning {
         return true
     }
 
-    // MARK: - Policy learning
-
-    private func applyLearning(for attempt: AttemptSummary) {
-        /*
-         Connect this method to the existing policy learning API.
-
-         The exact call depends on the current definitions of
-         FrankensteinStage1Skill, FrankensteinStage1Outcome,
-         and FrankensteinLearningPolicy.learn(...).
-         */
-        _ = policy
-        _ = attempt
-    }
-
     // MARK: - Helpers
 
     private func distance(
@@ -192,6 +305,9 @@ final class FrankensteinStage1Learning {
         let gapWidth: Float
         let landingHeightDelta: Float
         let landingAreaClear: Bool
+        let effectiveReward: Double
         let outcome: FrankensteinStage1Outcome
+        let measuredDuration: TimeInterval
     }
+    
 }
