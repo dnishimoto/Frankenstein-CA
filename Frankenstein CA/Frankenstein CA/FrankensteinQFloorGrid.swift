@@ -2,16 +2,16 @@
 import Foundation
 import SceneKit
 import UIKit
+import QuartzCore
 
 // MARK: - Q-Value Floor Grid
 
-/// Displays the existing learning policy's Q-values on a floor grid.
-///
+/// Displays the learning policy's Q-values on a floor grid.
 /// Rows represent terrain types.
 /// Columns represent distance bands.
-/// Each tile displays the best allowed action and its Q-value.
-///
-/// This visualizes policy values; it is not a spatial route map.
+/// Each tile displays the best available action and its Q-value.
+/// This is a policy-value visualization, not a spatial route map.
+
 final class FrankensteinQFloorGrid {
 
     // MARK: Configuration
@@ -25,25 +25,9 @@ final class FrankensteinQFloorGrid {
 
     private let boardName = "FrankensteinQFloorGrid"
     private weak var scene: SCNScene?
-
     private var tileNodes: [SCNNode] = []
-    private var lastUpdateTime: TimeInterval = 0
 
-    private let terrains: [TerrainDefinition] = [
-        TerrainDefinition(name: "FLAT", terrain: .flat),
-        TerrainDefinition(name: "HURDLE", terrain: .hurdle),
-        TerrainDefinition(name: "GAP", terrain: .gap),
-        TerrainDefinition(name: "LOW CEILING", terrain: .lowCeiling),
-        TerrainDefinition(name: "RAISED STEP", terrain: .raisedStep),
-        TerrainDefinition(name: "SLOPE", terrain: .slope),
-        TerrainDefinition(name: "UNEVEN", terrain: .uneven)
-    ]
-
-    private let distanceBands: [DistanceDefinition] = [
-        DistanceDefinition(name: "NEAR", distance: 0.4),
-        DistanceDefinition(name: "MID", distance: 1.3),
-        DistanceDefinition(name: "FAR", distance: 2.5)
-    ]
+    // MARK: Terrain and distance definitions
 
     private struct TerrainDefinition {
         let name: String
@@ -54,6 +38,23 @@ final class FrankensteinQFloorGrid {
         let name: String
         let distance: Float
     }
+
+    private let terrains: [TerrainDefinition] = [
+        TerrainDefinition(name: "FLAT", terrain: .flat),
+        TerrainDefinition(name: "HURDLE", terrain: .hurdle),
+        TerrainDefinition(name: "GAP", terrain: .gap),
+        TerrainDefinition(name: "LOW CEILING", terrain: .lowCeiling),
+        TerrainDefinition(name: "RAISED STEP", terrain: .raisedStep),
+        TerrainDefinition(name: "SLOPE", terrain: .slope),
+        TerrainDefinition(name: "UNEVEN", terrain: .uneven),
+        TerrainDefinition(name: "UNKNOWN", terrain: .unknown)
+    ]
+
+    private let distanceBands: [DistanceDefinition] = [
+        DistanceDefinition(name: "NEAR", distance: 0.4),
+        DistanceDefinition(name: "MID", distance: 1.3),
+        DistanceDefinition(name: "FAR", distance: 2.5)
+    ]
 
     // MARK: Attach
 
@@ -72,6 +73,7 @@ final class FrankensteinQFloorGrid {
         let board = SCNNode()
         board.name = boardName
         board.position = boardPosition
+
         scene.rootNode.addChildNode(board)
 
         addTitle(to: board)
@@ -120,17 +122,10 @@ final class FrankensteinQFloorGrid {
                     distanceName: distanceBands[column].name
                 )
 
-                let x = Float(column - 1) *
-                    (tileWidth + tileGap)
+                let x = Float(column - 1) * (tileWidth + tileGap)
+                let z = Float(row) * (tileDepth + tileGap)
 
-                let z = Float(row) *
-                    (tileDepth + tileGap)
-
-                tile.position = SCNVector3(
-                    x,
-                    0,
-                    z
-                )
+                tile.position = SCNVector3(x, 0, z)
 
                 board.addChildNode(tile)
                 tileNodes.append(tile)
@@ -156,6 +151,7 @@ final class FrankensteinQFloorGrid {
         ]
 
         let base = SCNNode(geometry: geometry)
+        base.name = "QGridBase"
         base.position.y = 0.0125
         container.addChildNode(base)
 
@@ -165,12 +161,7 @@ final class FrankensteinQFloorGrid {
             color: .white
         )
 
-        terrainText.position = SCNVector3(
-            0,
-            0.035,
-            -0.25
-        )
-
+        terrainText.position = SCNVector3(0, 0.035, -0.25)
         container.addChildNode(terrainText)
 
         let distanceText = makeText(
@@ -179,27 +170,17 @@ final class FrankensteinQFloorGrid {
             color: .lightGray
         )
 
-        distanceText.position = SCNVector3(
-            0,
-            0.035,
-            -0.09
-        )
-
+        distanceText.position = SCNVector3(0, 0.035, -0.09)
         container.addChildNode(distanceText)
 
         let actionText = makeText(
             "ACTION: —",
-            size: 0.10,
+            size: 0.085,
             color: .cyan
         )
 
         actionText.name = "QGridAction"
-        actionText.position = SCNVector3(
-            0,
-            0.035,
-            0.08
-        )
-
+        actionText.position = SCNVector3(0, 0.035, 0.08)
         container.addChildNode(actionText)
 
         let valueText = makeText(
@@ -209,12 +190,7 @@ final class FrankensteinQFloorGrid {
         )
 
         valueText.name = "QGridValue"
-        valueText.position = SCNVector3(
-            0,
-            0.035,
-            0.25
-        )
-
+        valueText.position = SCNVector3(0, 0.035, 0.25)
         container.addChildNode(valueText)
 
         return container
@@ -240,30 +216,37 @@ final class FrankensteinQFloorGrid {
 
         for row in terrains.indices {
             for column in distanceBands.indices {
-                let index =
-                    row * distanceBands.count + column
+                let index = row * distanceBands.count + column
 
                 guard index < tileNodes.count else { continue }
 
                 let tile = tileNodes[index]
 
+                // Create a representative state for this tile.
                 var tileSample = sample
                 tileSample.terrain = terrains[row].terrain
                 tileSample.distance = distanceBands[column].distance
 
+                // Keep the display query grounded and independent
+                // of whether Frankenstein is currently airborne.
                 var tileBody = body
                 tileBody.grounded = true
                 tileBody.fallen = false
 
+                // Read the existing policy values.
+                // This must not select an action or update learning.
                 let values = policy.actionValues(
                     terrain: tileSample,
                     body: tileBody
                 )
 
-                let best = values.first
+                // FIX: Define the best value before using it.
+                let best = values.max {
+                    $0.value < $1.value
+                }
 
                 let actionName = best.map {
-                    String(describing: $0.action).uppercased()
+                    String(describing: $0.key).uppercased()
                 } ?? "UNLEARNED"
 
                 let qValue = best?.value ?? 0
@@ -290,20 +273,21 @@ final class FrankensteinQFloorGrid {
                     color: qValue >= 0 ? .yellow : .orange
                 )
 
-                // Give higher-valued tiles a brighter appearance.
+                // Brighter tiles represent larger Q-values.
                 let normalized = CGFloat(
                     min(1, max(0, (Double(qValue) + 2) / 6))
                 )
 
-                if let base = tile.childNodes.first,
-                   let box = base.geometry as? SCNBox {
-                    box.firstMaterial?.diffuse.contents =
-                        UIColor(
-                            red: 0.10 + 0.10 * normalized,
-                            green: 0.12 + 0.45 * normalized,
-                            blue: 0.18 + 0.15 * normalized,
-                            alpha: 0.96
-                        )
+                if let base = tile.childNode(
+                    withName: "QGridBase",
+                    recursively: false
+                ), let box = base.geometry as? SCNBox {
+                    box.firstMaterial?.diffuse.contents = UIColor(
+                        red: 0.10 + 0.10 * normalized,
+                        green: 0.12 + 0.45 * normalized,
+                        blue: 0.18 + 0.15 * normalized,
+                        alpha: 0.96
+                    )
                 }
             }
         }
@@ -324,7 +308,7 @@ final class FrankensteinQFloorGrid {
             )
         )
 
-        // SCNText lies in the local XY plane. Rotate it onto the floor.
+        // Rotate SCNText so it lies on the floor.
         node.eulerAngles.x = -.pi / 2
 
         return node

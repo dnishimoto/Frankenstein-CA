@@ -1,7 +1,16 @@
 
-
 import Foundation
 
+// MARK: - Terrain Sample
+
+/// Environmental observations supplied to Frankenstein's perception,
+/// Q-learning, locomotion, and safety systems.
+///
+/// Distances and dimensions are expressed in SceneKit world units,
+/// normally meters when the scene uses a meter-based scale.
+///
+/// `isLandingAreaClear` is preliminary sensor evidence, not a guarantee
+/// that a jump is safe. The locomotion controller must recheck safety.
 struct FrankensteinTerrainSample {
 
     // MARK: - Terrain classification
@@ -12,6 +21,12 @@ struct FrankensteinTerrainSample {
 
     /// Distance to the nearest detected terrain feature.
     var distance: Float = 5
+
+    /// Compatibility alias for Q-learning code that reads distanceAhead.
+    var distanceAhead: Float {
+        get { distance }
+        set { distance = newValue }
+    }
 
     /// Estimated obstacle height above the current ground.
     var obstacleHeight: Float = 0
@@ -47,4 +62,45 @@ struct FrankensteinTerrainSample {
 
     /// Preliminary indication that a landing surface was detected.
     var isLandingAreaClear: Bool = true
+
+    // MARK: - Derived measurements
+
+    /// True when both gap edges have finite, valid measurements.
+    var hasValidGapEdges: Bool {
+        gapNearEdgeDistance.isFinite &&
+        gapFarEdgeDistance.isFinite &&
+        gapNearEdgeDistance >= 0 &&
+        gapFarEdgeDistance > gapNearEdgeDistance
+    }
+
+    /// Geometric gap width inferred from the edge distances.
+    /// Returns nil if the edge measurements are invalid.
+    var measuredGapWidth: Float? {
+        guard hasValidGapEdges else {
+            return nil
+        }
+
+        return gapFarEdgeDistance - gapNearEdgeDistance
+    }
+
+    /// True when the next ground surface is within the allowed
+    /// step-up height. This is a measurement helper, not an
+    /// independent movement authorization.
+    func isStepUpSafe(maximumHeight: Float = 0.55) -> Bool {
+        let rise = nextGroundHeight - groundHeight
+
+        return isGroundAhead &&
+        rise > 0 &&
+        rise <= maximumHeight
+    }
+
+    /// True when the detected ground drops by no more than the
+    /// supplied step-down limit.
+    func isStepDownSafe(maximumDrop: Float = 0.60) -> Bool {
+        let drop = groundHeight - nextGroundHeight
+
+        return isGroundAhead &&
+        drop >= 0 &&
+        drop <= maximumDrop
+    }
 }

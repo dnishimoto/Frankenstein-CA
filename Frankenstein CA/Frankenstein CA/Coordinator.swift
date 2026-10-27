@@ -95,10 +95,21 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     /// Connect the existing cellular automaton to the coordinator.
+   
     func attachCA(_ ca: FrankensteinCA) {
         self.ca = ca
+
+        // Connect this exact CA instance to locomotion.
+        locomotion.attachCA(ca)
+
+        // Publish the initial generation and live-cell count.
         publishCAStats()
+
+        print("[CA] Connected to Coordinator and Locomotion.")
+        print("[CA] Generation: \(ca.generation)")
+        print("[CA] Live cells: \(ca.liveCellCount)")
     }
+
 
  
     private func tickCA() {
@@ -106,6 +117,11 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         ca.step()
         publishCAStats()
+
+        print(
+            "[CA] Generation: \(ca.generation), " +
+            "Live cells: \(ca.liveCellCount)"
+        )
     }
     /// Send generation and live-cell counts to the UI.
     private func publishCAStats() {

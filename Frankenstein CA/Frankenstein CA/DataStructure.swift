@@ -9,7 +9,17 @@ import Foundation
 import SwiftUI
 import SceneKit
 
-// MARK: - Detected Object Information
+enum FrankensteinEpisodeEnd {
+    case reachedGoal
+    case fell
+}
+
+enum FrankensteinCACommand {
+    case walk
+    case run
+    case turnLeft
+    case turnRight
+}
 
 struct DetectedObjectInfo {
     let name: String
