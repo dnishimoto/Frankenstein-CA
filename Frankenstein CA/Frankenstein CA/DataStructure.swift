@@ -8,17 +8,15 @@
 import Foundation
 import SwiftUI
 import SceneKit
-
-enum FrankensteinEpisodeEnd {
-    case reachedGoal
-    case fell
-}
-
 enum FrankensteinCACommand {
     case walk
     case run
     case turnLeft
     case turnRight
+}
+enum FrankensteinEpisodeEnd {
+    case reachedGoal
+    case fell
 }
 
 struct DetectedObjectInfo {

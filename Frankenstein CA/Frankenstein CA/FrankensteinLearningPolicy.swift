@@ -1,4 +1,3 @@
-
 import Foundation
 
 // MARK: - Q-Learning Policy
@@ -8,7 +7,7 @@ import Foundation
 /// Responsibilities:
 /// - Encode the current environment and body state.
 /// - Select an allowed action using Q-values and exploration.
-/// - Accept the CA's preferred action as a decision input.
+/// - Provide learned Q-values to the CA; learn from the CA-selected executed action.
 /// - Preserve one pending decision until its outcome is learned.
 /// - Learn from the action actually executed.
 /// - Expose diagnostics for state diversity and learning progress.
@@ -41,8 +40,8 @@ final class FrankensteinLearningPolicy {
     var discount: Float = 0.90
     var exploration: Float = 0.20
 
-    /// Small bonus used to incorporate the CA preference.
-    /// It does not override the Q-value or environmental safety.
+    /// Legacy compatibility weight for callers that still use choose(preferredAction:).
+    /// The executive path uses learnedActionValues and lets the CA make the final choice.
     var caPreferenceWeight: Float = 0.15
 
     private let minimumExploration: Float = 0.03
@@ -141,6 +140,43 @@ final class FrankensteinLearningPolicy {
         in state: State
     ) {
         values[state, default: [:]][action.rawValue] = value
+    }
+
+    // MARK: - CA executive-controller interface
+
+    /// Q-values are advice to the CA. This method does not select or execute an action.
+    func learnedActionValues(
+        terrain: FrankensteinTerrainSample,
+        body: FrankensteinBodyState
+    ) -> [FrankensteinAction: Float] {
+        actionValues(terrain: terrain, body: body)
+    }
+
+    /// Starts a learning transition for the action the CA actually chose.
+    /// The Q-policy records the CA decision, rather than replacing it.
+    @discardableResult
+    func beginCAChosenAction(
+        _ action: FrankensteinAction,
+        terrain: FrankensteinTerrainSample,
+        body: FrankensteinBodyState
+    ) -> Bool {
+        guard !actionPendingLearning else {
+            print("[Q-Learning] Cannot begin CA action: previous action still awaits its outcome.")
+            return false
+        }
+        let state = makeState(terrain: terrain, body: body)
+        let allowed = allowedActions(terrain: terrain, body: body)
+        guard allowed.contains(action) else {
+            print("[Q-Learning] CA action rejected by policy constraints: \(action)")
+            return false
+        }
+        _ = values[state, default: [:]]
+        lastState = state
+        lastAction = action
+        pendingAllowedActions = Set(allowed)
+        actionPendingLearning = true
+        print("[Q-Learning] Learning target set by CA: \(action)")
+        return true
     }
 
     // MARK: - Action selection

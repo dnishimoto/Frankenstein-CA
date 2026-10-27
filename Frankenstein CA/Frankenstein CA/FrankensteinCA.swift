@@ -1,254 +1,138 @@
-
 import Foundation
 import Combine
 
-/// An 18 × 18 cellular automaton used as an animation signal source.
-/// The CA controls animation signals only. Actual movement and learning
-/// belong to the locomotion and learning systems.
+
+
+/// 18 x 18 cellular automaton and executive action controller.
+/// The CA owns the final action choice. Q-learning contributes learned values,
+/// while terrain constraints and the locomotion safety layer restrict candidates.
 final class FrankensteinCA: ObservableObject {
-
-    // MARK: - Configuration
-
     let size = 18
-
-    private let survivalNeighbors = 2...3
-    private let birthNeighbors = 3
-
-    // MARK: - Published State
-
-    @Published private(set) var grid: [[Bool]] = []
     @Published private(set) var generation: Int = 0
-    @Published private(set) var isRunning: Bool = false
+    @Published private(set) var isRunning = false
+    @Published private(set) var liveCellCount: Int = 0
+    @Published private(set) var lastDecisionDescription = "Waiting for perception"
 
-    @Published private(set) var walkPhase: Float = 0
-    @Published private(set) var armLift: Float = 0
-    @Published private(set) var headTurn: Float = 0
-    @Published private(set) var mouthOpen: Float = 0
+    private var grid: [[Bool]]
+    private var nextGrid: [[Bool]]
 
-    // MARK: - Working Buffer
-
-    private var nextGrid: [[Bool]] = []
-
-    // MARK: - Initialization
-
-    init(randomizeOnStart: Bool = true) {
-        grid = Self.makeEmptyGrid(size: size)
-        nextGrid = Self.makeEmptyGrid(size: size)
-
-        if randomizeOnStart {
-            randomize()
-        } else {
-            seedDefaultPattern()
-        }
-
-        refreshAnimationSignals()
+    init() {
+        grid = Array(repeating: Array(repeating: false, count: size), count: size)
+        nextGrid = grid
+        randomize()
+        liveCellCount = countLiveCells()
     }
-
-    private static func makeEmptyGrid(size: Int) -> [[Bool]] {
-        Array(
-            repeating: Array(repeating: false, count: size),
-            count: size
-        )
-    }
-
-    // MARK: - Run Controls
-
-    func start() {
-        guard !isRunning else { return }
-        isRunning = true
-    }
-
-    func stop() {
-        guard isRunning else { return }
-        isRunning = false
-    }
-
-    func toggleRunning() {
-        isRunning.toggle()
-    }
-
-    /// Advances exactly one generation, even when stopped.
-    func step() {
-        update()
-    }
-
-    /// Advances only when continuous running is enabled.
-    func tick() {
-        guard isRunning else { return }
-        update()
-    }
-
-    // MARK: - Cellular Automaton
-
-    func update() {
-        guard grid.count == size,
-              grid.allSatisfy({ $0.count == size }) else {
-            grid = Self.makeEmptyGrid(size: size)
-            nextGrid = Self.makeEmptyGrid(size: size)
-            generation = 0
-            refreshAnimationSignals()
-            return
-        }
-
-        for y in 0..<size {
-            for x in 0..<size {
-                let neighbors = countLiveNeighbors(x: x, y: y)
-                let currentlyAlive = grid[y][x]
-
-                if currentlyAlive {
-                    nextGrid[y][x] =
-                        survivalNeighbors.contains(neighbors)
-                } else {
-                    nextGrid[y][x] =
-                        neighbors == birthNeighbors
-                }
-            }
-        }
-
-        swap(&grid, &nextGrid)
-
-        // Every successful update increments generation.
-        generation += 1
-        refreshAnimationSignals()
-    }
-
-    // MARK: - Cell Access
 
     func isActive(_ x: Int, _ y: Int) -> Bool {
-        guard (0..<size).contains(x),
-              (0..<size).contains(y) else {
-            return false
-        }
-
+        guard (0..<size).contains(x), (0..<size).contains(y) else { return false }
         return grid[y][x]
     }
 
-    func setActive(_ active: Bool, x: Int, y: Int) {
-        guard (0..<size).contains(x),
-              (0..<size).contains(y) else {
-            return
-        }
+    func start() { isRunning = true }
+    func stop() { isRunning = false }
+    func tick() { guard isRunning else { return }; update() }
+    func step() { update() }
 
-        grid[y][x] = active
-        refreshAnimationSignals()
+    func reset() {
+        generation = 0
+        randomize()
+        liveCellCount = countLiveCells()
+        lastDecisionDescription = "Reset"
     }
 
-    func toggleCell(x: Int, y: Int) {
-        guard (0..<size).contains(x),
-              (0..<size).contains(y) else {
-            return
+    func update() {
+        for y in 0..<size {
+            for x in 0..<size {
+                let neighbors = countLiveNeighbors(x: x, y: y)
+                nextGrid[y][x] = (grid[y][x] && (neighbors == 2 || neighbors == 3)) ||
+                    (!grid[y][x] && neighbors == 3)
+            }
         }
-
-        grid[y][x].toggle()
-        refreshAnimationSignals()
+        swap(&grid, &nextGrid)
+        generation += 1
+        liveCellCount = countLiveCells()
     }
 
-    // MARK: - Neighbor Counting
+    /// Executive decision. The CA combines its live spatial pattern with learned
+    /// Q-values, but only selects from actions permitted by the current state.
+    func decideAction(
+        terrain: FrankensteinTerrainSample,
+        body: FrankensteinBodyState,
+        allowedActions: [FrankensteinAction],
+        qValues: [FrankensteinAction: Float]
+    ) -> FrankensteinAction {
+        guard !allowedActions.isEmpty else {
+            lastDecisionDescription = "No permitted action"
+            return .walk
+        }
+
+        let left = activity(in: 0..<(size / 3))
+        let center = activity(in: (size / 3)..<((size * 2) / 3))
+        let right = activity(in: ((size * 2) / 3)..<size)
+        let leftBias = Float(left - right) / Float(max(1, size * size))
+        let centerBias = Float(center) / Float(max(1, size * size))
+
+        // The CA's own spatial state creates action-specific preferences.
+        // Q-values are learned evidence, not an independent controller.
+        func caBias(_ action: FrankensteinAction) -> Float {
+            switch action {
+            case .turnLeft: return leftBias * 3.0
+            case .turnRight: return -leftBias * 3.0
+            case .run: return centerBias * 1.5
+            case .walk: return 0.15
+            case .jump:
+                return (terrain.terrain == .gap || terrain.terrain == .hurdle || terrain.terrain == .raisedStep) ? 0.35 : -0.1
+            case .stepUp:
+                return terrain.terrain == .raisedStep ? 0.35 : 0
+            case .crouch:
+                return terrain.terrain == .lowCeiling ? 0.5 : 0
+            case .recover:
+                return body.fallen ? 1.0 : -1.0
+            default: return 0
+            }
+        }
+
+        let selected = allowedActions.max { lhs, rhs in
+            let l = (qValues[lhs] ?? 0) + caBias(lhs)
+            let r = (qValues[rhs] ?? 0) + caBias(rhs)
+            return l < r
+        } ?? allowedActions[0]
+
+        lastDecisionDescription = "\(selected) | Q=\(qValues[selected] ?? 0), CA activity L/C/R=\(left)/\(center)/\(right)"
+        print("[CA] Executive selected: \(selected)")
+        print("[CA] Q-policy advice: \(qValues)")
+        print("[CA] Generation=\(generation), live cells=\(liveCellCount)")
+        return selected
+    }
+
+    private func activity(in columns: Range<Int>) -> Int {
+        var total = 0
+        for y in 0..<size {
+            for x in columns where grid[y][x] { total += 1 }
+        }
+        return total
+    }
 
     private func countLiveNeighbors(x: Int, y: Int) -> Int {
         var count = 0
-
         for dy in -1...1 {
             for dx in -1...1 {
-                if dx == 0 && dy == 0 {
-                    continue
-                }
-
-                // Wrapping boundaries.
+                if dx == 0 && dy == 0 { continue }
                 let nx = (x + dx + size) % size
                 let ny = (y + dy + size) % size
-
-                if grid[ny][nx] {
-                    count += 1
-                }
+                if grid[ny][nx] { count += 1 }
             }
         }
-
         return count
     }
 
-    // MARK: - Reset and Seeding
-
-    func reset() {
-        isRunning = false
-        generation = 0
-        grid = Self.makeEmptyGrid(size: size)
-        nextGrid = Self.makeEmptyGrid(size: size)
-        seedDefaultPattern()
-        refreshAnimationSignals()
+    private func countLiveCells() -> Int {
+        grid.reduce(0) { $0 + $1.filter { $0 }.count }
     }
 
-    func randomize() {
+    private func randomize() {
         for y in 0..<size {
-            for x in 0..<size {
-                grid[y][x] = Bool.random()
-            }
+            for x in 0..<size { grid[y][x] = Bool.random() }
         }
-
-        nextGrid = Self.makeEmptyGrid(size: size)
-        generation = 0
-        refreshAnimationSignals()
-    }
-
-    func seedDefaultPattern() {
-        grid = Self.makeEmptyGrid(size: size)
-        nextGrid = Self.makeEmptyGrid(size: size)
-
-        let glider: [(Int, Int)] = [
-            (2, 1), (3, 2), (1, 3), (2, 3), (3, 3)
-        ]
-
-        let blinker: [(Int, Int)] = [
-            (8, 8), (8, 9), (8, 10)
-        ]
-
-        let oscillator: [(Int, Int)] = [
-            (13, 12), (14, 12), (15, 12),
-            (14, 13), (14, 14)
-        ]
-
-        for (x, y) in glider + blinker + oscillator {
-            if (0..<size).contains(x),
-               (0..<size).contains(y) {
-                grid[y][x] = true
-            }
-        }
-
-        generation = 0
-        refreshAnimationSignals()
-    }
-
-    // MARK: - Statistics
-
-    var liveCellCount: Int {
-        grid.reduce(0) { total, row in
-            total + row.filter { $0 }.count
-        }
-    }
-
-    var liveCellFraction: Float {
-        let total = size * size
-        guard total > 0 else { return 0 }
-        return Float(liveCellCount) / Float(total)
-    }
-
-    // MARK: - Animation Signals
-
-    private func refreshAnimationSignals() {
-        walkPhase = isActive(8, 8) ? 1.0 : 0.0
-        armLift = isActive(4, 4) ? 1.0 : 0.0
-        headTurn = isActive(2, 2) ? 1.0 : 0.0
-        mouthOpen = isActive(10, 10) ? 1.0 : 0.0
-    }
-
-    var animationSignals: FrankensteinMotion {
-        FrankensteinMotion(
-            walkPhase: walkPhase,
-            armLift: armLift,
-            headTurn: headTurn,
-            mouthOpen: mouthOpen
-        )
     }
 }
-
-

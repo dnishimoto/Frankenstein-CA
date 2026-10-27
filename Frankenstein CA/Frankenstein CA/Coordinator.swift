@@ -578,24 +578,57 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     // MARK: - Object Ray Trace
 
+  
     private func detectObjectAhead(
         from character: SCNNode,
         in scene: SCNScene
     ) -> DetectedObjectInfo? {
 
-        let position = character.presentation.worldPosition
-        let forward = forwardVector()
+        // Use the presentation node so detection follows the animated character.
+        let characterPresentation = character.presentation
+        let position = characterPresentation.worldPosition
 
+        // SceneKit forward is local -Z. Convert that direction into world space
+        // so character rotation is respected.
+        let localForwardPoint = characterPresentation.convertPosition(
+            SCNVector3(0, 0, -1),
+            to: nil
+        )
+
+        var forward = SCNVector3(
+            localForwardPoint.x - position.x,
+            localForwardPoint.y - position.y,
+            localForwardPoint.z - position.z
+        )
+
+        let forwardLength = sqrt(
+            forward.x * forward.x +
+            forward.y * forward.y +
+            forward.z * forward.z
+        )
+
+        guard forwardLength > 0.0001 else {
+            return nil
+        }
+
+        forward.x /= forwardLength
+        forward.y /= forwardLength
+        forward.z /= forwardLength
+
+        // Start around the character's upper torso.
         let start = SCNVector3(
             position.x,
             position.y + 0.7,
             position.z
         )
 
+        // Keep the ray level, so it detects objects in front rather than
+        // aiming toward the floor or ceiling.
+        let rayLength: Float = 4.0
         let end = SCNVector3(
-            start.x + forward.x * 4.0,
+            start.x + forward.x * rayLength,
             start.y,
-            start.z + forward.z * 4.0
+            start.z + forward.z * rayLength
         )
 
         let options: [String: Any] = [
@@ -609,30 +642,107 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             options: options
         )
 
-        guard let hit = hits.first(where: {
-            !isCharacterPart($0.node) &&
-            !isGroundLikeNode($0.node)
-        }) else {
-            return nil
+        // Hits are normally returned nearest first. Filter before selecting,
+        // so Frankenstein's body and floor do not hide a real object behind them.
+        for hit in hits {
+            let hitNode = hit.node
+
+            guard !isCharacterPart(hitNode) else {
+                continue
+            }
+
+            guard !isGroundLikeNode(hitNode) else {
+                continue
+            }
+
+            // Resolve a geometry child to its meaningful pickup/object parent.
+            let target = pickupTarget(for: hitNode)
+                ?? meaningfulDetectionParent(for: hitNode)
+
+            guard target !== character else {
+                continue
+            }
+
+            guard !isCharacterPart(target) else {
+                continue
+            }
+
+            let dimensions = worldDimensions(of: target)
+
+            // Ignore nodes without measurable geometry.
+            guard dimensions.x > 0.001,
+                  dimensions.y > 0.001,
+                  dimensions.z > 0.001 else {
+                continue
+            }
+
+            let hitPosition = hit.worldCoordinates
+
+            let dx = Float(hitPosition.x - start.x)
+            let dy = Float(hitPosition.y - start.y)
+            let dz = Float(hitPosition.z - start.z)
+
+            let distance = sqrt(dx * dx + dy * dy + dz * dz)
+
+            guard distance <= rayLength else {
+                continue
+            }
+
+            let name = readableName(for: target)
+
+            return DetectedObjectInfo(
+                name: name,
+                dimensions: dimensions,
+                distance: distance,
+                worldPosition: target.presentation.worldPosition,
+                pickupable: pickupTarget(for: target) != nil
+            )
         }
 
-        let target = pickupTarget(for: hit.node) ?? hit.node
-        let dimensions = worldDimensions(of: target)
-
-        let dx = Float(hit.worldCoordinates.x - start.x)
-        let dy = Float(hit.worldCoordinates.y - start.y)
-        let dz = Float(hit.worldCoordinates.z - start.z)
-
-        let distance = sqrt(dx * dx + dy * dy + dz * dz)
-
-        return DetectedObjectInfo(
-            name: readableName(for: target),
-            dimensions: dimensions,
-            distance: distance,
-            worldPosition: target.presentation.worldPosition,
-            pickupable: pickupTarget(for: target) != nil
-        )
+        return nil
     }
+
+    // MARK: - Resolve the actual object from a child mesh
+
+    private func meaningfulDetectionParent(
+        for node: SCNNode
+    ) -> SCNNode {
+
+        var current: SCNNode? = node
+        var bestCandidate = node
+
+        while let candidate = current {
+            let name = (candidate.name ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if !name.isEmpty,
+               !isGenericDetectionNodeName(name),
+               !isGroundLikeNode(candidate) {
+                bestCandidate = candidate
+            }
+
+            // Do not promote a hit to the entire scene or course container.
+            if name == "ObstacleCourse" ||
+               name == "TerrainRoot" ||
+               name == "SceneRoot" {
+                break
+            }
+
+            current = candidate.parent
+        }
+
+        return bestCandidate
+    }
+
+    private func isGenericDetectionNodeName(_ name: String) -> Bool {
+        let value = name.lowercased()
+
+        return value == "node" ||
+            value == "root" ||
+            value == "geometry" ||
+            value.hasPrefix("scn")
+    }
+
 
     // MARK: - Actual Displacement
 
@@ -1139,3 +1249,22 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         }
     }
 }
+
+extension Coordinator {
+    /// Attach the same CA instance owned by FrankensteinSceneView.
+    /// Call this from make/updateCoordinator after Coordinator creation.
+    func attachExecutiveCA(_ ca: FrankensteinCA) {
+        attachCA(ca)
+        print("[Coordinator] Shared CA attached; generation=\(ca.generation), live cells=\(ca.liveCellCount)")
+    }
+
+    /// Use this in the existing renderer loop after terrain sensing and after locomotion.step.
+    /// It makes policy/CA/execution discrepancies visible without changing scene mechanics.
+    func logExecutiveControlState(terrain: FrankensteinTerrainSample, locomotion: FrankensteinLocomotion) {
+        print("[Coordinator] CA generation=\(locomotion.attachedCAGeneration), live cells=\(locomotion.attachedCALiveCellCount)")
+        print("[Coordinator] CA decision=\(locomotion.caCommandName)")
+        print("[Coordinator] applied action=\(locomotion.activeActionName)")
+        print("[Coordinator] terrain=\(terrain.terrain), Q updates=\(locomotion.policy.updateCount), states=\(locomotion.policy.learnedStateCount)")
+    }
+}
+
