@@ -9,7 +9,29 @@ import Foundation
 import SwiftUI
 import SceneKit
 
-// MARK: - Feedback
+// MARK: - Detected Object Information
+
+struct DetectedObjectInfo {
+    let name: String
+    let dimensions: SCNVector3
+    let distance: Float
+    let worldPosition: SCNVector3
+    let pickupable: Bool
+
+    var dimensionsText: String {
+        String(
+            format: "%.2f × %.2f × %.2f",
+            Double(dimensions.x),
+            Double(dimensions.y),
+            Double(dimensions.z)
+        )
+    }
+
+    var distanceText: String {
+        String(format: "%.2f m", Double(distance))
+    }
+}
+
 
 enum FrankensteinFallReason: Equatable {
     case void

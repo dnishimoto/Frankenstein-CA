@@ -64,7 +64,29 @@ final class FrankensteinLearningPolicy {
         default:           return 8
         }
     }
-    // MARK: - Action Selection
+    // MARK: - Q-Value Visualization
+
+    func actionValues(
+        terrain: FrankensteinTerrainSample,
+        body: FrankensteinBodyState
+    ) -> [(action: FrankensteinAction, value: Float)] {
+        let currentState = state(
+            terrain: terrain,
+            body: body
+        )
+
+        let q = values[currentState] ?? emptyQValues()
+
+        return allowedActions(
+            terrain: terrain,
+            body: body
+        )
+        .filter { q.indices.contains($0.rawValue) }
+        .map { action in
+            (action: action, value: q[action.rawValue])
+        }
+        .sorted { $0.value > $1.value }
+    }
 
     func choose(
         terrain: FrankensteinTerrainSample,

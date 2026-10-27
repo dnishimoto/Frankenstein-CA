@@ -10,6 +10,8 @@ enum FrankensteinEpisodeEnd {
     case fell
 }
 
+// MARK: - Locomotion
+
 final class FrankensteinLocomotion {
 
     // MARK: - Existing project interfaces
@@ -22,6 +24,12 @@ final class FrankensteinLocomotion {
     var activeActionName: String {
         String(describing: currentAction)
     }
+
+    // MARK: - Walking animation state
+
+    private(set) var gaitPhase: Float = 0
+    private(set) var gaitSwing: Float = 0
+    private(set) var isWalking: Bool = false
 
     // MARK: - Movement configuration
 
@@ -39,6 +47,26 @@ final class FrankensteinLocomotion {
 
     private let jumpClearance: Float = 0.30
     private let maximumJumpDuration: Float = 3.0
+
+    // MARK: - Step movement
+
+    private let maximumStepUpHeight: Float = 0.45
+    private let maximumStepDownHeight: Float = 0.60
+
+    private let stepUpSpeed: Float = 0.55
+    private let stepDownSpeed: Float = 0.45
+    private let stepTransitionSpeed: Float = 2.0
+
+    private var stepStartHeight: Float = 0
+    private var stepTargetHeight: Float = 0
+    private var stepTransitionProgress: Float = 1
+
+    private(set) var stepUpInProgress = false
+    private(set) var stepDownInProgress = false
+
+    /// Prevents the same persistent sensor reading from repeatedly
+    /// restarting a completed step transition.
+    private var stepTransitionLatched = false
 
     // MARK: - Adaptive jump state
 
@@ -82,14 +110,13 @@ final class FrankensteinLocomotion {
 
     // MARK: - Episode completion
 
-    /// Records a terminal result once. Recoverable jump failures should
-    /// not call this unless the entire episode has ended.
     func completeEpisode(_ result: FrankensteinEpisodeEnd) {
         guard pendingEpisodeEnd == nil else {
             return
         }
 
         pendingEpisodeEnd = result
+        episodes += 1
 
         switch result {
         case .reachedGoal:
@@ -97,10 +124,17 @@ final class FrankensteinLocomotion {
 
         case .fell:
             falls += 1
+            body.fallen = true
         }
     }
 
-    // MARK: - Adaptive feedback
+    // MARK: - Collision feedback
+
+    func reportCollision() {
+        collisions += 1
+    }
+
+    // MARK: - Adaptive jump feedback
 
     func reportJumpOutcome(
         success: Bool,
@@ -182,6 +216,9 @@ final class FrankensteinLocomotion {
         guard pendingEpisodeEnd == nil else {
             output.speed = 0
             output.jump = 0
+            output.stride = 0
+            gaitSwing = 0
+            isWalking = false
             return output
         }
 
@@ -190,18 +227,38 @@ final class FrankensteinLocomotion {
             lastActualDisplacement = actualDisplacement
 
             if jumpInProgress {
-                actualJumpDistance += max(0, actualDisplacement)
+                actualJumpDistance += max(
+                    0,
+                    actualDisplacement
+                )
             }
         }
 
         actionElapsed += dt
 
-        if !jumpInProgress {
+        // Release the step latch after leaving the step terrain.
+        if terrain.terrain != .raisedStep {
+            stepTransitionLatched = false
+        }
+
+        if !jumpInProgress &&
+            !stepUpInProgress &&
+            !stepDownInProgress {
             selectMovement(for: terrain)
         }
 
-        updateMovement(deltaTime: dt, terrain: terrain)
-        updateJump(deltaTime: dt, terrain: terrain)
+        updateMovement(
+            deltaTime: dt,
+            terrain: terrain
+        )
+
+        updateJump(
+            deltaTime: dt,
+            terrain: terrain
+        )
+
+        updateStepTransition(deltaTime: dt)
+
         updateAnimation(deltaTime: dt)
         stabilize(terrain: terrain)
 
@@ -209,7 +266,9 @@ final class FrankensteinLocomotion {
 
         if !output.status.hasPrefix("Gap detected —") &&
             !output.status.hasPrefix("Jump failed —") {
-            output.status = statusDescription(terrain: terrain)
+            output.status = statusDescription(
+                terrain: terrain
+            )
         }
 
         return output
@@ -224,27 +283,36 @@ final class FrankensteinLocomotion {
         feedback: FrankensteinMotionFeedback
     ) -> FrankensteinLocomotionOutput {
 
+        var measuredDisplacement: Float?
+
         if hasPreviousPosition {
             let dx = feedback.position.x - previousPosition.x
             let dz = feedback.position.z - previousPosition.z
 
             let heading = output.heading
-            let forwardX = -sin(heading)
+
+            // Matches the Coordinator movement convention.
+            let forwardX = sin(heading)
             let forwardZ = -cos(heading)
 
-            let displacement = dx * forwardX + dz * forwardZ
+            let displacement =
+                dx * forwardX + dz * forwardZ
 
             if displacement.isFinite {
-                lastActualDisplacement = displacement
-
-                if jumpInProgress {
-                    actualJumpDistance += max(0, displacement)
-                }
+                measuredDisplacement = displacement
             }
         }
 
         previousPosition = feedback.position
         hasPreviousPosition = true
+
+        // Pass the measurement once. The main step method records
+        // it and updates actualJumpDistance when a jump is active.
+        let result = step(
+            deltaTime: deltaTime,
+            terrain: terrain,
+            actualDisplacement: measuredDisplacement
+        )
 
         if jumpInProgress && feedback.grounded {
             if terrain.isLandingAreaClear &&
@@ -259,11 +327,7 @@ final class FrankensteinLocomotion {
             }
         }
 
-        return step(
-            deltaTime: deltaTime,
-            terrain: terrain,
-            actualDisplacement: nil
-        )
+        return result
     }
 
     // MARK: - Action selection
@@ -276,28 +340,46 @@ final class FrankensteinLocomotion {
             return
         }
 
-        if terrain.terrain == .gap {
-            currentAction = .jump
-            return
-        }
+        switch terrain.terrain {
+        case .gap:
+            if terrain.gapWidth > 0 &&
+                terrain.isLandingAreaClear &&
+                terrain.gapNearEdgeDistance.isFinite &&
+                terrain.gapFarEdgeDistance.isFinite &&
+                terrain.gapNearEdgeDistance >= 0 &&
+                terrain.gapFarEdgeDistance >
+                    terrain.gapNearEdgeDistance {
+                currentAction = .jump
+            } else {
+                currentAction = .walk
+            }
 
-        if terrain.terrain == .hurdle &&
-            terrain.obstacleHeight > 0.35 {
-            currentAction = .jump
-            return
-        }
+        case .hurdle:
+            currentAction = terrain.obstacleHeight > 0.35
+                ? .jump
+                : .walk
 
-        if terrain.terrain == .lowCeiling {
+        case .lowCeiling:
             currentAction = .crouch
-            return
-        }
 
-        if terrain.terrain == .raisedStep {
-            currentAction = .stepUp
-            return
-        }
+        case .raisedStep:
+            if !stepTransitionLatched &&
+                terrain.obstacleHeight > 0 &&
+                terrain.obstacleHeight <= maximumStepUpHeight {
+                currentAction = .stepUp
+            } else {
+                currentAction = .walk
+            }
 
-        currentAction = .walk
+        case .slope, .uneven:
+            currentAction = .walk
+
+        case .flat:
+            currentAction = .walk
+
+        default:
+            currentAction = .walk
+        }
     }
 
     // MARK: - Horizontal movement
@@ -331,10 +413,10 @@ final class FrankensteinLocomotion {
             requestedSpeed = 1.1
 
         case .stepUp:
-            requestedSpeed = 0.55
+            requestedSpeed = stepUpSpeed
 
         case .stepDown:
-            requestedSpeed = 0.45
+            requestedSpeed = stepDownSpeed
 
         case .recover:
             requestedSpeed = 0
@@ -361,6 +443,102 @@ final class FrankensteinLocomotion {
         if currentAction == .jump && !jumpInProgress {
             beginJump(terrain: terrain)
         }
+
+        // Start an upward step transition only once for the
+        // currently detected raised-step obstacle.
+        if currentAction == .stepUp &&
+            !stepUpInProgress &&
+            !stepDownInProgress &&
+            !stepTransitionLatched {
+
+            let rise = terrain.obstacleHeight
+
+            if rise > 0 && rise <= maximumStepUpHeight {
+                beginStepTransition(
+                    to: body.height + rise
+                )
+                stepTransitionLatched = true
+            }
+        }
+    }
+
+    // MARK: - Step-up and step-down transitions
+
+    /// Starts a smooth vertical transition.
+    ///
+    /// The Coordinator must apply body.height to the actual
+    /// character root/feet position for this change to be visible.
+    private func beginStepTransition(to targetHeight: Float) {
+        guard targetHeight.isFinite else {
+            return
+        }
+
+        stepStartHeight = body.height
+        stepTargetHeight = targetHeight
+        stepTransitionProgress = 0
+
+        stepUpInProgress = targetHeight > body.height
+        stepDownInProgress = targetHeight < body.height
+
+        if stepUpInProgress {
+            currentAction = .stepUp
+            output.action = .stepUp
+            output.speed = stepUpSpeed
+            output.status = "Stepping up"
+        } else if stepDownInProgress {
+            currentAction = .stepDown
+            output.action = .stepDown
+            output.speed = stepDownSpeed
+            output.status = "Stepping down"
+        }
+    }
+
+    /// Interpolates the locomotion body's height toward the
+    /// target. This is a model-side height update, not a SceneKit
+    /// collision or ground-contact test.
+    private func updateStepTransition(deltaTime dt: Float) {
+        guard stepUpInProgress || stepDownInProgress else {
+            return
+        }
+
+        stepTransitionProgress = min(
+            1,
+            stepTransitionProgress + stepTransitionSpeed * dt
+        )
+
+        let t = stepTransitionProgress
+        let smoothT = t * t * (3 - 2 * t)
+
+        body.height = stepStartHeight +
+            (stepTargetHeight - stepStartHeight) * smoothT
+
+        if stepTransitionProgress >= 1 {
+            body.height = stepTargetHeight
+
+            stepUpInProgress = false
+            stepDownInProgress = false
+
+            output.status = "Step transition complete"
+            actionsCompleted += 1
+        }
+    }
+
+    /// Call this from the Coordinator when a downward step is
+    /// confirmed from the actual ground-height measurement.
+    func requestStepDown(dropHeight: Float) {
+        guard !body.fallen,
+              !jumpInProgress,
+              !stepUpInProgress,
+              !stepDownInProgress,
+              dropHeight.isFinite,
+              dropHeight > 0,
+              dropHeight <= maximumStepDownHeight else {
+            return
+        }
+
+        beginStepTransition(
+            to: max(0, body.height - dropHeight)
+        )
     }
 
     // MARK: - Jump planning
@@ -387,7 +565,8 @@ final class FrankensteinLocomotion {
                 output.action = .walk
                 output.speed = 0
                 output.jump = 0
-                output.status = "Gap detected — landing not verified"
+                output.status =
+                    "Gap detected — landing not verified"
                 return
             }
         }
@@ -398,6 +577,7 @@ final class FrankensteinLocomotion {
         actualJumpDistance = 0
 
         jumpStartHeight = body.height
+        jumpStartPosition = previousPosition
 
         let requiredRise = max(
             0,
@@ -464,7 +644,8 @@ final class FrankensteinLocomotion {
 
         if jumpElapsed > maximumJumpDuration {
             _ = confirmJumpFailure(
-                forwardError: jumpTargetDistance - actualJumpDistance,
+                forwardError:
+                    jumpTargetDistance - actualJumpDistance,
                 heightError: max(
                     0,
                     jumpTargetHeight - body.height
@@ -501,11 +682,14 @@ final class FrankensteinLocomotion {
             heightError: heightError
         )
 
-        body.height = max(standingHeight, actualHeight)
+        body.height = max(
+            standingHeight,
+            actualHeight
+        )
+
         body.fallen = false
 
         finishJumpPhysics(fell: false)
-
         return true
     }
 
@@ -516,8 +700,7 @@ final class FrankensteinLocomotion {
         forwardError: Float = 0,
         heightError: Float = 0
     ) -> Bool {
-        guard jumpInProgress,
-              !jumpOutcomeReported else {
+        guard jumpInProgress, !jumpOutcomeReported else {
             return false
         }
 
@@ -530,7 +713,6 @@ final class FrankensteinLocomotion {
         body.fallen = true
 
         finishJumpPhysics(fell: true)
-
         return true
     }
 
@@ -584,14 +766,46 @@ final class FrankensteinLocomotion {
     // MARK: - Animation
 
     private func updateAnimation(deltaTime dt: Float) {
-        if jumpInProgress {
-            output.stride = 1.0
+        let movingSpeed = max(0, output.speed)
+
+        output.stride = min(1.0, movingSpeed / 2.2)
+
+        isWalking = movingSpeed > 0.05 &&
+            !body.fallen &&
+            currentAction != .recover
+
+        if isWalking {
+            let gaitFrequency: Float
+
+            switch currentAction {
+            case .crawl:
+                gaitFrequency = 3.0
+            case .crouch:
+                gaitFrequency = 3.5
+            case .run:
+                gaitFrequency = 9.0
+            case .roll:
+                gaitFrequency = 2.0
+            case .jump:
+                gaitFrequency = 7.0
+            default:
+                gaitFrequency = 6.0
+            }
+
+            let speedScale = max(0.5, movingSpeed / 1.0)
+            gaitPhase += gaitFrequency * speedScale * dt
+
+            let fullCycle = 2.0 * Float.pi
+            if gaitPhase >= fullCycle {
+                gaitPhase.formTruncatingRemainder(
+                    dividingBy: fullCycle
+                )
+            }
         } else {
-            output.stride = min(
-                1.0,
-                max(0, output.speed / 2.2)
-            )
+            output.stride = 0
         }
+
+        gaitSwing = isWalking ? sin(gaitPhase) : 0
 
         if currentAction == .turnLeft {
             output.heading -= 0.65 * dt
@@ -622,13 +836,16 @@ final class FrankensteinLocomotion {
             return 0.05
         }
 
+        if stepUpInProgress || stepDownInProgress {
+            return 0.1
+        }
+
         if terrain.terrain == .flat {
             return 0.1
         }
 
         return 0
     }
-
 
     private func statusDescription(
         terrain: FrankensteinTerrainSample
@@ -641,39 +858,54 @@ final class FrankensteinLocomotion {
             return "Jumping — adaptive attempt \(jumpAttempts + 1)"
         }
 
+        if stepUpInProgress {
+            return "Stepping up"
+        }
+
+        if stepDownInProgress {
+            return "Stepping down"
+        }
 
         switch terrain.terrain {
         case .gap:
             return "Gap detected"
-
         case .hurdle:
             return "Obstacle detected"
-
         case .lowCeiling:
             return "Low ceiling — crouching"
-
         case .raisedStep:
             return "Raised step detected"
-
         case .slope:
             return "Slope detected"
-
         case .uneven:
             return "Uneven terrain"
-
         case .flat:
             return "Walking"
-
         default:
             return "Unknown terrain — assessing environment"
         }
     }
 
+    // MARK: - Policy feedback adapter
+
+    func reportJumpOutcome(
+        succeeded: Bool,
+        terrain: FrankensteinTerrainSample,
+        body: FrankensteinBodyState,
+        terminal: Bool = false
+    ) {
+        let reward: Float = succeeded ? 3.0 : -2.0
+
+        policy.recordCompletedAction(
+            reward: reward,
+            terrain: terrain,
+            body: body,
+            terminal: terminal
+        )
+    }
 
     // MARK: - Reset
 
-    /// Resets the current episode state.
-    /// The learned policy itself is deliberately preserved.
     func resetEpisode() {
         pendingEpisodeEnd = nil
 
@@ -708,21 +940,17 @@ final class FrankensteinLocomotion {
         actionElapsed = 0
         lastActualDisplacement = 0
 
-        // Keep policy learning intact across episodes.
-    }
-    func reportJumpOutcome(
-        succeeded: Bool,
-        terrain: FrankensteinTerrainSample,
-        body: FrankensteinBodyState,
-        terminal: Bool = false
-    ) {
-        let reward: Float = succeeded ? 3.0 : -2.0
+        gaitPhase = 0
+        gaitSwing = 0
+        isWalking = false
 
-        policy.recordCompletedAction(
-            reward: reward,
-            terrain: terrain,
-            body: body,
-            terminal: terminal
-        )
+        stepStartHeight = 0
+        stepTargetHeight = 0
+        stepTransitionProgress = 1
+        stepUpInProgress = false
+        stepDownInProgress = false
+        stepTransitionLatched = false
+
+        // Keep learned policy data across episode resets.
     }
 }
