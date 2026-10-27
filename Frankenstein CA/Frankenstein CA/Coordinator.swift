@@ -6,6 +6,16 @@ import UIKit
 
 
 final class Coordinator: NSObject, SCNSceneRendererDelegate {
+    
+    // MARK: - Cellular Automaton
+
+    var onCAStats: ((Int, Int) -> Void)?
+
+    private var ca: FrankensteinCA?
+
+    private var lastCATickTime: TimeInterval = 0
+    private let caTickInterval: TimeInterval = 0.25
+
 
     // MARK: - Callbacks
 
@@ -13,7 +23,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     var onDebugInfo: ((String) -> Void)?
     var onDetectedObject: ((DetectedObjectInfo?) -> Void)?
     var onActionChanged: ((String) -> Void)?
-    var onCAStats: ((Int, Int) -> Void)?
 
     // MARK: - Scene References
 
@@ -83,6 +92,31 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             characterNode.presentation.worldPosition
 
         hasPreviousCharacterPosition = true
+    }
+
+    /// Connect the existing cellular automaton to the coordinator.
+    func attachCA(_ ca: FrankensteinCA) {
+        self.ca = ca
+        publishCAStats()
+    }
+
+ 
+    private func tickCA() {
+        guard let ca else { return }
+
+        ca.step()
+        publishCAStats()
+    }
+    /// Send generation and live-cell counts to the UI.
+    private func publishCAStats() {
+        guard let ca else { return }
+
+        let generation = ca.generation
+        let liveCells = ca.liveCellCount
+
+        DispatchQueue.main.async { [weak self] in
+            self?.onCAStats?(generation, liveCells)
+        }
     }
 
     // MARK: - Attach Actual Displayed Scene
@@ -162,15 +196,18 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     // MARK: - Renderer Update
 
+
     func renderer(
         _ renderer: SCNSceneRenderer,
         updateAtTime time: TimeInterval
     ) {
         guard isRunning,
-              let scene,
+              let scene = scene,
               let character = characterNode else {
             return
         }
+
+        // MARK: 1. Calculate frame time
 
         let dt: Float
 
@@ -187,7 +224,20 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         lastFrameTime = time
 
-        // Sense the scene at a limited rate.
+        // MARK: 2. Advance the cellular automaton
+
+        if time - lastCATickTime >= caTickInterval {
+            lastCATickTime = time
+
+            // SceneKit renderer callbacks are not guaranteed to run on
+            // the main thread. Update the ObservableObject on the main thread.
+            DispatchQueue.main.async { [weak self] in
+                self?.tickCA()
+            }
+        }
+
+        // MARK: 3. Sense objects and terrain
+
         if time - lastSensorTime >= sensorInterval {
             lastSensorTime = time
 
@@ -208,7 +258,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             }
         }
 
-        // Measure real displacement from the previous frame.
+        // MARK: 4. Measure actual displacement
+
         let currentPosition = character.presentation.worldPosition
 
         let actualDisplacement: Float?
@@ -225,14 +276,16 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         previousCharacterPosition = currentPosition
         hasPreviousCharacterPosition = true
 
-        // Ask the existing locomotion policy for an action.
+        // MARK: 5. Select a locomotion action
+
         let output = locomotion.step(
             deltaTime: dt,
             terrain: latestTerrainSample,
             actualDisplacement: actualDisplacement
         )
 
-        // Apply the movement output to the actual SceneKit node.
+        // MARK: 6. Apply movement to the character
+
         applyMovement(
             output: output,
             deltaTime: dt,
@@ -240,23 +293,31 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             scene: scene
         )
 
+        // MARK: 7. Animate the character
+
         animateCharacter(character: character)
+
+        // MARK: 8. Update object and door interactions
 
         updateCarriedObject()
         updateDoorInteraction()
 
-        // Update the existing Q-learning floor visualization.
+        // MARK: 9. Update the Q-learning floor visualization
+
         qFloorGrid.update(
             policy: locomotion.policy,
             sample: latestTerrainSample,
             body: locomotion.body
         )
 
+        // MARK: 10. Publish general statistics
+
         if time - lastStatsTime >= statsInterval {
             lastStatsTime = time
             publishGeneralStats()
         }
     }
+
 
     // MARK: - Terrain Sensing
 
