@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		F7705C3D3090A8B6000C0B15 /* QPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7705C3C3090A8B6000C0B15 /* QPolicy.swift */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		F7BE2470308D235800235560 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -24,6 +28,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		F7705C3C3090A8B6000C0B15 /* QPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QPolicy.swift; sourceTree = "<group>"; };
 		F7BE245D308D235700235560 /* Frankenstein CA.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Frankenstein CA.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F7BE246F308D235800235560 /* Frankenstein CATests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Frankenstein CATests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F7BE2479308D235800235560 /* Frankenstein CAUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Frankenstein CAUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -78,6 +83,7 @@
 				F7BE245F308D235700235560 /* Frankenstein CA */,
 				F7BE2472308D235800235560 /* Frankenstein CATests */,
 				F7BE247C308D235800235560 /* Frankenstein CAUITests */,
+				F7705C3C3090A8B6000C0B15 /* QPolicy.swift */,
 				F7BE245E308D235700235560 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -236,6 +242,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F7705C3D3090A8B6000C0B15 /* QPolicy.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -400,6 +407,8 @@
 				DEVELOPMENT_TEAM = D79GCWU2TB;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Frankenstein CA";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.games";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -432,6 +441,8 @@
 				DEVELOPMENT_TEAM = D79GCWU2TB;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Frankenstein CA";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.games";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

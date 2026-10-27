@@ -213,20 +213,7 @@ final class FrankensteinLocomotion {
         }
     }
 
-    // MARK: - Collision Feedback
 
-    func reportCollision() {
-        collisions += 1
-
-        // Let the learner receive negative feedback for a collision.
-        policy.recordCompletedAction(
-            reward: -1.0,
-            terrain: currentTerrainForFeedback,
-            body: body,
-            terminal: false
-        )
-    }
-    // MARK: - Movement Diagnostics
 
     private func logDecision(
         caGeneration: Int,
@@ -305,12 +292,7 @@ final class FrankensteinLocomotion {
             }
         }
 
-        policy.recordCompletedAction(
-            reward: success ? 3.0 : -2.0,
-            terrain: currentTerrainForFeedback,
-            body: body,
-            terminal: false
-        )
+       
     }
 
     // MARK: - Main Update
@@ -382,17 +364,7 @@ final class FrankensteinLocomotion {
         // Learn only after the selected action has had time to execute.
         // This prevents one Q update per render frame for the same action.
         output.reward = calculateReward(terrain: terrain)
-        if actionElapsed >= 0.35, policy.isAwaitingOutcome, output.reward.isFinite {
-            let completedReward = output.reward + min(0.5, max(-0.5, lastActualDisplacement * 2.0))
-            policy.recordCompletedAction(
-                reward: completedReward,
-                terrain: terrain,
-                body: body,
-                terminal: false
-            )
-            actionElapsed = 0
-            print("[Learning] Completed action=\(currentAction), reward=\(completedReward), qUpdates=\(policy.updateCount)")
-        }
+      
 
         // Preserve important failure statuses.
         if !output.status.hasPrefix("Gap detected —") &&
@@ -543,49 +515,82 @@ final class FrankensteinLocomotion {
     // Environmental safety takes priority. The CA controls ordinary
     // movement decisions on safe terrain.
 
+
+    // MARK: - CA-Only Action Selection
+
     private func selectMovement(
         for terrain: FrankensteinTerrainSample
     ) {
         lastSafetyOverride = "none"
 
-        if body.fallen {
+        guard !body.fallen else {
             currentAction = .recover
             lastSafetyOverride = "recovery required"
+            caCommandName = "Recover"
             return
         }
 
-        // Candidate generation enforces terrain constraints before the CA decides.
-        // The CA still chooses among safe options for gaps, hurdles, steps, ceilings,
-        // and ordinary terrain; locomotion does not hard-code the action for each hazard.
-        // The CA is the executive controller. Q-values inform its decision,
-        // but the Q-policy never independently replaces the CA-selected action.
-        let candidates: [FrankensteinAction] = body.fallen
-            ? [.recover]
-            : policy.allowedActions(terrain: terrain, body: body)
-        let qValues = policy.learnedActionValues(terrain: terrain, body: body)
-        let proposedAction = ca?.decideAction(
-            terrain: terrain,
-            body: body,
-            allowedActions: candidates,
-            qValues: qValues
-        ) ?? fallbackCAAction(from: candidates)
+        // The CA is the executive controller.
+        // Q-learning does not select, constrain, or replace actions.
+        let allowedActions: [FrankensteinAction] = [
+            .walk,
+            .run,
+            .turnLeft,
+            .turnRight,
+            .jump,
+            .crouch,
+            .crawl,
+            .roll,
+            .stepUp,
+            .stepDown
+        ]
 
-        caCommandName = String(describing: proposedAction)
-        let chosen = candidates.contains(proposedAction) ? proposedAction : fallbackCAAction(from: candidates)
-        currentAction = chosen
+        let proposedAction: FrankensteinAction
 
-        if !policy.isAwaitingOutcome {
-            _ = policy.beginCAChosenAction(chosen, terrain: terrain, body: body)
-        } else if policy.pendingAction != chosen {
-            // Never attribute the pending reward to a different action.
-            currentAction = policy.pendingAction ?? chosen
-            lastSafetyOverride = "held action until its outcome is recorded"
+        if let ca {
+            proposedAction = ca.decideAction(
+                terrain: terrain,
+                body: body,
+                allowedActions: allowedActions,
+                qValues: [:]
+            )
+        } else {
+            proposedAction = fallbackCAAction(for: terrain)
+            lastSafetyOverride = "CA not attached — fallback action"
         }
 
-        print("[CA] Executive decision: \(currentAction)")
-        print("[Q-Learning] Advisory values: \(qValues)")
-        print("[Q-Learning] Updates: \(policy.updateCount); learned states: \(policy.learnedStateCount)")
+        // Accept the CA decision directly when it is a valid action.
+        // Do not use policy.pendingAction to override the CA.
+        let chosen = allowedActions.contains(proposedAction)
+            ? proposedAction
+            : fallbackCAAction(for: terrain)
+
+        currentAction = chosen
+        caCommandName = String(describing: chosen)
+
+        print("[CA] Generation: \(ca?.generation ?? 0)")
+        print("[CA] Live cells: \(ca?.liveCellCount ?? 0)")
+        print("[CA] Selected action: \(chosen)")
+        print("[Movement] Action submitted for execution: \(chosen)")
     }
+
+    private func fallbackCAAction(
+        for terrain: FrankensteinTerrainSample
+    ) -> FrankensteinAction {
+        // Used only when the CA is unavailable.
+        // The normal action-selection path is CA-controlled.
+        switch terrain.terrain {
+        case .gap, .hurdle:
+            return terrain.isLandingAreaClear ? .jump : .walk
+        case .lowCeiling:
+            return .crouch
+        case .raisedStep:
+            return terrain.obstacleHeight > 0.45 ? .jump : .stepUp
+        default:
+            return .walk
+        }
+    }
+
 
     private func fallbackCAAction(from candidates: [FrankensteinAction]) -> FrankensteinAction {
         if candidates.contains(.walk) { return .walk }
@@ -594,6 +599,10 @@ final class FrankensteinLocomotion {
         return candidates.first ?? .walk
     }
     // MARK: - Horizontal Movement
+
+ 
+    // MARK: - Horizontal Movement
+    // The CA selects the action. Locomotion executes its movement output.
 
     private func updateMovement(
         deltaTime dt: Float,
@@ -624,21 +633,8 @@ final class FrankensteinLocomotion {
             requestedSpeed = 0
         }
 
-        var speed = requestedSpeed
-
-        if !jumpInProgress &&
-            terrain.distance < 0.8 &&
-            terrain.terrain == .hurdle {
-            speed = min(speed, 0.25)
-        }
-
-        if !jumpInProgress &&
-            terrain.terrain == .gap &&
-            (!terrain.isLandingAreaClear || terrain.gapWidth <= 0) {
-            speed = 0
-        }
-
-        output.speed = speed
+        // Do not independently replace the CA action because of terrain.
+        output.speed = requestedSpeed
         output.action = currentAction
 
         if currentAction == .jump && !jumpInProgress {
@@ -649,6 +645,7 @@ final class FrankensteinLocomotion {
             !stepUpInProgress &&
             !stepDownInProgress &&
             !stepTransitionLatched {
+
             let rise = terrain.obstacleHeight
 
             if rise > 0 && rise <= maximumStepUpHeight {
@@ -657,6 +654,7 @@ final class FrankensteinLocomotion {
             }
         }
     }
+
 
     // MARK: - Step Transitions
 
@@ -889,19 +887,17 @@ final class FrankensteinLocomotion {
         currentAction = fell ? .recover : .walk
     }
 
-    // MARK: - Stabilization
+
 
     private func stabilize(terrain: FrankensteinTerrainSample) {
         if !jumpInProgress {
             output.speed = min(output.speed, 2.2)
         }
 
-        if terrain.terrain == .lowCeiling {
-            output.crouch = 1.0
-            output.speed = min(output.speed, 0.45)
-        } else {
-            output.crouch = currentAction == .crouch ? 1.0 : 0.0
-        }
+        output.crouch = (
+            currentAction == .crouch ||
+            currentAction == .crawl
+        ) ? 1.0 : 0.0
 
         if body.fallen {
             output.speed = 0
@@ -909,6 +905,7 @@ final class FrankensteinLocomotion {
             output.action = .recover
         }
     }
+
 
     // MARK: - Animation and Turning
 
@@ -1011,22 +1008,7 @@ final class FrankensteinLocomotion {
 
     // MARK: - Policy Feedback Adapter
 
-    func reportJumpOutcome(
-        succeeded: Bool,
-        terrain: FrankensteinTerrainSample,
-        body: FrankensteinBodyState,
-        terminal: Bool = false
-    ) {
-        let reward: Float = succeeded ? 3.0 : -2.0
-
-        policy.recordCompletedAction(
-            reward: reward,
-            terrain: terrain,
-            body: body,
-            terminal: terminal
-        )
-    }
-
+ 
     // MARK: - Reset
 
     func resetEpisode() {

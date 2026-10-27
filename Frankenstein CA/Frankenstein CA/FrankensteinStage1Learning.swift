@@ -255,13 +255,7 @@ final class FrankensteinStage1Learning {
             return
         }
 
-        policy.reportJumpOutcome(
-            succeeded: successfulJump,
-            terrain: finalTerrain,
-            body: finalBody,
-            terminal: attempt.outcome.fell ||
-                      attempt.outcome.completed
-        )
+        
     }
 
     // MARK: - Gap Assessment
