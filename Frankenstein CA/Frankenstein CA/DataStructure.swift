@@ -289,6 +289,7 @@ enum FrankensteinCACommand {
 enum FrankensteinEpisodeEnd {
     case reachedGoal
     case fell
+    case recharged
 }
 
 struct DetectedObjectInfo {

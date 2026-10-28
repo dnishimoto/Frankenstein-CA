@@ -199,6 +199,7 @@ final class FrankensteinLocomotion {
     private(set) var collisions = 0
     private(set) var falls = 0
     private(set) var goalsReached = 0
+     private(set) var rechargesCompleted = 0
 
     // MARK: - Episode Completion
 
@@ -211,6 +212,11 @@ final class FrankensteinLocomotion {
         switch result {
         case .reachedGoal:
             goalsReached += 1
+
+        case .recharged:
+            rechargesCompleted += 1
+            goalsReached += 1
+
         case .fell:
             falls += 1
             body.fallen = true

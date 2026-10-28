@@ -6,6 +6,8 @@ import UIKit
 
 
 final class Coordinator: NSObject, SCNSceneRendererDelegate {
+    private let requiredRechargeContactDuration: TimeInterval = 1.0
+    private var hasCompletedRechargeGoal = false
     private var goalCorrectionCooldown: TimeInterval = 0
     private let goalCorrectionInterval: TimeInterval = 0.75
     private let goalAlignmentThreshold: Float = 0.35
@@ -2001,6 +2003,31 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             noProgressCount=\(consecutiveNoProgressCount)
             """
         )
+        if hasReportedRecharge {
+            if rechargePlatformContactTime == 0 {
+                rechargePlatformContactTime = time
+            }
+
+            let contactDuration = time - rechargePlatformContactTime
+
+            reward += 0.25
+
+            if contactDuration >= requiredRechargeContactDuration,
+               !hasCompletedRechargeGoal {
+                hasCompletedRechargeGoal = true
+                reward += 5.0
+
+                publishDebug(
+                    "GOAL COMPLETE: maintained recharge-platform contact for " +
+                    "\(String(format: "%.2f", contactDuration)) seconds."
+                )
+
+                locomotion.completeEpisode(.recharged)
+            }
+        } else {
+            rechargePlatformContactTime = 0
+            hasReachedRechargePlatform = false
+        }
     }
     
     // MARK: - Character Animation
