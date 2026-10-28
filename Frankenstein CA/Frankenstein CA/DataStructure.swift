@@ -9,6 +9,21 @@ import Foundation
 import SwiftUI
 import SceneKit
 
+// MARK: - Steering Result
+
+/// Output of the cellular-automaton path field: where to turn and how far the
+/// routed (obstacle-aware) path to the goal is.
+struct CAPathSteering {
+    /// Heading (radians, same convention as Coordinator.heading) toward the
+    /// cheapest neighbouring cell on the routed path.
+    var heading: Float
+    /// Routed distance to the goal in metres (obstacle costs included).
+    var pathDistance: Float
+    /// True when the routed direction differs noticeably from the straight line.
+    var isDetouring: Bool
+    /// CA generation that produced this result.
+    var generation: Int
+}
 
 struct FrankensteinGoalObservation {
     let distance: Float

@@ -10,9 +10,9 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private let requiredRechargeContactDuration: TimeInterval = 1.0
     private var hasCompletedRechargeGoal = false
 
-    private var goalCorrectionCooldown: TimeInterval = 0
-    private let goalCorrectionInterval: TimeInterval = 0.75
-    private let goalAlignmentThreshold: Float = 0.35
+    private let pathTurnRate: Float = 2.4          // rad/s toward routed heading
+    private let pathHeadingHold: TimeInterval = 0.12
+    private let pathAlignmentDeadband: Float = 0.05
 
     private var lastGoalDistance: Float = .infinity
 
@@ -21,6 +21,12 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private var ca: FrankensteinCA?
     private var lastCATickTime: TimeInterval = 0
     private let caTickInterval: TimeInterval = 0.25
+
+    // MARK: - CA Executive (learning + object identity + distance paths)
+
+    private let executive = FrankensteinCAExecutive()
+    private var pathSteering: CAPathSteering?
+    private var pathGoalDistance: Float = .infinity
 
     // MARK: - Callbacks
 
@@ -105,11 +111,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private var lastGoalActionPosition = SCNVector3Zero
     private var consecutiveNoProgressCount = 0
 
-    // MARK: - Object and Goal Q-Learning
-
-    private var objectQValues: [String: [String: Float]] = [:]
-    private let objectQLearningRate: Float = 0.20
-    private let goalDiscountFactor: Float = 0.90
+    // MARK: - Goal Learning Parameters
 
     private let noProgressThreshold: Float = 0.015
     private let noProgressPenalty: Float = -0.05
@@ -547,7 +549,10 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     func resetObjectLearning() {
-        objectQValues.removeAll()
+        executive.reset()
+        pathSteering = nil
+        pathGoalDistance = .infinity
+
         latestDetections.removeAll()
         latestDetectionNodes.removeAll()
         latestRayObservations.removeAll()
@@ -580,6 +585,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
               let character = characterNode else {
             return
         }
+
+        currentFrameTime = time
 
         let dt: Float
 
@@ -628,6 +635,13 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             verifiedGroundSupport = verifySupportBeneathCharacter(
                 character: character,
                 in: scene
+            )
+
+            // CA: identified objects -> distance-path field.
+            updatePathField(
+                character: character,
+                detections: latestDetections,
+                time: time
             )
 
             updateObjectQValues(
@@ -692,7 +706,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             pendingPrediction = nil
         }
 
-        // MARK: 3. Advisory object/goal values
+        // MARK: 3. CA advisory values (learned object + goal Q-values)
 
         let perceivedValues = locomotion.policy.learnedActionValues(
             terrain: latestTerrainSample,
@@ -741,19 +755,20 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             objectObservation: objectObservation
         )
 
-        // MARK: 5. Apply CA decision
+        // MARK: 5. Apply CA decision (path steering first, then movement)
+
+        applyPathSteering(
+            output: output,
+            character: character,
+            deltaTime: dt,
+            time: time
+        )
 
         applyMovement(
             output: output,
             deltaTime: dt,
             character: character,
             scene: scene
-        )
-
-        applyGoalCorrection(
-            output: output,
-            character: character,
-            time: time
         )
 
         // MARK: 6. Evaluate measured outcome
@@ -800,6 +815,91 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         }
     }
 
+    // MARK: - CA Path Field
+
+    /// Feeds identified objects (class, footprint) and the goal into the CA
+    /// path field, relaxes it, and stores the routed steering result.
+    private func updatePathField(
+        character: SCNNode,
+        detections: [DetectedObjectInfo],
+        time: TimeInterval
+    ) {
+        let c = character.presentation.worldPosition
+        let characterXZ = SIMD2<Float>(Float(c.x), Float(c.z))
+
+        var goalXZ: SIMD2<Float>?
+
+        if let station = rechargeStationNode {
+            let s = station.presentation.worldPosition
+            goalXZ = SIMD2<Float>(Float(s.x), Float(s.z))
+        }
+
+        var obstacles: [FrankensteinCAPathField.Obstacle] = []
+
+        for detection in detections {
+            let className = objectClass(for: detection.name)
+
+            if className == "rechargeStation" { continue }
+            if detection.name.lowercased().contains("ceiling") { continue }
+
+            obstacles.append(
+                FrankensteinCAPathField.Obstacle(
+                    center: SIMD2<Float>(
+                        Float(detection.worldPosition.x),
+                        Float(detection.worldPosition.z)
+                    ),
+                    halfExtent: SIMD2<Float>(
+                        Float(detection.dimensions.x) * 0.5,
+                        Float(detection.dimensions.z) * 0.5
+                    ),
+                    className: className
+                )
+            )
+        }
+
+        executive.field.observe(obstacles, time: time)
+        executive.field.rebuild(character: characterXZ, goal: goalXZ)
+
+        pathSteering = executive.field.steering()
+        pathGoalDistance = pathSteering?.pathDistance ?? .infinity
+    }
+
+    /// Replaces the old cooldown-based goal correction: the character turns
+    /// smoothly toward the CA-routed heading while walking or running.
+    private func applyPathSteering(
+        output: FrankensteinLocomotionOutput,
+        character: SCNNode,
+        deltaTime dt: Float,
+        time: TimeInterval
+    ) {
+        guard output.action == .walk || output.action == .run,
+              let steering = pathSteering else {
+            return
+        }
+
+        var error = steering.heading - heading
+
+        while error > .pi { error -= 2 * .pi }
+        while error < -.pi { error += 2 * .pi }
+
+        guard abs(error) > pathAlignmentDeadband else {
+            goalCorrectionActiveUntil = time + pathHeadingHold
+            return
+        }
+
+        let maxTurn = pathTurnRate * dt
+        heading += min(max(error, -maxTurn), maxTurn)
+
+        goalCorrectionActiveUntil = time + pathHeadingHold
+
+        if steering.isDetouring {
+            publishDebug(
+                "CA path: detouring around identified objects; " +
+                "routed distance=\(String(format: "%.2f", steering.pathDistance)) m."
+            )
+        }
+    }
+
     // MARK: - Advisory Values
 
     private func makeAdvisoryActionValues(
@@ -809,13 +909,15 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         var merged = baseValues
 
         let goalKey = goalStateKey(terrain: latestTerrainSample)
-        let goalValues = objectQValues[goalKey] ?? [:]
+        let goalValues = executive.learner.values(for: goalKey)
 
         let objectKey = latestDetection.map {
             objectStateKey(for: $0, terrain: latestTerrainSample)
         }
 
-        let objectValues = objectKey.flatMap { objectQValues[$0] } ?? [:]
+        let objectValues = objectKey.map {
+            executive.learner.values(for: $0)
+        } ?? [:]
 
         for action in allowedActions {
             let actionName = String(describing: action)
@@ -1169,7 +1271,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         )
     }
 
-    // MARK: - Object and Goal Q-Learning
+    // MARK: - Object and Goal State Keys (CA-perceived state)
 
     private func objectClass(for name: String) -> String {
         let value = name.lowercased()
@@ -1221,7 +1323,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             objectClass(for: info.name),
             distanceBand(info.distance),
             terrain.carryingObject ? "carrying" : "empty",
-            verifiedGroundSupport ? "supported" : "unsupported"
+            verifiedGroundSupport ? "supported" : "unsupported",
+            (pathSteering?.isDetouring ?? false) ? "detour" : "direct"
         ].joined(separator: "|")
     }
 
@@ -1230,7 +1333,12 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     ) -> String {
         let progress: String
 
-        switch rechargePlatformDistance {
+        // Prefer the CA-routed path distance; fall back to straight-line.
+        let goalDistance = pathGoalDistance.isFinite
+            ? pathGoalDistance
+            : rechargePlatformDistance
+
+        switch goalDistance {
         case ..<1.0:
             progress = "atGoal"
         case ..<3.0:
@@ -1245,7 +1353,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             String(describing: terrain.terrain),
             progress,
             verifiedGroundSupport ? "supported" : "unsupported",
-            latestTerrainSample.carryingObject ? "carrying" : "empty"
+            latestTerrainSample.carryingObject ? "carrying" : "empty",
+            (pathSteering?.isDetouring ?? false) ? "detour" : "direct"
         ].joined(separator: "|")
     }
 
@@ -1258,30 +1367,19 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             body: locomotion.body
         )
 
+        let actionNames = allowed.map { String(describing: $0) }
+
         for detection in detections {
-            let key = objectStateKey(
-                for: detection.info,
-                terrain: terrain
+            executive.learner.ensure(
+                key: objectStateKey(for: detection.info, terrain: terrain),
+                actions: actionNames
             )
-
-            for action in allowed {
-                let actionName = String(describing: action)
-
-                if objectQValues[key]?[actionName] == nil {
-                    objectQValues[key, default: [:]][actionName] = 0
-                }
-            }
         }
 
-        let goalKey = goalStateKey(terrain: terrain)
-
-        for action in allowed {
-            let actionName = String(describing: action)
-
-            if objectQValues[goalKey]?[actionName] == nil {
-                objectQValues[goalKey, default: [:]][actionName] = 0
-            }
-        }
+        executive.learner.ensure(
+            key: goalStateKey(terrain: terrain),
+            actions: actionNames
+        )
     }
 
     private func reinforceOutcome(
@@ -1290,21 +1388,12 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         reward: Float,
         nextStateKey: String? = nil
     ) {
-        let actionName = String(describing: action)
-
-        let currentValue = objectQValues[stateKey]?[actionName] ?? 0
-
-        var maxNextValue: Float = 0
-
-        if let nextStateKey {
-            maxNextValue = objectQValues[nextStateKey]?.values.max() ?? 0
-        }
-
-        let target = reward + goalDiscountFactor * maxNextValue
-        let updatedValue = currentValue +
-            objectQLearningRate * (target - currentValue)
-
-        objectQValues[stateKey, default: [:]][actionName] = updatedValue
+        executive.learner.reinforce(
+            key: stateKey,
+            action: String(describing: action),
+            reward: reward,
+            nextKey: nextStateKey
+        )
     }
 
     // MARK: - Terrain Sensing
@@ -1699,7 +1788,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     // MARK: - Movement
 
-  
     private func applyMovement(
         output: FrankensteinLocomotionOutput,
         deltaTime dt: Float,
@@ -1708,8 +1796,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     ) {
         guard dt.isFinite, dt > 0 else { return }
 
-        // Preserve the corrected heading temporarily so the CA
-        // cannot immediately overwrite the goal correction.
+        // Preserve the CA-routed heading while path steering is active so
+        // the locomotion output cannot immediately overwrite it.
         if currentFrameTime >= goalCorrectionActiveUntil {
             heading = output.heading
         }
@@ -2044,9 +2132,27 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         var reward: Float = 0
 
+        // Identified object nearest ahead (used to adapt CA path costs).
+        let nearbyClass: String? = {
+            guard let detection = latestDetection,
+                  detection.distance < 1.0 else {
+                return nil
+            }
+
+            return objectClass(for: detection.name)
+        }()
+
         if abs(outcomeWindowDisplacement) < noProgressThreshold {
             consecutiveNoProgressCount += 1
             reward += noProgressPenalty
+
+            // Blocked by an identified object: make it costlier to route through.
+            if let nearbyClass {
+                executive.field.learnClassOutcome(
+                    className: nearbyClass,
+                    blocked: true
+                )
+            }
 
             if consecutiveNoProgressCount >= 3 {
                 publishDebug(
@@ -2058,6 +2164,13 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
             reward += outcomeWindowDisplacement * 0.25
             reward += outcomeWindowGoalProgress * goalProgressRewardScale
+
+            if let nearbyClass {
+                executive.field.learnClassOutcome(
+                    className: nearbyClass,
+                    blocked: false
+                )
+            }
         } else if outcomeWindowGoalProgress < -0.001 {
             consecutiveNoProgressCount += 1
 
@@ -2130,6 +2243,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             windowDisplacement=\(String(format: "%.3f", outcomeWindowDisplacement))
             previousGoalDistance=\(String(format: "%.3f", previousDistance))
             currentGoalDistance=\(String(format: "%.3f", currentDistance))
+            pathGoalDistance=\(String(format: "%.3f", pathGoalDistance))
             windowGoalProgress=\(String(format: "%.3f", outcomeWindowGoalProgress))
             reward=\(String(format: "%.3f", reward))
             noProgressCount=\(consecutiveNoProgressCount)
@@ -2663,6 +2777,10 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             }
         }
 
+        let pathText = pathGoalDistance.isFinite
+            ? String(format: "%.2f", Double(pathGoalDistance))
+            : "n/a"
+
         let stats = """
         Action: \(action)
         Terrain: \(terrain)
@@ -2672,6 +2790,9 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         Verified landing: \(verifiedLandingSupport)
         Visible objects: \(latestDetections.count)
         Recharge distance: \(String(format: "%.2f", Double(rechargePlatformDistance))) m
+        CA path distance: \(pathText) m
+        CA path detour: \(pathSteering?.isDetouring ?? false)
+        CA path generation: \(pathSteering?.generation ?? 0)
         No-progress count: \(consecutiveNoProgressCount)
         """
 
@@ -2714,72 +2835,7 @@ extension Coordinator {
         print("[Coordinator] applied action=\(locomotion.activeActionName)")
         print("[Coordinator] terrain=\(terrain.terrain), Q updates=\(locomotion.policy.updateCount), states=\(locomotion.policy.learnedStateCount)")
         print("[Coordinator] visible objects=\(latestDetections.count)")
-        print("[Coordinator] object/goal Q states=\(objectQValues.count)")
-    }
-
-    // MARK: - Goal Correction
-
-    private func applyGoalCorrection(
-        output: FrankensteinLocomotionOutput,
-        character: SCNNode,
-        time: TimeInterval
-    ) {
-        guard let station = rechargeStationNode else {
-            return
-        }
-
-        guard latestDetections.isEmpty || latestDetection == nil else {
-            return
-        }
-
-        guard output.action == .walk || output.action == .run else {
-            return
-        }
-
-        guard time >= goalCorrectionCooldown else {
-            return
-        }
-
-        let characterPosition = character.presentation.worldPosition
-        let stationPosition = station.presentation.worldPosition
-
-        let dx = Float(stationPosition.x - characterPosition.x)
-        let dz = Float(stationPosition.z - characterPosition.z)
-
-        let distance = sqrt(dx * dx + dz * dz)
-
-        guard distance > 0.001 else {
-            return
-        }
-
-        let desiredHeading = atan2(-dx, -dz)
-
-        var headingError = desiredHeading - heading
-
-        while headingError > .pi {
-            headingError -= 2 * .pi
-        }
-
-        while headingError < -.pi {
-            headingError += 2 * .pi
-        }
-
-        guard abs(headingError) > goalAlignmentThreshold else {
-            return
-        }
-
-        let turnAmount: Float = headingError > 0
-            ? 0.45
-            : -0.45
-
-        heading += turnAmount
-        character.eulerAngles.y = heading
-
-        goalCorrectionCooldown = time + goalCorrectionInterval
-
-        publishDebug(
-            "Goal correction: turning toward recharge platform; " +
-            "distance=\(String(format: "%.2f", distance)) m."
-        )
+        print("[Coordinator] CA object/goal Q states=\(executive.learner.stateCount)")
+        print("[Coordinator] CA path field generation=\(executive.field.generation), path distance=\(pathGoalDistance)")
     }
 }
