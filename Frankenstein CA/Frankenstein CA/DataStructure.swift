@@ -9,6 +9,160 @@ import Foundation
 import SwiftUI
 import SceneKit
 
+
+enum AlleyaRechargeGoal: String {
+    case mapRoom
+    case findUsefulObject
+    case approachObject
+    case manipulateObject
+    case verifyPlacement
+    case reachRedPlatform
+    case reachChargingStation
+    case verifyRecharge
+    case recover
+    case complete
+}
+
+struct AlleyaRechargeState {
+    var goal: AlleyaRechargeGoal = .mapRoom
+    var generation = 0
+    var successfulPlacements = 0
+    var failedActions = 0
+    var collisions = 0
+    var falls = 0
+    var rechargeVerified = false
+    var lastReason = "Waiting for scene perception"
+}
+
+struct AlleyaActionOutcome {
+    let goal: AlleyaRechargeGoal
+    let action: String
+    let reward: Float
+    let success: Bool
+    let evidence: String
+    let generation: Int
+}
+
+final class AlleyaFrankensteinPipeline {
+
+    private(set) var state = AlleyaRechargeState()
+    private(set) var history: [AlleyaActionOutcome] = []
+
+    /// Call only with results measured from the actual SceneKit scene.
+    func observe(
+        generation: Int,
+        fell: Bool,
+        collision: Bool,
+        onRedPlatform: Bool,
+        chargerDetected: Bool,
+        chargerContact: Bool,
+        chargeBefore: Float,
+        chargeAfter: Float,
+        hasUsefulMovableObject: Bool
+    ) {
+        state.generation = generation
+
+        if collision {
+            state.collisions += 1
+        }
+
+        if fell {
+            state.falls += 1
+            state.goal = .recover
+            state.lastReason = "Fall detected; recover before continuing"
+            return
+        }
+
+        // Success requires a measured charge increase while in contact.
+        if chargerContact &&
+            chargeBefore.isFinite &&
+            chargeAfter.isFinite &&
+            chargeAfter > chargeBefore {
+            state.goal = .complete
+            state.rechargeVerified = true
+            state.lastReason = "Recharge verified"
+            return
+        }
+
+        if !onRedPlatform {
+            if hasUsefulMovableObject {
+                state.goal = .findUsefulObject
+                state.lastReason =
+                    "Evaluate whether the object clears the route or provides a safe step"
+            } else {
+                state.goal = .reachRedPlatform
+                state.lastReason =
+                    "Proceed along a verified safe route toward the red platform"
+            }
+            return
+        }
+
+        if !chargerDetected {
+            state.goal = .reachChargingStation
+            state.lastReason = "Search the platform for the charging station"
+            return
+        }
+
+        if !chargerContact {
+            state.goal = .reachChargingStation
+            state.lastReason = "Approach and align with the charger"
+            return
+        }
+
+        state.goal = .verifyRecharge
+        state.lastReason = "Contact detected; check for an actual charge increase"
+    }
+
+    func recordOutcome(
+        action: String,
+        success: Bool,
+        fell: Bool,
+        collision: Bool,
+        evidence: String
+    ) {
+        let reward: Float
+
+        if state.rechargeVerified {
+            reward = 100
+        } else if fell {
+            reward = -15
+        } else if collision {
+            reward = -5
+        } else if success {
+            reward = 3
+        } else {
+            reward = -2
+        }
+
+        history.append(
+            AlleyaActionOutcome(
+                goal: state.goal,
+                action: action,
+                reward: reward,
+                success: success,
+                evidence: evidence,
+                generation: state.generation
+            )
+        )
+
+        if !success {
+            state.failedActions += 1
+        }
+
+        // Bound the episode log.
+        if history.count > 500 {
+            history.removeFirst(history.count - 500)
+        }
+    }
+
+    func resetEpisode(keepHistory: Bool = true) {
+        let previousHistory = keepHistory ? history : []
+        state = AlleyaRechargeState()
+        history = previousHistory
+    }
+}
+
+
 enum FrankensteinPosture: Equatable {
     case standing
     case walking
