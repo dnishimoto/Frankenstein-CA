@@ -10,6 +10,10 @@ import simd
 
 final class FrankensteinLocomotion {
     
+    private var goalObservation: FrankensteinGoalObservation?
+
+ 
+    
     private let recoveryDuration: Float = 0.6
 
     // MARK: - Learning
@@ -307,7 +311,9 @@ final class FrankensteinLocomotion {
             qValues: qValues
         )
     }
-
+    func setGoalObservation(_ observation: FrankensteinGoalObservation?) {
+        goalObservation = observation
+    }
     // MARK: - Adaptive Jump Feedback
 
     func reportJumpOutcome(
@@ -391,6 +397,9 @@ final class FrankensteinLocomotion {
 
         let dt = min(max(deltaTime, 0), maximumDeltaTime)
         guard dt > 0 else { return output }
+        
+        
+        setGoalObservation(goalObservation)
 
         currentTerrainForFeedback = terrain
         currentObjectObservation = objectObservation

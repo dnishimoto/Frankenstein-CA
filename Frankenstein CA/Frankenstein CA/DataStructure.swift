@@ -9,6 +9,13 @@ import Foundation
 import SwiftUI
 import SceneKit
 
+
+struct FrankensteinGoalObservation {
+    let distance: Float
+    let bearingError: Float
+    let isMovingTowardGoal: Bool
+}
+
 struct FrankensteinPerceptionFrame {
     let visibleObjects: [DetectedObjectInfo]
     let nearestObstacle: DetectedObjectInfo?
