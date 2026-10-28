@@ -1,4 +1,3 @@
-
 import Foundation
 
 // MARK: - Terrain Sample
@@ -33,6 +32,17 @@ struct FrankensteinTerrainSample {
 
     /// Estimated obstacle depth along the direction of travel.
     var obstacleDepth: Float = 0
+
+    // MARK: - Object perception (filled in by the Coordinator)
+
+    /// Resolved name of the detected object, if any.
+    var objectName: String = ""
+
+    /// True when the detected object can be lifted and is within reach.
+    var objectPickupable: Bool = false
+
+    /// True while Frankenstein is already holding an object.
+    var carryingObject: Bool = false
 
     // MARK: - Ground measurements
 

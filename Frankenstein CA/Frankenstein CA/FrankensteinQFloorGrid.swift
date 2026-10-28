@@ -2,203 +2,158 @@
 import Foundation
 import SceneKit
 import UIKit
-import QuartzCore
 
 // MARK: - Q-Value Floor Grid
 
-/// Displays the learning policy's Q-values on a floor grid.
-/// Rows represent terrain types.
-/// Columns represent distance bands.
-/// Each tile displays the best available action and its Q-value.
-/// This is a policy-value visualization, not a spatial route map.
-
+/// A heat map of learned Q-values laid over the whole floor.
+///
+/// The floor is divided into square cells. Each time the Q-policy completes
+/// an update, the cell Frankenstein is standing in records the action that was
+/// updated, its new Q-value and the visit count. Each cell shows that action
+/// and value, colored green for positive, red for negative and dark when
+/// unvisited. A yellow marker follows Frankenstein, and its cell also shows the
+/// best value the policy currently stores for what he sees.
+///
+/// This is display only. It never selects an action and never changes the policy.
 final class FrankensteinQFloorGrid {
 
     // MARK: Configuration
 
     var isVisible = true
-    var boardPosition = SCNVector3(-5.8, 0.025, -5.0)
 
-    var tileWidth: Float = 1.35
-    var tileDepth: Float = 0.95
-    var tileGap: Float = 0.08
+    /// Floor extent in scene units. Matches the two ground slabs
+    /// (x from -10 to 10, z from -9 to 9).
+    var minX: Float = -10
+    var maxX: Float = 10
+    var minZ: Float = -9
+    var maxZ: Float = 9
+
+    var cellSize: Float = 1.0
+    var surfaceY: Float = 0.03
 
     private let boardName = "FrankensteinQFloorGrid"
     private weak var scene: SCNScene?
-    private var tileNodes: [SCNNode] = []
 
-    // MARK: Terrain and distance definitions
+    // MARK: Cell storage
 
-    private struct TerrainDefinition {
-        let name: String
-        let terrain: FrankensteinTerrain
+    private struct Cell {
+        var action: FrankensteinAction?
+        var value: Float = 0
+        var visits = 0
     }
 
-    private struct DistanceDefinition {
-        let name: String
-        let distance: Float
-    }
-
-    private let terrains: [TerrainDefinition] = [
-        TerrainDefinition(name: "FLAT", terrain: .flat),
-        TerrainDefinition(name: "HURDLE", terrain: .hurdle),
-        TerrainDefinition(name: "GAP", terrain: .gap),
-        TerrainDefinition(name: "LOW CEILING", terrain: .lowCeiling),
-        TerrainDefinition(name: "RAISED STEP", terrain: .raisedStep),
-        TerrainDefinition(name: "SLOPE", terrain: .slope),
-        TerrainDefinition(name: "UNEVEN", terrain: .uneven),
-        TerrainDefinition(name: "UNKNOWN", terrain: .unknown)
-    ]
-
-    private let distanceBands: [DistanceDefinition] = [
-        DistanceDefinition(name: "NEAR", distance: 0.4),
-        DistanceDefinition(name: "MID", distance: 1.3),
-        DistanceDefinition(name: "FAR", distance: 2.5)
-    ]
+    private var columns = 0
+    private var rows = 0
+    private var cells: [Cell] = []
+    private var tiles: [SCNNode] = []
+    private var dirty: Set<Int> = []
+    private var marker: SCNNode?
+    private var markerIndex: Int?
+    private var markerText = ""
 
     // MARK: Attach
 
     func attach(to scene: SCNScene) {
         self.scene = scene
 
-        if let existing = scene.rootNode.childNode(
-            withName: boardName,
-            recursively: false
-        ) {
-            existing.removeFromParentNode()
-        }
+        scene.rootNode.childNode(withName: boardName, recursively: false)?
+            .removeFromParentNode()
 
-        tileNodes.removeAll()
+        columns = max(1, Int(((maxX - minX) / cellSize).rounded()))
+        rows = max(1, Int(((maxZ - minZ) / cellSize).rounded()))
+        cells = Array(repeating: Cell(), count: columns * rows)
+        tiles = []
+        dirty = []
 
         let board = SCNNode()
         board.name = boardName
-        board.position = boardPosition
-
         scene.rootNode.addChildNode(board)
 
-        addTitle(to: board)
-        buildTiles(on: board)
+        for row in 0..<rows {
+            for column in 0..<columns {
+                let plane = SCNPlane(
+                    width: CGFloat(cellSize * 0.96),
+                    height: CGFloat(cellSize * 0.96)
+                )
+                let material = SCNMaterial()
+                material.lightingModel = .constant
+                material.diffuse.contents = emptyColor
+                material.transparency = 0.82
+                material.isDoubleSided = true
+                plane.materials = [material]
+
+                let tile = SCNNode(geometry: plane)
+                tile.name = "QGridTile"
+                tile.eulerAngles.x = -.pi / 2
+                tile.position = centerOfCell(column: column, row: row)
+                tile.renderingOrder = 10
+                board.addChildNode(tile)
+                tiles.append(tile)
+            }
+        }
+
+        // Marker that follows Frankenstein.
+        let markerPlane = SCNPlane(
+            width: CGFloat(cellSize),
+            height: CGFloat(cellSize)
+        )
+        let markerMaterial = SCNMaterial()
+        markerMaterial.lightingModel = .constant
+        markerMaterial.diffuse.contents = UIColor.yellow.withAlphaComponent(0.35)
+        markerMaterial.isDoubleSided = true
+        markerPlane.materials = [markerMaterial]
+
+        let markerNode = SCNNode(geometry: markerPlane)
+        markerNode.name = "QGridMarker"
+        markerNode.eulerAngles.x = -.pi / 2
+        markerNode.renderingOrder = 11
+        markerNode.isHidden = true
+        board.addChildNode(markerNode)
+        marker = markerNode
 
         board.isHidden = !isVisible
     }
 
-    // MARK: Build board
+    // MARK: Cell geometry
 
-    private func addTitle(to board: SCNNode) {
-        let title = makeText(
-            "FRANKENSTEIN Q-POLICY",
-            size: 0.20,
-            color: .white
-        )
-
-        title.position = SCNVector3(
-            0,
-            0.04,
-            -tileDepth * 3.9
-        )
-
-        board.addChildNode(title)
-
-        let subtitle = makeText(
-            "TERRAIN / DISTANCE / BEST ACTION",
-            size: 0.10,
-            color: .lightGray
-        )
-
-        subtitle.position = SCNVector3(
-            0,
-            0.04,
-            -tileDepth * 3.5
-        )
-
-        board.addChildNode(subtitle)
+    private func index(forX x: Float, z: Float) -> Int? {
+        guard x >= minX, x < maxX, z >= minZ, z < maxZ else { return nil }
+        let column = min(columns - 1, Int((x - minX) / cellSize))
+        let row = min(rows - 1, Int((z - minZ) / cellSize))
+        return row * columns + column
     }
 
-    private func buildTiles(on board: SCNNode) {
-        for row in terrains.indices {
-            for column in distanceBands.indices {
-                let tile = makeTile(
-                    terrainName: terrains[row].name,
-                    distanceName: distanceBands[column].name
-                )
+    private func centerOfCell(column: Int, row: Int) -> SCNVector3 {
+        SCNVector3(
+            minX + (Float(column) + 0.5) * cellSize,
+            surfaceY,
+            minZ + (Float(row) + 0.5) * cellSize
+        )
+    }
 
-                let x = Float(column - 1) * (tileWidth + tileGap)
-                let z = Float(row) * (tileDepth + tileGap)
+    // MARK: Record a learning update
 
-                tile.position = SCNVector3(x, 0, z)
-
-                board.addChildNode(tile)
-                tileNodes.append(tile)
-            }
+    /// Call when the policy finishes an update. `position` is where
+    /// Frankenstein was standing.
+    func record(
+        position: SCNVector3,
+        action: FrankensteinAction,
+        newValue: Float
+    ) {
+        guard let i = index(forX: Float(position.x), z: Float(position.z)) else {
+            return
         }
+
+        cells[i].action = action
+        cells[i].value = newValue
+        cells[i].visits += 1
+        dirty.insert(i)
     }
 
-    private func makeTile(
-        terrainName: String,
-        distanceName: String
-    ) -> SCNNode {
-        let container = SCNNode()
-
-        let geometry = SCNBox(
-            width: CGFloat(tileWidth),
-            height: 0.025,
-            length: CGFloat(tileDepth),
-            chamferRadius: 0.035
-        )
-
-        geometry.materials = [
-            makeMaterial(color: UIColor(white: 0.16, alpha: 0.96))
-        ]
-
-        let base = SCNNode(geometry: geometry)
-        base.name = "QGridBase"
-        base.position.y = 0.0125
-        container.addChildNode(base)
-
-        let terrainText = makeText(
-            terrainName,
-            size: 0.105,
-            color: .white
-        )
-
-        terrainText.position = SCNVector3(0, 0.035, -0.25)
-        container.addChildNode(terrainText)
-
-        let distanceText = makeText(
-            distanceName,
-            size: 0.09,
-            color: .lightGray
-        )
-
-        distanceText.position = SCNVector3(0, 0.035, -0.09)
-        container.addChildNode(distanceText)
-
-        let actionText = makeText(
-            "ACTION: —",
-            size: 0.085,
-            color: .cyan
-        )
-
-        actionText.name = "QGridAction"
-        actionText.position = SCNVector3(0, 0.035, 0.08)
-        container.addChildNode(actionText)
-
-        let valueText = makeText(
-            "Q: 0.00",
-            size: 0.10,
-            color: .yellow
-        )
-
-        valueText.name = "QGridValue"
-        valueText.position = SCNVector3(0, 0.035, 0.25)
-        container.addChildNode(valueText)
-
-        return container
-    }
-
-    // MARK: Update from actual policy
+    // MARK: Update every frame
 
     func update(
+        position: SCNVector3,
         policy: FrankensteinLearningPolicy,
         sample: FrankensteinTerrainSample,
         body: FrankensteinBodyState
@@ -211,149 +166,140 @@ final class FrankensteinQFloorGrid {
         }
 
         board.isHidden = !isVisible
-
         guard isVisible else { return }
 
-        for row in terrains.indices {
-            for column in distanceBands.indices {
-                let index = row * distanceBands.count + column
+        // Redraw only the cells that changed.
+        for i in dirty where i < tiles.count {
+            draw(cell: i)
+        }
+        dirty.removeAll()
 
-                guard index < tileNodes.count else { continue }
+        // Marker and its live value.
+        guard let marker,
+              let i = index(forX: Float(position.x), z: Float(position.z)) else {
+            self.marker?.isHidden = true
+            return
+        }
 
-                let tile = tileNodes[index]
+        marker.isHidden = false
+        marker.position = SCNVector3(
+            tiles[i].position.x,
+            surfaceY + 0.01,
+            tiles[i].position.z
+        )
 
-                // Create a representative state for this tile.
-                var tileSample = sample
-                tileSample.terrain = terrains[row].terrain
-                tileSample.distance = distanceBands[column].distance
-
-                // Keep the display query grounded and independent
-                // of whether Frankenstein is currently airborne.
-                var tileBody = body
-                tileBody.grounded = true
-                tileBody.fallen = false
-
-                // Read the existing policy values.
-                // This must not select an action or update learning.
-                let values = policy.actionValues(
-                    terrain: tileSample,
-                    body: tileBody
+        // Show what the policy stores for the state he sees right now.
+        let values = policy.actionValues(terrain: sample, body: body)
+        if let best = values.max(by: { $0.value < $1.value }),
+           markerIndex != i || markerText != "\(best.key)\(best.value)" {
+            markerIndex = i
+            markerText = "\(best.key)\(best.value)"
+            marker.geometry?.firstMaterial?.diffuse.contents =
+                image(
+                    top: "NOW \(shortName(best.key))",
+                    bottom: String(format: "%.2f", best.value),
+                    background: UIColor.yellow.withAlphaComponent(0.55),
+                    textColor: .black
                 )
-
-                // FIX: Define the best value before using it.
-                let best = values.max {
-                    $0.value < $1.value
-                }
-
-                let actionName = best.map {
-                    String(describing: $0.key).uppercased()
-                } ?? "UNLEARNED"
-
-                let qValue = best?.value ?? 0
-
-                let actionNode = tile.childNode(
-                    withName: "QGridAction",
-                    recursively: false
-                )
-
-                let valueNode = tile.childNode(
-                    withName: "QGridValue",
-                    recursively: false
-                )
-
-                actionNode?.geometry = makeTextGeometry(
-                    "ACTION: \(actionName)",
-                    size: 0.085,
-                    color: .cyan
-                )
-
-                valueNode?.geometry = makeTextGeometry(
-                    String(format: "Q: %.2f", qValue),
-                    size: 0.10,
-                    color: qValue >= 0 ? .yellow : .orange
-                )
-
-                // Brighter tiles represent larger Q-values.
-                let normalized = CGFloat(
-                    min(1, max(0, (Double(qValue) + 2) / 6))
-                )
-
-                if let base = tile.childNode(
-                    withName: "QGridBase",
-                    recursively: false
-                ), let box = base.geometry as? SCNBox {
-                    box.firstMaterial?.diffuse.contents = UIColor(
-                        red: 0.10 + 0.10 * normalized,
-                        green: 0.12 + 0.45 * normalized,
-                        blue: 0.18 + 0.15 * normalized,
-                        alpha: 0.96
-                    )
-                }
-            }
         }
     }
 
-    // MARK: Text helpers
+    // MARK: Drawing
 
-    private func makeText(
-        _ string: String,
-        size: CGFloat,
-        color: UIColor
-    ) -> SCNNode {
-        let node = SCNNode(
-            geometry: makeTextGeometry(
-                string,
-                size: size,
-                color: color
+    private var emptyColor: UIColor {
+        UIColor(white: 0.12, alpha: 1)
+    }
+
+    private func draw(cell i: Int) {
+        let cell = cells[i]
+        guard let action = cell.action else { return }
+
+        let normalized = CGFloat(min(1, max(-1, cell.value / 3)))
+        let background: UIColor
+        if normalized >= 0 {
+            background = UIColor(
+                red: 0.10,
+                green: 0.20 + 0.55 * normalized,
+                blue: 0.15,
+                alpha: 1
             )
+        } else {
+            background = UIColor(
+                red: 0.20 + 0.55 * -normalized,
+                green: 0.10,
+                blue: 0.10,
+                alpha: 1
+            )
+        }
+
+        tiles[i].geometry?.firstMaterial?.diffuse.contents = image(
+            top: shortName(action),
+            bottom: String(format: "%.2f", cell.value),
+            background: background,
+            textColor: .white
         )
-
-        // Rotate SCNText so it lies on the floor.
-        node.eulerAngles.x = -.pi / 2
-
-        return node
     }
 
-    private func makeTextGeometry(
-        _ string: String,
-        size: CGFloat,
-        color: UIColor
-    ) -> SCNText {
-        let text = SCNText(
-            string: string,
-            extrusionDepth: 0.001
-        )
-
-        text.font = UIFont.monospacedSystemFont(
-            ofSize: size,
-            weight: .bold
-        )
-
-        text.flatness = 0.2
-        text.alignmentMode = CATextLayerAlignmentMode.center.rawValue
-        text.firstMaterial?.diffuse.contents = color
-        text.firstMaterial?.isDoubleSided = true
-
-        let (minBound, maxBound) = text.boundingBox
-
-        text.containerFrame = CGRect(
-            x: CGFloat(minBound.x),
-            y: CGFloat(minBound.y),
-            width: CGFloat(maxBound.x - minBound.x),
-            height: CGFloat(maxBound.y - minBound.y)
-        )
-
-        return text
+    private func shortName(_ action: FrankensteinAction) -> String {
+        switch action {
+        case .walk: return "WALK"
+        case .run: return "RUN"
+        case .turnLeft: return "TURN L"
+        case .turnRight: return "TURN R"
+        case .jump: return "JUMP"
+        case .crouch: return "CROUCH"
+        case .stepUp: return "STEP UP"
+        case .stepDown: return "STEP DN"
+        case .roll: return "ROLL"
+        case .crawl: return "CRAWL"
+        case .recover: return "RECOVER"
+        case .backward: return "BACK"
+        case .stepForward: return "STEP FW"
+        case .liftObject: return "LIFT"
+        case .placeObject: return "PLACE"
+        case .throwObject: return "THROW"
+        }
     }
 
-    private func makeMaterial(
-        color: UIColor
-    ) -> SCNMaterial {
-        let material = SCNMaterial()
-        material.diffuse.contents = color
-        material.lightingModel = .physicallyBased
-        material.metalness.contents = 0.05
-        material.roughness.contents = 0.8
-        return material
+    private func image(
+        top: String,
+        bottom: String,
+        background: UIColor,
+        textColor: UIColor
+    ) -> UIImage {
+        let size = CGSize(width: 128, height: 128)
+        let renderer = UIGraphicsImageRenderer(size: size)
+
+        return renderer.image { context in
+            background.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+
+            UIColor(white: 1, alpha: 0.25).setStroke()
+            context.cgContext.setLineWidth(3)
+            context.cgContext.stroke(CGRect(origin: .zero, size: size).insetBy(dx: 1.5, dy: 1.5))
+
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.alignment = .center
+
+            let small: [NSAttributedString.Key: Any] = [
+                .font: UIFont.monospacedSystemFont(ofSize: 22, weight: .bold),
+                .foregroundColor: textColor,
+                .paragraphStyle: paragraph
+            ]
+            let large: [NSAttributedString.Key: Any] = [
+                .font: UIFont.monospacedSystemFont(ofSize: 34, weight: .heavy),
+                .foregroundColor: textColor,
+                .paragraphStyle: paragraph
+            ]
+
+            (top as NSString).draw(
+                in: CGRect(x: 0, y: 24, width: size.width, height: 30),
+                withAttributes: small
+            )
+            (bottom as NSString).draw(
+                in: CGRect(x: 0, y: 62, width: size.width, height: 44),
+                withAttributes: large
+            )
+        }
     }
 }

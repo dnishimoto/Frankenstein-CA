@@ -117,6 +117,11 @@ final class FrankensteinCA: ObservableObject {
         case .stepDown:  return (12, 12)
         case .crawl:     return (6, 14)
         case .roll:      return (10, 14)
+        case .backward:  return (8, 6)
+        case .stepForward: return (14, 6)
+        case .liftObject: return (2, 8)
+        case .placeObject: return (2, 4)
+        case .throwObject: return (2, 12)
         default:         return nil
         }
     }
@@ -179,7 +184,9 @@ final class FrankensteinCA: ObservableObject {
         [
             .walk, .run, .turnLeft, .turnRight,
             .jump, .crouch, .recover, .stepUp,
-            .stepDown, .crawl, .roll
+            .stepDown, .crawl, .roll,
+            .backward, .stepForward, .liftObject,
+            .placeObject, .throwObject
         ]
     }
 
@@ -216,12 +223,22 @@ final class FrankensteinCA: ObservableObject {
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
         allowedActions: [FrankensteinAction],
-        qValues: [FrankensteinAction: Float]
+        qValues: [FrankensteinAction: Float],
+        exploration: Float = 0
     ) -> FrankensteinAction {
 
         guard !allowedActions.isEmpty else {
             lastDecisionDescription = "No permitted action"
             return .walk
+        }
+
+        // The CA owns exploration; the Q-policy only supplies values.
+        if exploration > 0,
+           Float.random(in: 0..<1) < exploration,
+           let random = allowedActions.randomElement() {
+            setQValues(qValues)
+            lastDecisionDescription = "Action=\(random) | exploring"
+            return random
         }
 
         // Load the supplied Q-values into their CA network cells.

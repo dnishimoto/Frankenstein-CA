@@ -10,8 +10,27 @@ import SwiftUI
 import SceneKit
 
 
-import Foundation
-import SceneKit
+struct FrankensteinObjectObservation: Hashable {
+    let name: String
+    let width: Float
+    let height: Float
+    let depth: Float
+    let distance: Float
+    let pickupable: Bool
+
+    var categoryIndex: Int {
+        let value = name.lowercased()
+        if value.contains("table") { return 1 }
+        if value.contains("door") { return 2 }
+        if value.contains("stair") || value.contains("step") { return 3 }
+        if value.contains("platform") { return 4 }
+        if value.contains("ceiling") { return 5 }
+        if value.contains("crate") || value.contains("box") { return 6 }
+        if value.contains("dog") { return 7 }
+        return 8 // Other measurable object
+    }
+}
+
 
 struct FrankensteinDetectedObject {
     let name: String
@@ -328,6 +347,9 @@ enum FrankensteinAction: Int, CaseIterable {
     case roll
     case crawl
     case recover
+    case backward
+    case stepForward
+    case liftObject
 }
 
 struct FrankensteinLocomotionOutput {
@@ -353,6 +375,13 @@ struct FrankensteinLocomotionOutput {
 
     /// Progress through a roll, from `0` to `1`.
     var rollProgress: Float = 0
+
+    /// `1` moves along the facing direction, `-1` moves backward.
+    var moveDirection: Float = 1
+
+    /// True while the CA has commanded `.liftObject`. The Coordinator
+    /// performs the pickup because it owns the scene objects.
+    var liftRequested = false
 }
 
 // MARK: - Stage 1 Learning

@@ -331,6 +331,43 @@ enum FrankensteinTerrainScene {
             canCrawlUnder: true
         )
 
+        // MARK: - Recharging Station (on top of the pink platform)
+        // LowBarrier's top surface is at y = 1.60 + 0.15 = 1.75.
+
+        addBox(
+            to: terrain,
+            name: "RechargeStation",
+            position: SCNVector3(-6.5, 1.78, -4.5),
+            size: SCNVector3(1.2, 0.06, 1.2),
+            color: .systemGreen,
+            solid: false,
+            objectType: "rechargeStation"
+        )
+        if let station = terrain.childNode(withName: "RechargeStation", recursively: false),
+           let material = station.geometry?.firstMaterial {
+            material.emission.contents = UIColor.systemGreen
+        }
+
+        // MARK: - Movable crates (stack two to reach the platform)
+
+        addBox(
+            to: terrain,
+            name: "Crate1",
+            position: SCNVector3(-7.5, 0.3, -2.4),
+            size: SCNVector3(0.6, 0.6, 0.6),
+            color: .systemBrown,
+            objectType: "crate"
+        )
+
+        addBox(
+            to: terrain,
+            name: "Crate2",
+            position: SCNVector3(-6.3, 0.3, -2.4),
+            size: SCNVector3(0.6, 0.6, 0.6),
+            color: .systemBrown,
+            objectType: "crate"
+        )
+
         // MARK: - Raised Steps
 
         addBox(

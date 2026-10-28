@@ -1,284 +1,162 @@
-
-//
-// Frankenstein_CATests.swift
-// Frankenstein CATests
-//
-
 import Testing
 @testable import Frankenstein_CA
 
-struct Frankenstein_CATests {
+struct FrankensteinPolicyTests {
 
-    // MARK: - Helpers
-
-    private func hurdle(
-        height: Float = 0.4,
-        distance: Float = 0.6
-    ) -> FrankensteinTerrainSample {
-        var sample = FrankensteinTerrainSample()
-        sample.terrain = .hurdle
-        sample.obstacleHeight = height
-        sample.distance = distance
-        sample.isLandingAreaClear = true
-        return sample
+    private func hurdle(height: Float = 0.4, distance: Float = 0.6) -> FrankensteinTerrainSample {
+        var s = FrankensteinTerrainSample()
+        s.terrain = .hurdle
+        s.obstacleHeight = height
+        s.distance = distance
+        s.isLandingAreaClear = true
+        return s
     }
 
-    /// Test-only candidate actions.
-    /// This deliberately does not depend on FrankensteinActionConstraints.
-    private func candidates(
-        terrain: FrankensteinTerrainSample,
-        body _: FrankensteinBodyState
-    ) -> [FrankensteinAction] {
-        switch terrain.terrain {
-        case .hurdle:
-            return [
-                .jump,
-                .stepUp,
-                .walk,
-                .turnLeft,
-                .turnRight
-            ]
-
-        default:
-            return [
-                .walk,
-                .run,
-                .turnLeft,
-                .turnRight,
-                .jump
-            ]
-        }
+    private func makePolicy() -> FrankensteinLearningPolicy {
+        let p = FrankensteinLearningPolicy()
+        p.logsUpdates = false
+        return p
     }
 
-    // MARK: - CA network state
-
-    @Test
-    func caInitializesWithAn18By18Network() {
-        let ca = FrankensteinCA()
-
-        #expect(ca.size == 18)
-        #expect(ca.networkQGrid.count == 18)
-        #expect(ca.networkQGrid.allSatisfy { $0.count == 18 })
-        #expect(ca.generation == 0)
-    }
-
-    @Test
-    func qValuesAreStoredInTheirActionNetworkCells() {
-        let ca = FrankensteinCA()
-        let terrain = hurdle()
+    @Test func stateDistinguishesTerrainDistanceAndSize() {
+        let policy = makePolicy()
         let body = FrankensteinBodyState()
-        let allowed = candidates(terrain: terrain, body: body)
 
-        let values: [FrankensteinAction: Float] = [
-            .jump: 3.0,
-            .stepUp: 0.5,
-            .walk: -1.0,
-            .turnLeft: -0.2,
-            .turnRight: -0.2
-        ]
+        var flat = FrankensteinTerrainSample(); flat.terrain = .flat
+        var gap = FrankensteinTerrainSample()
+        gap.terrain = .gap; gap.gapWidth = 1.2; gap.distance = 0.65
+        var step = FrankensteinTerrainSample()
+        step.terrain = .raisedStep; step.obstacleHeight = 0.3
 
-        _ = ca.decideAction(
-            terrain: terrain,
-            body: body,
-            allowedActions: allowed,
-            qValues: values
-        )
-
-        // Jump maps to (x: 8, y: 2).
-        #expect(ca.qValue(atX: 8, y: 2) == 3.0)
-
-        // Walk maps to (x: 8, y: 8).
-        #expect(ca.qValue(atX: 8, y: 8) == -1.0)
-
-        // Turn left maps to (x: 4, y: 8).
-        #expect(ca.qValue(atX: 4, y: 8) == -0.2)
+        let keys = Set([
+            policy.stateKey(terrain: flat, body: body),
+            policy.stateKey(terrain: gap, body: body),
+            policy.stateKey(terrain: step, body: body),
+            policy.stateKey(terrain: hurdle(height: 0.3, distance: 0.4), body: body),
+            policy.stateKey(terrain: hurdle(height: 0.7, distance: 0.4), body: body),
+            policy.stateKey(terrain: hurdle(height: 0.3, distance: 1.5), body: body)
+        ])
+        #expect(keys.count == 6)
     }
 
-    @Test
-    func missingQValuesResetNetworkCellsToZero() {
-        let ca = FrankensteinCA()
-        let terrain = hurdle()
+    @Test func readingValuesNeverChangesTheTable() {
+        let policy = makePolicy()
         let body = FrankensteinBodyState()
-        let allowed = candidates(terrain: terrain, body: body)
-
-        _ = ca.decideAction(
-            terrain: terrain,
-            body: body,
-            allowedActions: allowed,
-            qValues: [.jump: 4.0]
-        )
-
-        #expect(ca.qValue(atX: 8, y: 2) == 4.0)
-
-        _ = ca.decideAction(
-            terrain: terrain,
-            body: body,
-            allowedActions: allowed,
-            qValues: [:]
-        )
-
-        #expect(ca.qValue(atX: 8, y: 2) == 0.0)
+        _ = policy.learnedActionValues(terrain: hurdle(), body: body)
+        #expect(policy.learnedStateCount == 0)
+        #expect(!policy.isAwaitingOutcome)
     }
 
-    @Test
-    func invalidNetworkCoordinatesReturnZero() {
-        let ca = FrankensteinCA()
-
-        #expect(ca.qValue(atX: -1, y: 0) == 0.0)
-        #expect(ca.qValue(atX: 18, y: 0) == 0.0)
-        #expect(ca.qValue(atX: 0, y: 18) == 0.0)
-    }
-
-    // MARK: - CA action selection
-
-    @Test
-    func caSelectsAnAllowedAction() {
-        let ca = FrankensteinCA()
+    @Test func oneCompletedActionMakesExactlyOneUpdate() {
+        let policy = makePolicy()
         let body = FrankensteinBodyState()
         let terrain = hurdle()
-        let allowed = candidates(terrain: terrain, body: body)
 
-        let values: [FrankensteinAction: Float] = [
-            .jump: 3.0,
-            .stepUp: 0.5,
-            .walk: -1.0,
-            .turnLeft: -0.2,
-            .turnRight: -0.2
-        ]
+        #expect(policy.beginCAChosenAction(.jump, terrain: terrain, body: body))
+        #expect(policy.learn(reward: 3, terrain: terrain, body: body))
+        #expect(!policy.learn(reward: 3, terrain: terrain, body: body))
+        #expect(policy.updateCount == 1)
 
-        let action = ca.decideAction(
-            terrain: terrain,
-            body: body,
-            allowedActions: allowed,
-            qValues: values
-        )
-
-        #expect(allowed.contains(action))
+        let record = policy.updateLog[0]
+        #expect(record.action == .jump)
+        #expect(record.oldValue == 0)
+        #expect(record.newValue > 0.3 && record.newValue < 0.5)
     }
 
-    @Test
-    func highestQValueWinsWhenItsActionIsPermitted() {
+    @Test func jumpOutcomeOnlyCreditsAPendingJump() {
+        let policy = makePolicy()
+        let body = FrankensteinBodyState()
+        _ = policy.beginCAChosenAction(.walk, terrain: hurdle(), body: body)
+        #expect(!policy.reportJumpOutcome(succeeded: true, terrain: hurdle(), body: body))
+        #expect(policy.updateCount == 0)
+    }
+
+    @Test func stateDistinguishesObjectIdentityPickupAndCarrying() {
+        let policy = makePolicy()
+        let body = FrankensteinBodyState()
+
+        var crate = FrankensteinTerrainSample()
+        crate.terrain = .hurdle; crate.obstacleHeight = 0.4; crate.distance = 0.6
+        crate.objectName = "Crate"; crate.objectPickupable = true
+
+        var platform = crate
+        platform.objectName = "Platform"; platform.objectPickupable = false
+
+        var carrying = crate
+        carrying.carryingObject = true
+
+        let keys = Set([
+            policy.stateKey(terrain: crate, body: body),
+            policy.stateKey(terrain: platform, body: body),
+            policy.stateKey(terrain: carrying, body: body)
+        ])
+        #expect(keys.count == 3)
+    }
+
+    @Test func constraintsOfferNewActions() {
+        var flat = FrankensteinTerrainSample()
+        flat.terrain = .flat
+        flat.objectPickupable = true
+
+        let actions = FrankensteinActionConstraints.allowedActions(
+            terrain: flat, body: FrankensteinBodyState()
+        )
+        #expect(actions.contains(.backward))
+        #expect(actions.contains(.stepForward))
+        #expect(actions.contains(.liftObject))
+
+        flat.carryingObject = true
+        #expect(!FrankensteinActionConstraints.allowedActions(
+            terrain: flat, body: FrankensteinBodyState()
+        ).contains(.liftObject))
+    }
+
+    @Test func caLearnsToJumpTheHurdle() {
+        let policy = makePolicy()
         let ca = FrankensteinCA()
         let body = FrankensteinBodyState()
         let terrain = hurdle()
 
-        let allowed: [FrankensteinAction] = [
-            .jump,
-            .walk,
-            .turnLeft
-        ]
-
-        let values: [FrankensteinAction: Float] = [
-            .jump: 3.0,
-            .walk: -1.0,
-            .turnLeft: -0.2
-        ]
-
-        let action = ca.decideAction(
-            terrain: terrain,
-            body: body,
-            allowedActions: allowed,
-            qValues: values
-        )
-
-        #expect(action == .jump)
-        #expect(ca.qValue(atX: 8, y: 2) == 3.0)
-    }
-
-    @Test
-    func disallowedActionCannotWinWithHighestQValue() {
-        let ca = FrankensteinCA()
-        let body = FrankensteinBodyState()
-        let terrain = hurdle()
-
-        // Jump has the highest Q-value but is not permitted.
-        let allowed: [FrankensteinAction] = [
-            .walk,
-            .turnLeft
-        ]
-
-        let values: [FrankensteinAction: Float] = [
-            .jump: 100.0,
-            .walk: 1.0,
-            .turnLeft: 0.0
-        ]
-
-        let action = ca.decideAction(
-            terrain: terrain,
-            body: body,
-            allowedActions: allowed,
-            qValues: values
-        )
-
-        #expect(action == .walk)
-        #expect(allowed.contains(action))
-    }
-
-    @Test
-    func caHandlesAnEmptyAllowedActionList() {
-        let ca = FrankensteinCA()
-        let body = FrankensteinBodyState()
-        let terrain = hurdle()
-
-        let action = ca.decideAction(
-            terrain: terrain,
-            body: body,
-            allowedActions: [],
-            qValues: [.jump: 100.0]
-        )
-
-        #expect(action == .walk)
-        #expect(ca.lastDecisionDescription == "No permitted action")
-    }
-
-    // MARK: - CA cellular updates
-
-    @Test
-    func caStepAdvancesOneGeneration() {
-        let ca = FrankensteinCA()
-
-        ca.step()
-
-        #expect(ca.generation == 1)
-    }
-
-    @Test
-    func caCanAdvanceWithoutSelectingAnAction() {
-        let ca = FrankensteinCA()
-        let initialGeneration = ca.generation
-        let initialQGrid = ca.networkQGrid
-
-        ca.step()
-
-        #expect(ca.generation == initialGeneration + 1)
-        #expect(ca.networkQGrid == initialQGrid)
-    }
-
-    @Test
-    func resetClearsNetworkQValuesAndGeneration() {
-        let ca = FrankensteinCA()
-        let terrain = hurdle()
-        let body = FrankensteinBodyState()
-
-        _ = ca.decideAction(
-            terrain: terrain,
-            body: body,
-            allowedActions: [.jump, .walk],
-            qValues: [
-                .jump: 3.0,
-                .walk: 1.0
-            ]
-        )
-
-        ca.step()
-        ca.reset()
-
-        #expect(ca.generation == 0)
-        #expect(
-            ca.networkQGrid.allSatisfy { row in
-                row.allSatisfy { $0 == 0.0 }
+        func reward(_ a: FrankensteinAction) -> Float {
+            switch a {
+            case .jump: return 3.0
+            case .stepUp: return 0.5
+            case .backward: return -0.3
+            default: return -0.2
             }
-        )
-        #expect(ca.lastDecisionDescription == "Reset")
+        }
+
+        let candidates = FrankensteinActionConstraints.allowedActions(terrain: terrain, body: body)
+        #expect(candidates.contains(.jump))
+
+        // Deterministic exploration: try every candidate several times,
+        // then let the CA choose from the learned values alone.
+        let explorationEpisodes = candidates.count * 5
+        let totalEpisodes = explorationEpisodes + 100
+        var lateJumps = 0
+
+        for e in 0..<totalEpisodes {
+            let action: FrankensteinAction
+            if e < explorationEpisodes {
+                action = candidates[e % candidates.count]
+            } else {
+                action = ca.decideAction(
+                    terrain: terrain, body: body,
+                    allowedActions: candidates,
+                    qValues: policy.learnedActionValues(terrain: terrain, body: body),
+                    exploration: 0
+                )
+                if action == .jump { lateJumps += 1 }
+            }
+
+            #expect(policy.beginCAChosenAction(action, terrain: terrain, body: body))
+            #expect(policy.learn(reward: reward(action), terrain: terrain, body: body, nextActions: candidates))
+            ca.step()
+        }
+
+        #expect(policy.updateCount == totalEpisodes)
+        #expect(policy.qValue(for: .jump, terrain: terrain, body: body) >
+                policy.qValue(for: .backward, terrain: terrain, body: body))
+        #expect(lateJumps == 100)
     }
 }
