@@ -4,10 +4,9 @@ import simd
 import SwiftUI
 import UIKit
 
-
 final class Coordinator: NSObject, SCNSceneRendererDelegate {
-    
-    // MARK: - Cellular Automaton
+
+    // MARK: - Callbacks
 
     var onCAStats: ((Int, Int) -> Void)?
 
@@ -15,9 +14,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     private var lastCATickTime: TimeInterval = 0
     private let caTickInterval: TimeInterval = 0.25
-
-
-    // MARK: - Callbacks
 
     var onStats: ((String) -> Void)?
     var onDebugInfo: ((String) -> Void)?
@@ -55,6 +51,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     private var latestTerrainSample = FrankensteinTerrainSample()
     private var latestDetection: DetectedObjectInfo?
+    private var latestPolicyObservation: FrankensteinObjectObservation?
 
     private var lastActionName = ""
     private var lastDebugMessage = ""
@@ -73,9 +70,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private let pickupDistance: Float = 1.25
     private let interactionDistance: Float = 1.25
 
-    // MARK: - Original Initializer
-    //
-    // Keep this signature compatible with FrankensteinSceneView.
+    // MARK: - Initializer
 
     init(
         scene: SCNScene,
@@ -94,15 +89,14 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         hasPreviousCharacterPosition = true
     }
 
-    /// Connect the existing cellular automaton to the coordinator.
-   
+    // MARK: - Attach Cellular Automaton
+
     func attachCA(_ ca: FrankensteinCA) {
         self.ca = ca
 
-        // Connect this exact CA instance to locomotion.
+        // Connect the exact same CA instance to locomotion.
         locomotion.attachCA(ca)
 
-        // Publish the initial generation and live-cell count.
         publishCAStats()
 
         print("[CA] Connected to Coordinator and Locomotion.")
@@ -110,8 +104,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         print("[CA] Live cells: \(ca.liveCellCount)")
     }
 
-
- 
     private func tickCA() {
         guard let ca else { return }
 
@@ -123,7 +115,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             "Live cells: \(ca.liveCellCount)"
         )
     }
-    /// Send generation and live-cell counts to the UI.
+
     private func publishCAStats() {
         guard let ca else { return }
 
@@ -136,8 +128,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     // MARK: - Attach Actual Displayed Scene
-    //
-    // FrankensteinSceneView calls this after constructing the scene.
 
     func attach(
         scene: SCNScene,
@@ -152,7 +142,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         hasPreviousCharacterPosition = true
         jumpBaseY = nil
 
-        // Discover commonly named course objects.
         doorNode = findNode(
             containing: "door",
             under: scene.rootNode
@@ -179,8 +168,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     // MARK: - Start / Stop
-    //
-    // These methods are required by FrankensteinSceneView.
 
     func start() {
         guard !isRunning else { return }
@@ -211,7 +198,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     // MARK: - Renderer Update
-
 
     func renderer(
         _ renderer: SCNSceneRenderer,
@@ -245,8 +231,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         if time - lastCATickTime >= caTickInterval {
             lastCATickTime = time
 
-            // SceneKit renderer callbacks are not guaranteed to run on
-            // the main thread. Update the ObservableObject on the main thread.
             DispatchQueue.main.async { [weak self] in
                 self?.tickCA()
             }
@@ -257,14 +241,21 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         if time - lastSensorTime >= sensorInterval {
             lastSensorTime = time
 
+            // One raycast observation is shared by terrain,
+            // Q-learning, and the UI.
             latestDetection = detectObjectAhead(
                 from: character,
                 in: scene
             )
 
+            latestPolicyObservation = makePolicyObservation(
+                from: latestDetection
+            )
+
             latestTerrainSample = makeTerrainSample(
                 for: character,
-                in: scene
+                in: scene,
+                detection: latestDetection
             )
 
             let detection = latestDetection
@@ -334,12 +325,31 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         }
     }
 
+    // MARK: - Policy Object Observation
+
+    private func makePolicyObservation(
+        from detection: DetectedObjectInfo?
+    ) -> FrankensteinObjectObservation? {
+        guard let detection else {
+            return nil
+        }
+
+        return FrankensteinObjectObservation(
+            name: detection.name,
+            width: Float(detection.dimensions.x),
+            height: Float(detection.dimensions.y),
+            depth: Float(detection.dimensions.z),
+            distance: detection.distance,
+            pickupable: detection.pickupable
+        )
+    }
 
     // MARK: - Terrain Sensing
 
     private func makeTerrainSample(
         for character: SCNNode,
-        in scene: SCNScene
+        in scene: SCNScene,
+        detection: DetectedObjectInfo?
     ) -> FrankensteinTerrainSample {
 
         let position = character.presentation.worldPosition
@@ -364,11 +374,9 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         sample.gapFarEdgeDistance = .infinity
         sample.landingHeightDelta = 0
 
-        // Detect a forward object independently of ground sensing.
-        if let detection = detectObjectAhead(
-            from: character,
-            in: scene
-        ) {
+        // Use the same object detection collected by the renderer.
+        // Do not perform a second object raycast here.
+        if let detection {
             sample.distance = detection.distance
             sample.obstacleHeight = detection.dimensions.y
             sample.obstacleDepth = detection.dimensions.z
@@ -564,7 +572,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 to: end,
                 options: options
             )
-            
+
             if hits.contains(where: {
                 !isCharacterPart($0.node) &&
                 !isGroundLikeNode($0.node)
@@ -576,9 +584,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         return true
     }
 
-    // MARK: - Object Ray Trace
+    // MARK: - Detect Object Ahead
 
-  
     private func detectObjectAhead(
         from character: SCNNode,
         in scene: SCNScene
@@ -625,6 +632,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         // Keep the ray level, so it detects objects in front rather than
         // aiming toward the floor or ceiling.
         let rayLength: Float = 4.0
+
         let end = SCNVector3(
             start.x + forward.x * rayLength,
             start.y,
@@ -682,7 +690,11 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             let dy = Float(hitPosition.y - start.y)
             let dz = Float(hitPosition.z - start.z)
 
-            let distance = sqrt(dx * dx + dy * dy + dz * dz)
+            let distance = sqrt(
+                dx * dx +
+                dy * dy +
+                dz * dz
+            )
 
             guard distance <= rayLength else {
                 continue
@@ -702,7 +714,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         return nil
     }
 
-    // MARK: - Resolve the actual object from a child mesh
+    // MARK: - Resolve the Actual Object from a Child Mesh
 
     private func meaningfulDetectionParent(
         for node: SCNNode
@@ -742,7 +754,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             value == "geometry" ||
             value.hasPrefix("scn")
     }
-
 
     // MARK: - Actual Displacement
 
@@ -803,6 +814,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             }
 
             let baseY = jumpBaseY ?? Float(oldPosition.y)
+
             let heightOffset = max(
                 0,
                 locomotion.body.height - standingHeight
@@ -1022,8 +1034,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
               detection.pickupable,
               detection.distance <= pickupDistance,
               let hitNode = nearestPickupNode(
-                from: character,
-                in: scene
+                  from: character,
+                  in: scene
               ),
               let target = pickupTarget(for: hitNode) else {
             return false
@@ -1107,8 +1119,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         carriedNode.removeFromParentNode()
         scene.rootNode.addChildNode(carriedNode)
 
-        // destination is in world space. Convert it into the
-        // root node's local coordinates before assigning position.
+        // Convert world coordinates to the root node's local coordinates.
         carriedNode.position = scene.rootNode.convertPosition(
             destination,
             from: nil
@@ -1250,21 +1261,40 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 }
 
+// MARK: - Executive Control Integration
+
 extension Coordinator {
+
     /// Attach the same CA instance owned by FrankensteinSceneView.
     /// Call this from make/updateCoordinator after Coordinator creation.
     func attachExecutiveCA(_ ca: FrankensteinCA) {
         attachCA(ca)
-        print("[Coordinator] Shared CA attached; generation=\(ca.generation), live cells=\(ca.liveCellCount)")
+
+        print(
+            "[Coordinator] Shared CA attached; " +
+            "generation=\(ca.generation), " +
+            "live cells=\(ca.liveCellCount)"
+        )
     }
 
-    /// Use this in the existing renderer loop after terrain sensing and after locomotion.step.
-    /// It makes policy/CA/execution discrepancies visible without changing scene mechanics.
-    func logExecutiveControlState(terrain: FrankensteinTerrainSample, locomotion: FrankensteinLocomotion) {
-        print("[Coordinator] CA generation=\(locomotion.attachedCAGeneration), live cells=\(locomotion.attachedCALiveCellCount)")
+    /// Log policy/CA/execution state without changing scene mechanics.
+    func logExecutiveControlState(
+        terrain: FrankensteinTerrainSample,
+        locomotion: FrankensteinLocomotion
+    ) {
+        print(
+            "[Coordinator] CA generation=" +
+            "\(locomotion.attachedCAGeneration), " +
+            "live cells=\(locomotion.attachedCALiveCellCount)"
+        )
+
         print("[Coordinator] CA decision=\(locomotion.caCommandName)")
         print("[Coordinator] applied action=\(locomotion.activeActionName)")
-        print("[Coordinator] terrain=\(terrain.terrain), Q updates=\(locomotion.policy.updateCount), states=\(locomotion.policy.learnedStateCount)")
+
+        print(
+            "[Coordinator] terrain=\(terrain.terrain), " +
+            "Q updates=\(locomotion.policy.updateCount), " +
+            "states=\(locomotion.policy.learnedStateCount)"
+        )
     }
 }
-

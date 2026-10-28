@@ -8,6 +8,50 @@
 import Foundation
 import SwiftUI
 import SceneKit
+
+
+import Foundation
+import SceneKit
+
+struct FrankensteinDetectedObject {
+    let name: String
+    let dimensions: SCNVector3
+    let distance: Float
+    let relativePosition: SCNVector3
+    let isPickupable: Bool
+    let blocksPath: Bool
+
+    var height: Float { dimensions.y }
+
+    var normalizedName: String {
+        name.lowercased()
+    }
+}
+
+struct FrankensteinCAObservation {
+    let detectedObject: FrankensteinDetectedObject?
+    let terrain: FrankensteinTerrainSample
+    let body: FrankensteinBodyState
+
+    var objectCategory: String {
+        guard let object = detectedObject else {
+            return "none"
+        }
+
+        let name = object.normalizedName
+
+        if name.contains("table") { return "table" }
+        if name.contains("door") { return "door" }
+        if name.contains("platform") { return "platform" }
+        if name.contains("dog") { return "dog" }
+        if name.contains("recharge") { return "rechargeStation" }
+        if name.contains("obstacle") { return "obstacle" }
+
+        return "other"
+    }
+}
+
+
 enum FrankensteinCACommand {
     case walk
     case run

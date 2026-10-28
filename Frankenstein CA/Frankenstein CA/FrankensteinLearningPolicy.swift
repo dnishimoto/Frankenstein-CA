@@ -1,5 +1,29 @@
-
 import Foundation
+
+// MARK: - Perceived object passed from Coordinator to Q-learning
+
+/// Compact, scene-independent description of the object currently perceived
+/// in front of Frankenstein. The Coordinator constructs this from its raycast.
+struct FrankensteinObjectObservation: Hashable {
+    let name: String
+    let width: Float
+    let height: Float
+    let depth: Float
+    let distance: Float
+    let pickupable: Bool
+
+    var categoryIndex: Int {
+        let value = name.lowercased()
+        if value.contains("table") { return 1 }
+        if value.contains("door") { return 2 }
+        if value.contains("stair") || value.contains("step") { return 3 }
+        if value.contains("platform") { return 4 }
+        if value.contains("ceiling") { return 5 }
+        if value.contains("crate") || value.contains("box") { return 6 }
+        if value.contains("dog") { return 7 }
+        return 8 // Other measurable object
+    }
+}
 
 // MARK: - Q-Learning Policy
 
@@ -24,6 +48,11 @@ final class FrankensteinLearningPolicy {
         let distanceBand: Int
         let tiltBand: Int
         let grounded: Bool
+        let objectCategory: Int
+        let objectDistanceBand: Int
+        let objectHeightBand: Int
+        let objectDepthBand: Int
+        let objectPickupable: Bool
     }
 
     // State -> action ID -> Q-value
@@ -70,7 +99,8 @@ final class FrankensteinLearningPolicy {
 
     private func makeState(
         terrain: FrankensteinTerrainSample,
-        body: FrankensteinBodyState
+        body: FrankensteinBodyState,
+        objectObservation: FrankensteinObjectObservation? = nil
     ) -> State {
 
         let distance = terrain.distanceAhead
@@ -95,11 +125,36 @@ final class FrankensteinLearningPolicy {
             tiltBand = 2
         }
 
+        let objectCategory = objectObservation?.categoryIndex ?? 0
+        let objectDistance = objectObservation?.distance ?? .infinity
+        let objectDistanceBand: Int
+        if objectObservation == nil {
+            objectDistanceBand = 0
+        } else if !objectDistance.isFinite || objectDistance < 0.8 {
+            objectDistanceBand = 1
+        } else if objectDistance < 2.0 {
+            objectDistanceBand = 2
+        } else {
+            objectDistanceBand = 3
+        }
+
+        let objectHeight = objectObservation?.height ?? 0
+        let objectHeightBand = objectObservation == nil ? 0 :
+            (objectHeight < 0.4 ? 1 : (objectHeight < 1.0 ? 2 : 3))
+        let objectDepth = objectObservation?.depth ?? 0
+        let objectDepthBand = objectObservation == nil ? 0 :
+            (objectDepth < 0.3 ? 1 : (objectDepth < 1.0 ? 2 : 3))
+
         return State(
             terrain: terrainIndex(for: terrain.terrain),
             distanceBand: distanceBand,
             tiltBand: tiltBand,
-            grounded: body.grounded
+            grounded: body.grounded,
+            objectCategory: objectCategory,
+            objectDistanceBand: objectDistanceBand,
+            objectHeightBand: objectHeightBand,
+            objectDepthBand: objectDepthBand,
+            objectPickupable: objectObservation?.pickupable ?? false
         )
     }
 
@@ -148,9 +203,14 @@ final class FrankensteinLearningPolicy {
     /// Q-values are advice to the CA. This method does not select or execute an action.
     func learnedActionValues(
         terrain: FrankensteinTerrainSample,
-        body: FrankensteinBodyState
+        body: FrankensteinBodyState,
+        objectObservation: FrankensteinObjectObservation? = nil
     ) -> [FrankensteinAction: Float] {
-        actionValues(terrain: terrain, body: body)
+        actionValues(
+            terrain: terrain,
+            body: body,
+            objectObservation: objectObservation
+        )
     }
 
     /// Starts a learning transition for the action the CA actually chose.
@@ -159,13 +219,14 @@ final class FrankensteinLearningPolicy {
     func beginCAChosenAction(
         _ action: FrankensteinAction,
         terrain: FrankensteinTerrainSample,
-        body: FrankensteinBodyState
+        body: FrankensteinBodyState,
+        objectObservation: FrankensteinObjectObservation? = nil
     ) -> Bool {
         guard !actionPendingLearning else {
             print("[Q-Learning] Cannot begin CA action: previous action still awaits its outcome.")
             return false
         }
-        let state = makeState(terrain: terrain, body: body)
+        let state = makeState(terrain: terrain, body: body, objectObservation: objectObservation)
         let allowed = allowedActions(terrain: terrain, body: body)
         guard allowed.contains(action) else {
             print("[Q-Learning] CA action rejected by policy constraints: \(action)")
@@ -346,7 +407,8 @@ final class FrankensteinLearningPolicy {
         reward: Float,
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
-        terminal: Bool = false
+        terminal: Bool = false,
+        objectObservation: FrankensteinObjectObservation? = nil
     ) -> Bool {
 
         guard actionPendingLearning,
@@ -363,7 +425,8 @@ final class FrankensteinLearningPolicy {
 
         let nextState = makeState(
             terrain: terrain,
-            body: body
+            body: body,
+            objectObservation: objectObservation
         )
 
         let nextValue: Float
@@ -425,7 +488,8 @@ final class FrankensteinLearningPolicy {
         succeeded: Bool,
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
-        terminal: Bool = false
+        terminal: Bool = false,
+        objectObservation: FrankensteinObjectObservation? = nil
     ) -> Bool {
 
         guard actionPendingLearning,
@@ -438,7 +502,8 @@ final class FrankensteinLearningPolicy {
             reward: succeeded ? 3.0 : -2.0,
             terrain: terrain,
             body: body,
-            terminal: terminal
+            terminal: terminal,
+            objectObservation: objectObservation
         )
     }
 
@@ -454,12 +519,14 @@ final class FrankensteinLearningPolicy {
     func qValue(
         for action: FrankensteinAction,
         terrain: FrankensteinTerrainSample,
-        body: FrankensteinBodyState
+        body: FrankensteinBodyState,
+        objectObservation: FrankensteinObjectObservation? = nil
     ) -> Float {
 
         let state = makeState(
             terrain: terrain,
-            body: body
+            body: body,
+            objectObservation: objectObservation
         )
 
         return qValue(
@@ -470,12 +537,14 @@ final class FrankensteinLearningPolicy {
 
     func preferredAction(
         terrain: FrankensteinTerrainSample,
-        body: FrankensteinBodyState
+        body: FrankensteinBodyState,
+        objectObservation: FrankensteinObjectObservation? = nil
     ) -> FrankensteinAction? {
 
         let state = makeState(
             terrain: terrain,
-            body: body
+            body: body,
+            objectObservation: objectObservation
         )
 
         let candidates = allowedActions(
@@ -491,12 +560,14 @@ final class FrankensteinLearningPolicy {
 
     func actionValues(
         terrain: FrankensteinTerrainSample,
-        body: FrankensteinBodyState
+        body: FrankensteinBodyState,
+        objectObservation: FrankensteinObjectObservation? = nil
     ) -> [FrankensteinAction: Float] {
 
         let state = makeState(
             terrain: terrain,
-            body: body
+            body: body,
+            objectObservation: objectObservation
         )
 
         var result: [FrankensteinAction: Float] = [:]
@@ -518,18 +589,24 @@ final class FrankensteinLearningPolicy {
     /// be investigated against the terrain sensor's output.
     func printStateDiagnostics(
         terrain: FrankensteinTerrainSample,
-        body: FrankensteinBodyState
+        body: FrankensteinBodyState,
+        objectObservation: FrankensteinObjectObservation? = nil
     ) {
 
         let state = makeState(
             terrain: terrain,
-            body: body
+            body: body,
+            objectObservation: objectObservation
         )
 
         print("[Q State] Terrain ID: \(state.terrain)")
         print("[Q State] Distance band: \(state.distanceBand)")
         print("[Q State] Tilt band: \(state.tiltBand)")
         print("[Q State] Grounded: \(state.grounded)")
+        print("[Q State] Object category: \(state.objectCategory)")
+        print("[Q State] Object distance band: \(state.objectDistanceBand)")
+        print("[Q State] Object height/depth bands: \(state.objectHeightBand)/\(state.objectDepthBand)")
+        print("[Q State] Object pickupable: \(state.objectPickupable)")
         print("[Q State] Distinct states: \(learnedStateCount)")
     }
 

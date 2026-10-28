@@ -887,17 +887,19 @@ final class FrankensteinLocomotion {
         currentAction = fell ? .recover : .walk
     }
 
-
+    // MARK: - Stabilization
 
     private func stabilize(terrain: FrankensteinTerrainSample) {
         if !jumpInProgress {
             output.speed = min(output.speed, 2.2)
         }
 
-        output.crouch = (
-            currentAction == .crouch ||
-            currentAction == .crawl
-        ) ? 1.0 : 0.0
+        if terrain.terrain == .lowCeiling {
+            output.crouch = 1.0
+            output.speed = min(output.speed, 0.45)
+        } else {
+            output.crouch = currentAction == .crouch ? 1.0 : 0.0
+        }
 
         if body.fallen {
             output.speed = 0
@@ -905,7 +907,6 @@ final class FrankensteinLocomotion {
             output.action = .recover
         }
     }
-
 
     // MARK: - Animation and Turning
 
