@@ -8,69 +8,6 @@
 import Foundation
 import SwiftUI
 import SceneKit
-
-
-struct FrankensteinObjectObservation: Hashable {
-    let name: String
-    let width: Float
-    let height: Float
-    let depth: Float
-    let distance: Float
-    let pickupable: Bool
-
-    var categoryIndex: Int {
-        let value = name.lowercased()
-        if value.contains("table") { return 1 }
-        if value.contains("door") { return 2 }
-        if value.contains("stair") || value.contains("step") { return 3 }
-        if value.contains("platform") { return 4 }
-        if value.contains("ceiling") { return 5 }
-        if value.contains("crate") || value.contains("box") { return 6 }
-        if value.contains("dog") { return 7 }
-        return 8 // Other measurable object
-    }
-}
-
-
-struct FrankensteinDetectedObject {
-    let name: String
-    let dimensions: SCNVector3
-    let distance: Float
-    let relativePosition: SCNVector3
-    let isPickupable: Bool
-    let blocksPath: Bool
-
-    var height: Float { dimensions.y }
-
-    var normalizedName: String {
-        name.lowercased()
-    }
-}
-
-struct FrankensteinCAObservation {
-    let detectedObject: FrankensteinDetectedObject?
-    let terrain: FrankensteinTerrainSample
-    let body: FrankensteinBodyState
-
-    var objectCategory: String {
-        guard let object = detectedObject else {
-            return "none"
-        }
-
-        let name = object.normalizedName
-
-        if name.contains("table") { return "table" }
-        if name.contains("door") { return "door" }
-        if name.contains("platform") { return "platform" }
-        if name.contains("dog") { return "dog" }
-        if name.contains("recharge") { return "rechargeStation" }
-        if name.contains("obstacle") { return "obstacle" }
-
-        return "other"
-    }
-}
-
-
 enum FrankensteinCACommand {
     case walk
     case run
@@ -88,6 +25,9 @@ struct DetectedObjectInfo {
     let distance: Float
     let worldPosition: SCNVector3
     let pickupable: Bool
+
+    /// World height of the top of the object.
+    var topY: Float = 0
 
     var dimensionsText: String {
         String(
@@ -350,6 +290,8 @@ enum FrankensteinAction: Int, CaseIterable {
     case backward
     case stepForward
     case liftObject
+    case placeObject
+    case throwObject
 }
 
 struct FrankensteinLocomotionOutput {
@@ -382,6 +324,8 @@ struct FrankensteinLocomotionOutput {
     /// True while the CA has commanded `.liftObject`. The Coordinator
     /// performs the pickup because it owns the scene objects.
     var liftRequested = false
+    var placeRequested = false
+    var throwRequested = false
 }
 
 // MARK: - Stage 1 Learning
@@ -535,3 +479,4 @@ struct FrankensteinLearningMemory {
 }
 
 // MARK: - Cellular Automaton and Learner
+
