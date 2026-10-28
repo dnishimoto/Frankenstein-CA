@@ -193,8 +193,178 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     func attachTable(_ node: SCNNode?) {
         tableNode = node
+
+        guard let node, let scene else { return }
+
+        placeObjectOnSupportSurface(node, in: scene)
+
+        publishDebug("Table attached and support placement checked.")
+    }
+      private func worldBottomY(of node: SCNNode) -> Float? {
+        var lowest = Float.infinity
+
+        func inspect(_ current: SCNNode) {
+            if current.geometry != nil {
+                let (minimum, maximum) = current.boundingBox
+
+                let validBounds =
+                    minimum.x.isFinite &&
+                    minimum.y.isFinite &&
+                    minimum.z.isFinite &&
+                    maximum.x.isFinite &&
+                    maximum.y.isFinite &&
+                    maximum.z.isFinite &&
+                    maximum.x >= minimum.x &&
+                    maximum.y >= minimum.y &&
+                    maximum.z >= minimum.z
+
+                if validBounds {
+                    for x in [minimum.x, maximum.x] {
+                        for y in [minimum.y, maximum.y] {
+                            for z in [minimum.z, maximum.z] {
+                                let world = current.presentation.convertPosition(
+                                    SCNVector3(x, y, z),
+                                    to: nil
+                                )
+
+                                lowest = min(lowest, Float(world.y))
+                            }
+                        }
+                    }
+                }
+            }
+
+            for child in current.childNodes {
+                inspect(child)
+            }
+        }
+
+        inspect(node)
+
+        return lowest.isFinite ? lowest : nil
     }
 
+    /// Returns the highest solid surface directly beneath an object's
+    /// footprint, excluding the object and its own child meshes.
+    private func supportSurfaceBelow(
+        _ object: SCNNode,
+        in scene: SCNScene
+    ) -> Float? {
+        guard let bottomY = worldBottomY(of: object) else {
+            return nil
+        }
+
+        let worldPosition = object.presentation.worldPosition
+
+        let start = SCNVector3(
+            worldPosition.x,
+            bottomY - 0.02,
+            worldPosition.z
+        )
+
+        let end = SCNVector3(
+            worldPosition.x,
+            bottomY - 20.0,
+            worldPosition.z
+        )
+
+        let options: [String: Any] = [
+            SCNHitTestOption.ignoreHiddenNodes.rawValue: true,
+            SCNHitTestOption.backFaceCulling.rawValue: true
+        ]
+
+        let hits = scene.rootNode.hitTestWithSegment(
+            from: start,
+            to: end,
+            options: options
+        )
+
+        for hit in hits {
+            let hitNode = hit.node
+
+            // Never use the table itself or one of its child meshes as support.
+            var current: SCNNode? = hitNode
+            var belongsToObject = false
+
+            while let candidate = current {
+                if candidate === object {
+                    belongsToObject = true
+                    break
+                }
+                current = candidate.parent
+            }
+
+            guard !belongsToObject,
+                  !isCharacterPart(hitNode),
+                  !isQGridNode(hitNode),
+                  hit.worldNormal.y > 0.5 else {
+                continue
+            }
+
+            let name = (hitNode.name ?? "").lowercased()
+
+            // Decorative markers and the charging station are not support.
+            if name.contains("marker") ||
+                name.contains("rechargestation") {
+                continue
+            }
+
+            return Float(hit.worldCoordinates.y)
+        }
+
+        return nil
+    }
+
+    /// Moves a node vertically so its lowest world-space point touches
+    /// the highest valid support surface below it.
+    ///
+    /// If no surface is found, the node is left unchanged.
+    @discardableResult
+    private func placeObjectOnSupportSurface(
+        _ node: SCNNode,
+        in scene: SCNScene
+    ) -> Bool {
+        guard let bottomY = worldBottomY(of: node),
+              let surfaceY = supportSurfaceBelow(node, in: scene) else {
+            publishDebug(
+                "Could not find a support surface beneath \(readableName(for: node))."
+            )
+            return false
+        }
+
+        let correction = surfaceY - bottomY
+
+        guard correction.isFinite,
+              abs(correction) > 0.001 else {
+            return true
+        }
+
+        // Move along world Y, not the parent's local Y axis.
+        let oldWorldPosition = node.presentation.worldPosition
+
+        let correctedWorldPosition = SCNVector3(
+            oldWorldPosition.x,
+            oldWorldPosition.y + correction,
+            oldWorldPosition.z
+        )
+
+        if let parent = node.parent {
+            node.position = parent.convertPosition(
+                correctedWorldPosition,
+                from: nil
+            )
+        } else {
+            node.position = correctedWorldPosition
+        }
+
+        node.physicsBody?.resetTransform()
+
+        publishDebug(
+            "Placed \(readableName(for: node)) on support surface."
+        )
+
+        return true
+    }
     func attachHand(_ node: SCNNode?) {
         handNode = node
     }

@@ -8,6 +8,76 @@
 import Foundation
 import SwiftUI
 import SceneKit
+
+enum FrankensteinPosture: Equatable {
+    case standing
+    case walking
+    case running
+    case jumping
+    case crouching
+    case crawling
+    case rolling
+}
+
+
+struct FrankensteinLocomotionOutput {
+
+    // MARK: - Movement
+
+    var heading: Float = 0
+    var speed: Float = 0
+
+    /// 1 moves forward; -1 moves backward.
+    var moveDirection: Float = 1
+
+    var stride: Float = 0
+    var walkPhase: Float = 0
+    var lean: Float = 0
+
+    // MARK: - Posture and Animation
+
+    var posture: FrankensteinPosture = .standing
+
+    var crouch: Float = 0
+    var jump: Float = 0
+
+    /// True for exactly one frame when a jump should leave the ground.
+    var jumpRequested: Bool = false
+
+    /// Progress through a roll, from 0 to 1.
+    var rollProgress: Float = 0
+
+    var armLift: Float = 0
+    var headTurn: Float = 0
+    var mouthOpen: Float = 0
+
+    // MARK: - CA Action and Learning Feedback
+
+    var action: FrankensteinAction = .walk
+    var reward: Float = 0
+    var status: String = "Ready"
+
+    // MARK: - Object Manipulation
+
+    /// The Coordinator performs scene-object interactions.
+    var liftRequested: Bool = false
+    var placeRequested: Bool = false
+    var throwRequested: Bool = false
+}
+
+
+
+enum FrankensteinGoalStage: String {
+    case exploreRoom
+    case locateUsefulObject
+    case moveObjectToPlatform
+    case useObjectAsStep
+    case climbToRedPlatform
+    case reachChargingStation
+    case rechargeComplete
+}
+
+
 enum FrankensteinCACommand {
     case walk
     case run
@@ -155,18 +225,23 @@ enum FrankensteinPhysicalBody {
     static let solidMask: Int = 1 << 1
     static let decorationMask: Int = 1 << 3
 
+
     static func height(for posture: FrankensteinPosture) -> Float {
         switch posture {
-        case .standing:
+        case .standing, .walking, .running, .jumping:
             return standingHeight
+
         case .crouching:
             return crouchHeight
+
         case .crawling:
             return crawlHeight
+
         case .rolling:
             return rollHeight
         }
     }
+
 
     /// Heights above the feet of the horizontal rays used for sensing.
     /// The lowest ray sits below step height so steps can be seen and
@@ -268,12 +343,6 @@ struct FrankensteinBodyState {
 
 /// How his body is held. Each posture has a physical height that is
 /// checked against real geometry overhead.
-enum FrankensteinPosture: Int {
-    case standing
-    case crouching
-    case crawling
-    case rolling
-}
 
 enum FrankensteinAction: Int, CaseIterable {
     case walk
@@ -293,42 +362,6 @@ enum FrankensteinAction: Int, CaseIterable {
     case placeObject
     case throwObject
 }
-
-struct FrankensteinLocomotionOutput {
-    var walkPhase: Float = 0
-    var armLift: Float = 0
-    var headTurn: Float = 0
-    var mouthOpen: Float = 0
-    var heading: Float = 0
-    var speed: Float = 0
-    var crouch: Float = 0
-    var jump: Float = 0
-    var lean: Float = 0
-    var stride: Float = 0
-    var action: FrankensteinAction = .walk
-    var reward: Float = 0
-    var status = "Ready"
-
-    /// True for exactly one frame when a jump should leave the ground.
-    var jumpRequested = false
-
-    /// Posture the body should take.
-    var posture: FrankensteinPosture = .standing
-
-    /// Progress through a roll, from `0` to `1`.
-    var rollProgress: Float = 0
-
-    /// `1` moves along the facing direction, `-1` moves backward.
-    var moveDirection: Float = 1
-
-    /// True while the CA has commanded `.liftObject`. The Coordinator
-    /// performs the pickup because it owns the scene objects.
-    var liftRequested = false
-    var placeRequested = false
-    var throwRequested = false
-}
-
-// MARK: - Stage 1 Learning
 
 enum FrankensteinStage1Skill: String, Codable, CaseIterable {
     case walk
