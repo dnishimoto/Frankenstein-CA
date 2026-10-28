@@ -1,12 +1,15 @@
-
-
 import Foundation
 import SceneKit
 import simd
 
 
-final class FrankensteinLocomotion {
 
+
+
+// MARK: - Locomotion
+
+final class FrankensteinLocomotion {
+    
     private let recoveryDuration: Float = 0.6
 
     // MARK: - Learning
@@ -14,9 +17,10 @@ final class FrankensteinLocomotion {
     let policy = FrankensteinLearningPolicy()
 
     // MARK: - Cellular Automaton Controller
-
+ 
     private var ca: FrankensteinCA?
 
+    /// Attach the exact CA instance used by FrankensteinSceneView.
     func attachCA(_ ca: FrankensteinCA) {
         self.ca = ca
     }
@@ -24,6 +28,7 @@ final class FrankensteinLocomotion {
     var attachedCAGeneration: Int { ca?.generation ?? 0 }
     var attachedCALiveCellCount: Int { ca?.liveCellCount ?? 0 }
 
+    /// Diagnostics for the active CA-derived movement command.
     private(set) var caCommandName = "Walk"
     private(set) var lastSafetyOverride = ""
     private(set) var caLeftActivity = 0
@@ -32,124 +37,12 @@ final class FrankensteinLocomotion {
 
     private var lastCACommand: FrankensteinCACommand = .walk
 
-    // MARK: - Primary Goal: Charging Station on Red Platform
-
-    private(set) var goalStage: FrankensteinGoalStage = .exploreRoom
-
-    private(set) var goalDescription =
-        "Explore the room and find an object that can help reach the red platform."
-
-    private(set) var usefulObjectName: String?
-    private(set) var usefulObjectMoved = false
-    private(set) var objectPlacedAsStep = false
-    private(set) var redPlatformReached = false
-    private(set) var chargingStationReached = false
-
-    /// Perception calls this when a useful object has been identified.
-    func reportUsefulObjectDetected(name: String) {
-        let cleanedName = name.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-
-        guard !cleanedName.isEmpty,
-              !chargingStationReached else {
-            return
-        }
-
-        usefulObjectName = cleanedName
-        goalStage = .moveObjectToPlatform
-        goalDescription =
-            "Move \(cleanedName) into a useful position for reaching the red platform."
-
-        print("[Goal] Useful object detected: \(cleanedName)")
-    }
-
-    /// Call only after the Coordinator confirms actual object movement.
-    @discardableResult
-    func reportUsefulObjectMoved(
-        name: String,
-        succeeded: Bool
-    ) -> Bool {
-        guard !chargingStationReached else {
-            return false
-        }
-
-        guard succeeded else {
-            goalDescription =
-                "Continue moving \(name) into a useful position."
-            print("[Goal] Object movement failed: \(name)")
-            return false
-        }
-
-        usefulObjectName = name
-        usefulObjectMoved = true
-        goalStage = .useObjectAsStep
-        goalDescription =
-            "Use \(name) as a step to climb toward the red platform."
-
-        print("[Goal] Object moved into useful position: \(name)")
-        return true
-    }
-
-    /// Call when the Coordinator verifies the object can be used as a step.
-    @discardableResult
-    func reportObjectPlacedAsStep(succeeded: Bool) -> Bool {
-        guard usefulObjectMoved,
-              !chargingStationReached else {
-            return false
-        }
-
-        guard succeeded else {
-            goalDescription =
-                "Adjust the object so it provides a usable step."
-            return false
-        }
-
-        objectPlacedAsStep = true
-        goalStage = .climbToRedPlatform
-        goalDescription =
-            "Climb from the object onto the red platform."
-
-        print("[Goal] Object is positioned as a step.")
-        return true
-    }
-
-    /// Call after the Coordinator verifies that the character is
-    /// physically standing on the red platform.
-    @discardableResult
-    func reportRedPlatformReached() -> Bool {
-        guard objectPlacedAsStep,
-              !chargingStationReached else {
-            return false
-        }
-
-        redPlatformReached = true
-        goalStage = .reachChargingStation
-        goalDescription =
-            "Move across the red platform to the recharging station."
-
-        print("[Goal] Red platform reached.")
-        return true
-    }
-
-    /// Call after the Coordinator verifies contact with the actual station.
-    @discardableResult
-    func reportChargingStationReached() -> Bool {
-        guard redPlatformReached,
-              !chargingStationReached else {
-            return false
-        }
-
-        chargingStationReached = true
-        goalStage = .rechargeComplete
-        goalDescription = "Charging station reached. Recharge the battery."
-
-        print("[Goal] Charging station reached.")
-        return true
-    }
-
-    // MARK: - CA Command
-
+    /// Convert the live CA grid into a movement command.
+    ///
+    /// Left-side activity biases left turns.
+    /// Right-side activity biases right turns.
+    /// Concentrated center activity can request running.
+    /// Environmental hazard rules take precedence over these commands.
     private func readCACommand() -> FrankensteinCACommand {
         guard let ca else {
             caCommandName = "Walk — CA not attached"
@@ -179,6 +72,9 @@ final class FrankensteinLocomotion {
         caCenterActivity = center
 
         let difference = left - right
+
+        // Require a meaningful imbalance so tiny differences
+        // do not cause constant direction changes.
         let turnThreshold = max(4, ca.size / 2)
 
         let command: FrankensteinCACommand
@@ -222,10 +118,9 @@ final class FrankensteinLocomotion {
 
     private(set) var gaitPhase: Float = 0
     private(set) var gaitSwing: Float = 0
-    private(set) var isWalking = false
+    private(set) var isWalking: Bool = false
 
     // MARK: - Movement Configuration
-    // Existing movement parameters preserved.
 
     private let gravity: Float = 9.8
     private let standingHeight: Float = 1.8
@@ -287,25 +182,9 @@ final class FrankensteinLocomotion {
     private var jumpOutcomeReported = false
 
     private var currentAction: FrankensteinAction = .walk
-
-    // MARK: - Perception from Coordinator
-
-    private var perceivedAllowedActions: [FrankensteinAction] = [.walk]
-    private var perceivedQValues: [FrankensteinAction: Float] = [:]
-
-    func receivePerception(
-        allowedActions: [FrankensteinAction],
-        qValues: [FrankensteinAction: Float]
-    ) {
-        perceivedAllowedActions = allowedActions
-        perceivedQValues = qValues
-    }
-
     private var actionElapsed: Float = 0
     private var recoveryElapsed: Float = 0
     private var lastActualDisplacement: Float = 0
-    private var actionDisplacement: Float = 0
-    private var lastLoggedDecision = ""
 
     // MARK: - Episode State
 
@@ -316,6 +195,8 @@ final class FrankensteinLocomotion {
     private(set) var collisions = 0
     private(set) var falls = 0
     private(set) var goalsReached = 0
+
+    // MARK: - Episode Completion
 
     func completeEpisode(_ result: FrankensteinEpisodeEnd) {
         guard pendingEpisodeEnd == nil else { return }
@@ -332,142 +213,61 @@ final class FrankensteinLocomotion {
         }
     }
 
-    // MARK: - Energy
-
-    private(set) var energy: Float = 1.0
-
-    /// Refills energy only after station contact has been verified.
-    @discardableResult
-    func reportRecharge() -> Bool {
-        guard chargingStationReached,
-              energy < 0.6 else {
-            return false
-        }
-
-        let reward: Float = 5.0 * (1.0 - energy) + 1.0
-        energy = 1.0
-
-        print("[Energy] Recharged: reward \(reward)")
-
-        _ = completePendingAction(
-            reward: reward,
-            terrain: currentTerrainForFeedback,
-            terminal: false,
-            reason: "recharge"
-        )
-
-        completeEpisode(.reachedGoal)
-        return true
-    }
-
-    // MARK: - Object Action Feedback
-
-    @discardableResult
-    func reportObjectActionOutcome(
-        _ action: FrankensteinAction,
-        reward: Float
-    ) -> Bool {
-        guard policy.pendingAction == action else {
-            return false
-        }
-
-        return completePendingAction(
-            reward: reward,
-            terrain: currentTerrainForFeedback,
-            terminal: false,
-            reason: "\(action)"
-        )
-    }
-
-    // MARK: - Pickup Feedback
-
-    @discardableResult
-    func reportPickupOutcome(succeeded: Bool) -> Bool {
-        guard policy.pendingAction == .liftObject else {
-            return false
-        }
-
-        let reward: Float = succeeded ? 2.0 : -0.5
-
-        print(
-            "[Learning] Pickup " +
-            (succeeded ? "succeeded: reward +2.0" : "failed: reward -0.5")
-        )
-
-        return completePendingAction(
-            reward: reward,
-            terrain: currentTerrainForFeedback,
-            terminal: false,
-            reason: "pickup"
-        )
-    }
-
     // MARK: - Collision Feedback
 
     func reportCollision() {
         collisions += 1
 
-        _ = completePendingAction(
+        // Let the learner receive negative feedback for a collision.
+        policy.learn(
             reward: -1.0,
             terrain: currentTerrainForFeedback,
+            body: body,
             terminal: false,
-            reason: "collision"
+            objectObservation: currentObjectObservation
         )
     }
+    // MARK: - Coordinator outcome feedback
 
-    // MARK: - Futility Feedback
-
-    /// Call this when the Coordinator detects that the character has
-    /// returned to a previously visited position without useful progress.
-    ///
-    /// The policy checks that the reported action is still pending.
-    /// A successful report performs one negative Q-update.
-    @discardableResult
-    func reportFutility(
-        for executedAction: FrankensteinAction,
-        repetitions: Int = 1
-    ) -> Bool {
-        return policy.reportFutility(
-            for: executedAction,
-            repetitions: repetitions,
+    /// Outcome hooks called by Coordinator after the physical interaction is
+    /// attempted. These update the same policy; they do not create a second learner.
+    func reportPickupOutcome(succeeded: Bool) {
+        guard policy.isAwaitingOutcome else { return }
+        _ = policy.learn(
+            reward: succeeded ? 0.8 : -0.8,
             terrain: currentTerrainForFeedback,
             body: body,
-            nextActions: perceivedAllowedActions
+            terminal: false,
+            objectObservation: currentObjectObservation
         )
     }
 
-    // MARK: - Single Learning Path
-
-    @discardableResult
-    private func completePendingAction(
-        reward: Float,
-        terrain: FrankensteinTerrainSample,
-        terminal: Bool,
-        reason: String
-    ) -> Bool {
-        guard policy.isAwaitingOutcome else {
-            return false
-        }
-
-        let learned = policy.learn(
-            reward: reward,
-            terrain: terrain,
+    func reportObjectActionOutcome(_ action: FrankensteinAction, reward: Float) {
+        guard policy.isAwaitingOutcome else { return }
+        let boundedReward = min(2.0, max(-2.0, reward))
+        _ = policy.learn(
+            reward: boundedReward,
+            terrain: currentTerrainForFeedback,
             body: body,
-            nextActions: perceivedAllowedActions,
-            terminal: terminal
+            terminal: false,
+            objectObservation: currentObjectObservation
         )
-
-        if learned {
-            actionElapsed = 0
-            actionDisplacement = 0
-            actionsCompleted += 1
-            print("[Learning] Completed \(reason), reward=\(reward)")
-        }
-
-        return learned
     }
 
-    private var currentTerrainForFeedback = FrankensteinTerrainSample()
+    /// Called only after Coordinator detects contact with the station top.
+    /// This is contact feedback, not proof that a battery charge increased.
+    func reportRecharge() {
+        guard policy.isAwaitingOutcome else { return }
+        _ = policy.learn(
+            reward: 2.0,
+            terrain: currentTerrainForFeedback,
+            body: body,
+            terminal: false,
+            objectObservation: currentObjectObservation
+        )
+    }
+
+    // MARK: - Movement Diagnostics
 
     private func logDecision(
         caGeneration: Int,
@@ -477,17 +277,35 @@ final class FrankensteinLocomotion {
         finalAction: String,
         safetyOverride: String
     ) {
-        let signature =
-            "\(caRequestedAction)|\(finalAction)|\(safetyOverride)"
-
-        guard signature != lastLoggedDecision else { return }
-        lastLoggedDecision = signature
-
         print("[CA] Generation: \(caGeneration), Live cells: \(liveCells)")
         print("[CA] Requested action: \(caRequestedAction)")
         print("[Q-Learning] Suggested action: \(qLearningAction)")
         print("[Safety] Override: \(safetyOverride)")
         print("[Movement] Applied action: \(finalAction)")
+    }
+    private var currentTerrainForFeedback = FrankensteinTerrainSample()
+    private var currentObjectObservation: FrankensteinObjectObservation?
+    private(set) var hasCarriedObject = false
+
+    func setCarryingObject(_ carrying: Bool) {
+        hasCarriedObject = carrying
+    }
+
+    // MARK: - Perception Input
+
+    /// Stores the latest terrain and object observations received
+    /// from Coordinator for action selection and learning feedback.
+
+    // MARK: - Perceived Action Values
+
+    func receivePerception(
+        allowedActions: [FrankensteinAction],
+        qValues: [FrankensteinAction: Float]
+    ) {
+        policy.updatePerceivedActionValues(
+            allowedActions: allowedActions,
+            qValues: qValues
+        )
     }
 
     // MARK: - Adaptive Jump Feedback
@@ -497,9 +315,7 @@ final class FrankensteinLocomotion {
         forwardError: Float = 0,
         heightError: Float = 0
     ) {
-        guard jumpInProgress, !jumpOutcomeReported else {
-            return
-        }
+        guard jumpInProgress, !jumpOutcomeReported else { return }
 
         jumpOutcomeReported = true
         jumpAttempts += 1
@@ -553,33 +369,37 @@ final class FrankensteinLocomotion {
             }
         }
 
-        // The policy receives the jump result through the same Q-learning
-        // path used by other actions.
-        _ = policy.reportJumpOutcome(
-            succeeded: success,
+        policy.learn(
+            reward: success ? 3.0 : -2.0,
             terrain: currentTerrainForFeedback,
             body: body,
-            nextActions: perceivedAllowedActions,
-            terminal: false
+            terminal: false,
+            objectObservation: currentObjectObservation
         )
-
-        actionElapsed = 0
-        actionDisplacement = 0
     }
 
     // MARK: - Main Update
+
 
     @discardableResult
     func step(
         deltaTime: Float,
         terrain: FrankensteinTerrainSample,
-        actualDisplacement: Float? = nil
+        actualDisplacement: Float? = nil,
+        objectObservation: FrankensteinObjectObservation? = nil
     ) -> FrankensteinLocomotionOutput {
 
         let dt = min(max(deltaTime, 0), maximumDeltaTime)
         guard dt > 0 else { return output }
 
-        // Stop movement when the episode has ended.
+        currentTerrainForFeedback = terrain
+        currentObjectObservation = objectObservation
+        // Interaction intents are pulses, not persistent commands.
+        output.liftRequested = false
+        output.placeRequested = false
+        output.throwRequested = false
+
+        // Stop if the episode has ended.
         guard pendingEpisodeEnd == nil else {
             output.speed = 0
             output.jump = 0
@@ -599,30 +419,36 @@ final class FrankensteinLocomotion {
             return output
         }
 
-        // Accumulate measured movement, not just commanded movement.
+        // One decision per frame at most; do not select twice before execution.
+        // Record actual displacement.
         if let actualDisplacement,
            actualDisplacement.isFinite {
             lastActualDisplacement = actualDisplacement
-            actionDisplacement += actualDisplacement
 
             if jumpInProgress {
                 actualJumpDistance += max(0, actualDisplacement)
             }
         }
 
-        currentTerrainForFeedback = terrain
         actionElapsed += dt
-        energy = max(0, energy - 0.004 * dt)
 
         if terrain.terrain != .raisedStep {
             stepTransitionLatched = false
         }
 
+        // Select movement unless a jump or step transition is active.
         if !jumpInProgress &&
            !stepUpInProgress &&
            !stepDownInProgress {
-            selectMovement(for: terrain)
+            selectMovement(for: terrain, objectObservation: objectObservation)
         }
+
+        // Update locomotion and animation.
+        output.action = currentAction
+        output.liftRequested = currentAction == .liftObject
+        output.placeRequested = currentAction == .placeObject
+        output.throwRequested = currentAction == .throwObject
+        output.moveDirection = 1
 
         updateMovement(deltaTime: dt, terrain: terrain)
         updateJump(deltaTime: dt, terrain: terrain)
@@ -630,30 +456,28 @@ final class FrankensteinLocomotion {
         updateAnimation(deltaTime: dt)
         stabilize(terrain: terrain)
 
+        // Learn only after the selected action has had time to execute.
+        // This prevents one Q update per render frame for the same action.
         output.reward = calculateReward(terrain: terrain)
-
-        if actionElapsed >= 0.35,
-           policy.isAwaitingOutcome,
-           !jumpInProgress,
-           !stepUpInProgress,
-           !stepDownInProgress,
-           output.reward.isFinite {
-            let completedReward = output.reward +
-                min(0.5, max(-0.5, actionDisplacement * 1.5))
-
-            _ = completePendingAction(
+        if actionElapsed >= 0.35, policy.isAwaitingOutcome, output.reward.isFinite {
+            let completedReward = output.reward + min(0.5, max(-0.5, lastActualDisplacement * 2.0))
+            _ = policy.learn(
                 reward: completedReward,
                 terrain: terrain,
+                body: body,
                 terminal: false,
-                reason: "\(currentAction)"
+                objectObservation: objectObservation
             )
+            actionElapsed = 0
+            print("[Learning] Completed action=\(currentAction), reward=\(completedReward), qUpdates=\(policy.updateCount)")
         }
 
+        // Preserve important failure statuses.
         if !output.status.hasPrefix("Gap detected —") &&
            !output.status.hasPrefix("Jump failed —") {
             output.status = statusDescription(terrain: terrain)
         }
-
+        
         if body.fallen || currentAction == .recover {
             currentAction = .recover
 
@@ -664,49 +488,56 @@ final class FrankensteinLocomotion {
             recoveryElapsed += dt
 
             if recoveryElapsed >= recoveryDuration {
-                performRecovery()
+                performRecovery()  // Called here
             }
 
             return output
         }
+        
+
+        let caActionName = caCommandName
+        let qLearningActionName = policy.pendingAction.map { String(describing: $0) } ?? "Q-values advisory only"
+        let safetyOverrideName = lastSafetyOverride
+        let finalActionName = String(describing: output.action)
 
         logDecision(
             caGeneration: ca?.generation ?? 0,
             liveCells: ca?.liveCellCount ?? 0,
-            caRequestedAction: caCommandName,
-            qLearningAction: policy.pendingAction.map {
-                String(describing: $0)
-            } ?? "Q-values advisory only",
-            finalAction: String(describing: output.action),
-            safetyOverride: lastSafetyOverride
+            caRequestedAction: caActionName,
+            qLearningAction: qLearningActionName,
+            finalAction: finalActionName,
+            safetyOverride: safetyOverrideName
         )
 
         return output
     }
-
-    // MARK: - Recovery
-
+   
     private func performRecovery() {
+        // Clear the fallen condition using the actual body property.
         body.fallen = false
 
+        // Stop vertical movement using locomotion's own physics state.
         verticalVelocity = 0
         grounded = true
 
+        // End any unfinished jump.
         jumpInProgress = false
         jumpOutcomeReported = true
         jumpElapsed = 0
         actualJumpDistance = 0
 
+        // Cancel unfinished step transitions.
         stepUpInProgress = false
         stepDownInProgress = false
         stepTransitionProgress = 1
         stepTransitionLatched = false
 
+        // Reset recovery timing and prepare for normal movement.
         recoveryElapsed = 0
         actionElapsed = 0
-        actionDisplacement = 0
         currentAction = .walk
 
+        // Clear residual movement output.
         output.action = .walk
         output.speed = 0
         output.jump = 0
@@ -741,7 +572,8 @@ final class FrankensteinLocomotion {
     func step(
         deltaTime: Float,
         terrain: FrankensteinTerrainSample,
-        feedback: FrankensteinMotionFeedback
+        feedback: FrankensteinMotionFeedback,
+        objectObservation: FrankensteinObjectObservation? = nil
     ) -> FrankensteinLocomotionOutput {
 
         var measuredDisplacement: Float?
@@ -751,7 +583,7 @@ final class FrankensteinLocomotion {
             let dz = feedback.position.z - previousPosition.z
 
             let heading = output.heading
-            let forwardX = -sin(heading)
+            let forwardX = sin(heading)
             let forwardZ = -cos(heading)
 
             let displacement = dx * forwardX + dz * forwardZ
@@ -767,13 +599,14 @@ final class FrankensteinLocomotion {
         let result = step(
             deltaTime: deltaTime,
             terrain: terrain,
-            actualDisplacement: measuredDisplacement
+            actualDisplacement: measuredDisplacement,
+            objectObservation: objectObservation
         )
 
         if jumpInProgress && feedback.grounded {
             if terrain.isLandingAreaClear &&
-               !body.fallen &&
-               actualJumpDistance > 0 {
+                !body.fallen &&
+                actualJumpDistance > 0 {
                 _ = confirmJumpLanding(
                     actualForwardDistance: actualJumpDistance,
                     actualHeight: feedback.feetHeight,
@@ -786,165 +619,254 @@ final class FrankensteinLocomotion {
     }
 
     // MARK: - Action Selection
+    //
+    // Environmental safety takes priority. The CA controls ordinary
+    // movement decisions on safe terrain.
 
     private func selectMovement(
-        for terrain: FrankensteinTerrainSample
+        for terrain: FrankensteinTerrainSample,
+        objectObservation: FrankensteinObjectObservation?
     ) {
         lastSafetyOverride = "none"
 
-        guard !body.fallen else {
+        if body.fallen {
             currentAction = .recover
             lastSafetyOverride = "recovery required"
-            caCommandName = "Recover"
             return
         }
 
-        // Keep the action until its outcome has been learned.
-        if policy.isAwaitingOutcome,
-           let pending = policy.pendingAction {
-            currentAction = pending
-            return
-        }
-
-        let allowedActions = perceivedAllowedActions.isEmpty
-            ? [FrankensteinAction.walk]
-            : perceivedAllowedActions
-
-        let proposedAction: FrankensteinAction
-
-        if let ca {
-            proposedAction = ca.decideAction(
+        // Candidate generation enforces terrain constraints before the CA decides.
+        // The CA still chooses among safe options for gaps, hurdles, steps, ceilings,
+        // and ordinary terrain; locomotion does not hard-code the action for each hazard.
+        // The CA is the executive controller. Q-values inform its decision,
+        // but the Q-policy never independently replaces the CA-selected action.
+        let candidates: [FrankensteinAction] = body.fallen
+            ? [.recover]
+            : policy.allowedActions(
                 terrain: terrain,
                 body: body,
-                allowedActions: allowedActions,
-                qValues: perceivedQValues,
-                exploration: policy.exploration
+                objectObservation: objectObservation,
+                hasCarriedObject: hasCarriedObject
             )
-        } else {
-            proposedAction = fallbackCAAction(for: terrain)
-            lastSafetyOverride = "CA not attached — fallback action"
-        }
-
-        let chosen = allowedActions.contains(proposedAction)
-            ? proposedAction
-            : fallbackCAAction(from: allowedActions)
-
-        currentAction = chosen
-        caCommandName = String(describing: chosen)
-
-        _ = policy.beginCAChosenAction(
-            chosen,
+        let qValues = policy.learnedActionValues(
             terrain: terrain,
-            body: body
+            body: body,
+            objectObservation: objectObservation
         )
+        let proposedAction = ca?.decideAction(
+            terrain: terrain,
+            body: body,
+            allowedActions: candidates,
+            qValues: qValues
+        ) ?? fallbackCAAction(from: candidates)
 
-        actionElapsed = 0
-        actionDisplacement = 0
+        caCommandName = String(describing: proposedAction)
+        let chosen = candidates.contains(proposedAction) ? proposedAction : fallbackCAAction(from: candidates)
+        currentAction = chosen
 
-        print(
-            "[CA] Selected action: \(chosen) | " +
-            "Q=\(perceivedQValues[chosen] ?? 0) | " +
-            "Goal=\(goalStage.rawValue)"
-        )
-    }
-
-    private func fallbackCAAction(
-        for terrain: FrankensteinTerrainSample
-    ) -> FrankensteinAction {
-        switch terrain.terrain {
-        case .gap, .hurdle:
-            return terrain.isLandingAreaClear ? .jump : .walk
-        case .lowCeiling:
-            return .crouch
-        case .raisedStep:
-            return terrain.obstacleHeight > 0.45 ? .jump : .stepUp
-        default:
-            return .walk
+        if !policy.isAwaitingOutcome {
+            _ = policy.beginCAChosenAction(
+                chosen,
+                terrain: terrain,
+                body: body,
+                objectObservation: objectObservation
+            )
+        } else if policy.pendingAction != chosen {
+            // Never attribute the pending reward to a different action.
+            currentAction = policy.pendingAction ?? chosen
+            lastSafetyOverride = "held action until its outcome is recorded"
         }
+
+        print("[CA] Executive decision: \(currentAction)")
+        print("[Q-Learning] Advisory values: \(qValues)")
+        print("[Q-Learning] Updates: \(policy.updateCount); learned states: \(policy.learnedStateCount)")
     }
 
-    private func fallbackCAAction(
-        from candidates: [FrankensteinAction]
-    ) -> FrankensteinAction {
+    private func fallbackCAAction(from candidates: [FrankensteinAction]) -> FrankensteinAction {
         if candidates.contains(.walk) { return .walk }
         if candidates.contains(.turnLeft) { return .turnLeft }
         if candidates.contains(.turnRight) { return .turnRight }
         return candidates.first ?? .walk
     }
-
     // MARK: - Horizontal Movement
 
+ 
+ 
     private func updateMovement(
         deltaTime dt: Float,
         terrain: FrankensteinTerrainSample
     ) {
         let requestedSpeed: Float
 
+        // MARK: - Action Speeds
+
         switch currentAction {
         case .walk:
             requestedSpeed = 1.0
+
         case .run:
             requestedSpeed = 2.2
+
         case .turnLeft, .turnRight:
-            requestedSpeed = 0.15
+            // The movement executor should handle rotation separately.
+            requestedSpeed = 0
+
         case .jump:
             requestedSpeed = jumpForwardSpeed
+
         case .crouch:
             requestedSpeed = 0.45
+
         case .crawl:
             requestedSpeed = 0.35
+
         case .roll:
             requestedSpeed = 1.1
+
         case .stepUp:
             requestedSpeed = stepUpSpeed
+
         case .stepDown:
             requestedSpeed = stepDownSpeed
-        case .recover:
-            requestedSpeed = 0
+
         case .backward:
-            requestedSpeed = 0.6
+            requestedSpeed = -0.5
+
         case .stepForward:
             requestedSpeed = 0.5
-        case .liftObject, .placeObject, .throwObject:
+
+        case .recover,
+             .liftObject,
+             .placeObject,
+             .throwObject:
             requestedSpeed = 0
         }
 
-        output.speed = requestedSpeed
-        output.action = currentAction
-        output.moveDirection = currentAction == .backward ? -1 : 1
+        var speed = requestedSpeed
 
-        output.liftRequested = currentAction == .liftObject
-        output.placeRequested = currentAction == .placeObject
-        output.throwRequested = currentAction == .throwObject
+        // MARK: - Hurdle Safety
+
+        let validDistance =
+            terrain.distance.isFinite &&
+            terrain.distance >= 0
+
+        if !jumpInProgress,
+           terrain.terrain == .hurdle,
+           validDistance,
+           terrain.distance < 0.8,
+           currentAction != .backward,
+           currentAction != .turnLeft,
+           currentAction != .turnRight {
+
+            // Slow down near a hurdle unless the selected action
+            // explicitly moves away or turns.
+            speed = min(speed, 0.25)
+        }
+
+        // MARK: - Chasm Safety
+
+        if terrain.terrain == .gap {
+            let hasValidWidth =
+                terrain.gapWidth.isFinite &&
+                terrain.gapWidth > 0
+
+            let safeLanding =
+                terrain.isLandingAreaClear &&
+                hasValidWidth
+
+            let isMovingTowardGap =
+                currentAction == .walk ||
+                currentAction == .run ||
+                currentAction == .stepForward ||
+                currentAction == .crawl ||
+                currentAction == .roll ||
+                currentAction == .stepUp
+
+            if !jumpInProgress &&
+               isMovingTowardGap &&
+               !safeLanding {
+
+                // Stop forward movement when a safe landing
+                // cannot be established.
+                speed = 0
+            }
+
+            if currentAction == .jump && !jumpInProgress {
+                // Do not launch across an unverified gap.
+                // beginJump must also validate jump feasibility.
+                if !safeLanding {
+                    speed = 0
+                }
+            }
+        }
+
+        // MARK: - Jump Transition
 
         if currentAction == .jump && !jumpInProgress {
             beginJump(terrain: terrain)
         }
 
-        if currentAction == .stepUp &&
-           !stepUpInProgress &&
-           !stepDownInProgress &&
+        // MARK: - Step-Up Transition
+
+        if currentAction == .stepUp,
+           !stepUpInProgress,
+           !stepDownInProgress,
            !stepTransitionLatched {
+
             let rise = terrain.obstacleHeight
 
-            if rise > 0 && rise <= maximumStepUpHeight {
+            let validRise =
+                rise.isFinite &&
+                rise > 0 &&
+                rise <= maximumStepUpHeight
+
+            let obstacleIsRelevant =
+                terrain.distance.isFinite &&
+                terrain.distance >= 0 &&
+                terrain.distance < 1.0
+
+            if validRise && obstacleIsRelevant {
                 beginStepTransition(to: body.height + rise)
                 stepTransitionLatched = true
+            } else {
+                speed = 0
             }
         }
 
-        if currentAction == .stepDown &&
-           !stepUpInProgress &&
-           !stepDownInProgress &&
+        // MARK: - Step-Down Transition
+
+        if currentAction == .stepDown,
+           !stepDownInProgress,
+           !stepUpInProgress,
            !stepTransitionLatched {
-            let drop = terrain.groundHeight - terrain.nextGroundHeight
 
-            if terrain.isStepDownSafe(), drop > 0.02 {
-                beginStepTransition(to: body.height - drop)
+            let drop = terrain.obstacleHeight
+
+            let validDrop =
+                drop.isFinite &&
+                drop > 0 &&
+                terrain.distance.isFinite &&
+                terrain.distance >= 0 &&
+                terrain.distance < 1.0
+
+            if validDrop {
+                beginStepTransition(
+                    to: max(0, body.height - drop)
+                )
                 stepTransitionLatched = true
+            } else {
+                speed = 0
             }
         }
+
+        // MARK: - Output
+
+        // Preserve negative speed for backward movement.
+        output.speed = speed
+        output.action = currentAction
     }
+
+
 
     // MARK: - Step Transitions
 
@@ -972,9 +894,7 @@ final class FrankensteinLocomotion {
     }
 
     private func updateStepTransition(deltaTime dt: Float) {
-        guard stepUpInProgress || stepDownInProgress else {
-            return
-        }
+        guard stepUpInProgress || stepDownInProgress else { return }
 
         stepTransitionProgress = min(
             1,
@@ -1015,12 +935,8 @@ final class FrankensteinLocomotion {
     // MARK: - Jump Planning
 
     private func beginJump(terrain: FrankensteinTerrainSample) {
-        guard grounded,
-              !jumpInProgress,
-              !body.fallen else {
-            return
-        }
-
+        guard grounded, !jumpInProgress, !body.fallen else { return }
+        
         if terrain.terrain == .hurdle {
             guard terrain.isLandingAreaClear else {
                 currentAction = .walk
@@ -1031,7 +947,6 @@ final class FrankensteinLocomotion {
                 return
             }
         }
-
         if terrain.terrain == .gap {
             guard terrain.gapWidth > 0,
                   terrain.isLandingAreaClear,
@@ -1069,20 +984,10 @@ final class FrankensteinLocomotion {
             max(minimumJumpImpulse, max(jumpImpulse, requiredImpulse))
         )
 
-        if terrain.terrain == .hurdle ||
-           terrain.terrain == .raisedStep {
-            jumpTargetDistance = max(
-                0.7,
-                terrain.distance +
-                    max(0.3, min(terrain.obstacleDepth, 1.2) * 0.5) +
-                    0.2
-            )
-        } else {
-            jumpTargetDistance = max(
-                0.7,
-                terrain.distance + terrain.gapWidth + 0.8
-            )
-        }
+        jumpTargetDistance = max(
+            0.7,
+            terrain.distance + terrain.gapWidth + 0.8
+        )
 
         verticalVelocity = jumpLaunchVelocity
         grounded = false
@@ -1161,9 +1066,7 @@ final class FrankensteinLocomotion {
         forwardError: Float = 0,
         heightError: Float = 0
     ) -> Bool {
-        guard jumpInProgress, !jumpOutcomeReported else {
-            return false
-        }
+        guard jumpInProgress, !jumpOutcomeReported else { return false }
 
         reportJumpOutcome(
             success: false,
@@ -1203,10 +1106,12 @@ final class FrankensteinLocomotion {
             output.speed = min(output.speed, 2.2)
         }
 
-        output.crouch = (
-            currentAction == .crouch ||
-            currentAction == .crawl
-        ) ? 1.0 : 0.0
+        if terrain.terrain == .lowCeiling {
+            output.crouch = 1.0
+            output.speed = min(output.speed, 0.45)
+        } else {
+            output.crouch = currentAction == .crouch ? 1.0 : 0.0
+        }
 
         if body.fallen {
             output.speed = 0
@@ -1256,11 +1161,12 @@ final class FrankensteinLocomotion {
 
         gaitSwing = isWalking ? sin(gaitPhase) : 0
 
-        // Forward is (-sin h, -cos h), so increasing heading turns left.
+        // A CA-selected turn changes the heading that the Coordinator
+        // reads when it computes the next frame's forward vector.
         if currentAction == .turnLeft {
-            output.heading += 0.90 * dt
-        } else if currentAction == .turnRight {
             output.heading -= 0.90 * dt
+        } else if currentAction == .turnRight {
+            output.heading += 0.90 * dt
         }
 
         output.crouch = (
@@ -1281,44 +1187,17 @@ final class FrankensteinLocomotion {
         if body.fallen { return -1.0 }
         if jumpInProgress { return 0.05 }
         if stepUpInProgress || stepDownInProgress { return 0.1 }
-
-        var reward: Float = -0.05
-
-        let isTurning =
-            currentAction == .turnLeft ||
-            currentAction == .turnRight
-
-        let pathOpen =
-            terrain.terrain == .flat ||
-            terrain.terrain == .slope ||
-            terrain.terrain == .uneven
-
-        if isTurning && pathOpen {
-            reward -= 0.15
-        }
-
-        if currentAction == .backward && pathOpen {
-            reward -= 0.10
-        }
-
-        return reward
+        if terrain.terrain == .flat { return 0.1 }
+        return 0
     }
 
     private func statusDescription(
         terrain: FrankensteinTerrainSample
     ) -> String {
-        if body.fallen {
-            return "Fallen — recovery required"
-        }
-        if jumpInProgress {
-            return "Jumping — adaptive attempt \(jumpAttempts + 1)"
-        }
-        if stepUpInProgress {
-            return "Stepping up"
-        }
-        if stepDownInProgress {
-            return "Stepping down"
-        }
+        if body.fallen { return "Fallen — recovery required" }
+        if jumpInProgress { return "Jumping — adaptive attempt \(jumpAttempts + 1)" }
+        if stepUpInProgress { return "Stepping up" }
+        if stepDownInProgress { return "Stepping down" }
 
         switch terrain.terrain {
         case .gap:
@@ -1348,12 +1227,14 @@ final class FrankensteinLocomotion {
         body: FrankensteinBodyState,
         terminal: Bool = false
     ) {
-        _ = policy.reportJumpOutcome(
-            succeeded: succeeded,
+        let reward: Float = succeeded ? 3.0 : -2.0
+
+        policy.learn(
+            reward: reward,
             terrain: terrain,
             body: body,
-            nextActions: perceivedAllowedActions,
-            terminal: terminal
+            terminal: terminal,
+            objectObservation: currentObjectObservation
         )
     }
 
@@ -1391,7 +1272,6 @@ final class FrankensteinLocomotion {
 
         currentAction = .walk
         actionElapsed = 0
-        actionDisplacement = 0
         lastActualDisplacement = 0
 
         gaitPhase = 0
@@ -1411,21 +1291,6 @@ final class FrankensteinLocomotion {
         caCenterActivity = 0
         lastCACommand = .walk
 
-        // Reset objective progress for a new episode.
-        goalStage = .exploreRoom
-        goalDescription =
-            "Explore the room and find an object that can help reach the red platform."
-
-        usefulObjectName = nil
-        usefulObjectMoved = false
-        objectPlacedAsStep = false
-        redPlatformReached = false
-        chargingStationReached = false
-
-        recoveryElapsed = 0
-        lastSafetyOverride = ""
-        lastLoggedDecision = ""
-
-        // Deliberately preserve learned policy Q-values.
+        // Keep learned policy data across episode resets.
     }
 }

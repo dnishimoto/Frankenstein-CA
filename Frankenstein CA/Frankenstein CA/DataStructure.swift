@@ -9,6 +9,38 @@ import Foundation
 import SwiftUI
 import SceneKit
 
+struct FrankensteinPredictedOutcome {
+    let actionName: String
+    let expectedForwardDisplacement: Float
+    let collisionRisk: Float
+    let fallRisk: Float
+    let expectedGoalProgress: Float
+    let confidence: Float
+}
+struct FrankensteinQUpdateRecord {
+    let action: FrankensteinAction
+    let newValue: Float
+}
+struct FrankensteinObjectObservation: Hashable {
+    let name: String
+    let width: Float
+    let height: Float
+    let depth: Float
+    let distance: Float
+    let pickupable: Bool
+
+    var categoryIndex: Int {
+        let value = name.lowercased()
+        if value.contains("table") { return 1 }
+        if value.contains("door") { return 2 }
+        if value.contains("stair") || value.contains("step") { return 3 }
+        if value.contains("platform") { return 4 }
+        if value.contains("ceiling") { return 5 }
+        if value.contains("crate") || value.contains("box") { return 6 }
+        if value.contains("dog") { return 7 }
+        return 8 // Other measurable object
+    }
+}
 
 enum AlleyaRechargeGoal: String {
     case mapRoom

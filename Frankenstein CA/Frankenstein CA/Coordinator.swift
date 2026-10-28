@@ -36,8 +36,17 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     private let locomotion: FrankensteinLocomotion
     private let qFloorGrid = FrankensteinQFloorGrid()
+    private let predictivePerception = FrankensteinPredictivePerception()
+    private var pendingPrediction: FrankensteinPredictedOutcome?
     private var lastRecordedQUpdate = 0
     private var rechargeStationNode: SCNNode?
+
+    // SceneKit physics and character fall tracking. Frankenstein remains
+    // kinematic/manual-movement controlled; loose objects are physics-driven.
+    private var characterVerticalVelocity: Float = 0
+    private var hasReportedFall = false
+    private var hasReportedRecharge = false
+    private let worldGravity: Float = 9.8
 
     // MARK: - Lifecycle
 
@@ -148,6 +157,11 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         self.scene = scene
         self.characterNode = characterNode
 
+        configurePhysicsWorld(in: scene)
+        characterVerticalVelocity = 0
+        hasReportedFall = false
+        hasReportedRecharge = false
+
         previousCharacterPosition =
             characterNode.presentation.worldPosition
 
@@ -197,8 +211,9 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         guard let node, let scene else { return }
 
         placeObjectOnSupportSurface(node, in: scene)
+        configurePhysicsBody(for: node, forceDynamic: true)
 
-        publishDebug("Table attached and support placement checked.")
+        publishDebug("Table attached; gravity and collision physics enabled.")
     }
       private func worldBottomY(of node: SCNNode) -> Float? {
         var lowest = Float.infinity
@@ -490,6 +505,19 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         previousCharacterPosition = currentPosition
         hasPreviousCharacterPosition = true
 
+        // Compare the previous action's prediction with measured movement.
+        if let prediction = pendingPrediction, let actualDisplacement {
+            let error = predictivePerception.observe(
+                prediction: prediction,
+                actualForwardDisplacement: actualDisplacement,
+                terrain: latestTerrainSample
+            )
+            if abs(error) > 0.18 {
+                publishDebug("Prediction error: expected \(String(format: "%.2f", prediction.expectedForwardDisplacement)) m, measured \(String(format: "%.2f", actualDisplacement)) m; model adjusted.")
+            }
+            pendingPrediction = nil
+        }
+
         // MARK: 4b. Coordinator -> Q-policy and CA
         // The policy only reports stored values for what was seen. The
         // coordinator hands both the perception and those values to the CA
@@ -510,10 +538,31 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         // MARK: 5. Select a locomotion action
 
+        let objectObservation: FrankensteinObjectObservation? = latestDetection.map { item in
+            FrankensteinObjectObservation(
+                name: item.name,
+                width: item.dimensions.x,
+                height: item.dimensions.y,
+                depth: item.dimensions.z,
+                distance: item.distance,
+                pickupable: item.pickupable
+            )
+        }
+
         let output = locomotion.step(
             deltaTime: dt,
             terrain: latestTerrainSample,
-            actualDisplacement: actualDisplacement
+            actualDisplacement: actualDisplacement,
+            objectObservation: objectObservation
+        )
+
+        // Predict the selected action's likely consequence before execution.
+        // The next renderer sample compares this estimate with measured movement.
+        pendingPrediction = predictivePerception.predict(
+            actionName: String(describing: output.action),
+            terrain: latestTerrainSample,
+            body: locomotion.body,
+            objectObservation: objectObservation
         )
 
         // MARK: 6. Apply movement to the character
@@ -1207,14 +1256,25 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             locomotion.reportObjectActionOutcome(.throwObject, reward: ok ? 0.3 : -0.5)
         }
 
-        // Recharging station: pays out while he stands on it with a low battery.
+        // Recharge feedback requires measured contact with the station's top,
+        // not merely being nearby. Report once per contact episode.
         if let station = rechargeStationNode {
-            let s = station.presentation.worldPosition
             let c = character.presentation.worldPosition
-            let dx = Float(c.x - s.x)
-            let dz = Float(c.z - s.z)
-            if sqrt(dx * dx + dz * dz) < 0.9, abs(Float(c.y - s.y)) < 0.6 {
-                locomotion.reportRecharge()
+            let size = worldDimensions(of: station)
+            let s = station.presentation.worldPosition
+            let topY = worldTopY(of: station)
+            let withinTopFootprint =
+                abs(Float(c.x - s.x)) <= max(0.15, size.x * 0.5) &&
+                abs(Float(c.z - s.z)) <= max(0.15, size.z * 0.5)
+            let feetTouchTop = abs(Float(c.y) - topY) <= 0.18
+            if withinTopFootprint && feetTouchTop {
+                if !hasReportedRecharge {
+                    locomotion.reportRecharge()
+                    hasReportedRecharge = true
+                    publishDebug("Charging station physically contacted; verify charge-state increase separately.")
+                }
+            } else {
+                hasReportedRecharge = false
             }
         }
 
@@ -1248,42 +1308,50 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             newPosition.z = oldPosition.z
         }
 
-        // Apply jump height relative to the jump's starting height.
+        // Jump trajectory is supplied by locomotion. Outside an active jump,
+        // apply gravity whenever the projected feet have no supporting surface.
         if output.jump > 0 {
             if jumpBaseY == nil {
                 jumpBaseY = Float(oldPosition.y)
+                characterVerticalVelocity = max(characterVerticalVelocity, 0)
             }
 
             let baseY = jumpBaseY ?? Float(oldPosition.y)
-            let heightOffset = max(
-                0,
-                locomotion.body.height - standingHeight
-            )
-
+            let heightOffset = max(0, locomotion.body.height - standingHeight)
             newPosition.y = baseY + heightOffset
         } else {
             jumpBaseY = nil
 
-            // Follow the detected floor when grounded.
-            // Stand on whatever solid top is under him: floor, step, crate,
-            // table or platform. Rises up to 0.85 are taken (landing on a box).
-            if let ground = raycastSupport(
-                at: SCNVector3(
-                    newPosition.x,
-                    newPosition.y,
-                    newPosition.z
-                ),
-                in: scene
-            ) {
-                let delta = ground - newPosition.y
-                if delta <= 0.85 && delta >= -0.5 {
+            let probe = SCNVector3(newPosition.x, oldPosition.y, newPosition.z)
+            if let ground = raycastSupport(at: probe, in: scene, riseAllowance: 0.45) {
+                let verticalGap = ground - Float(oldPosition.y)
+                // Only snap to surfaces within plausible step/landing range.
+                if verticalGap <= 0.45 && verticalGap >= -0.22 && characterVerticalVelocity <= 0.5 {
                     newPosition.y = ground
+                    characterVerticalVelocity = 0
+                } else if Float(oldPosition.y) > ground + 0.22 {
+                    characterVerticalVelocity -= worldGravity * dt
+                    newPosition.y = Float(oldPosition.y) + characterVerticalVelocity * dt
+                } else {
+                    newPosition.y = Float(oldPosition.y)
                 }
+            } else {
+                // No floor, box, table, or platform underneath: fall into the void.
+                characterVerticalVelocity -= worldGravity * dt
+                newPosition.y = Float(oldPosition.y) + characterVerticalVelocity * dt
             }
         }
 
         character.position = newPosition
         character.eulerAngles.y = heading
+
+        if newPosition.y < -3.0 && !hasReportedFall {
+            hasReportedFall = true
+            locomotion.completeEpisode(.fell)
+            publishDebug("FALL: no supporting surface detected; episode ended.")
+        } else if newPosition.y > -0.5 {
+            hasReportedFall = false
+        }
     }
 
     // MARK: - Forward Vector
@@ -1341,6 +1409,64 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             )
 
             torso.position.y = 1.28 - 0.15 * crouch
+        }
+    }
+
+    // MARK: - SceneKit Physics
+
+    /// Enable gravity for the world and configure physical bodies for visible
+    /// floor/support surfaces and loose movable objects. The chasm is
+    /// deliberately excluded: no body is created for a void/gap node.
+    private func configurePhysicsWorld(in scene: SCNScene) {
+        scene.physicsWorld.gravity = SCNVector3(0, -worldGravity, 0)
+        scene.physicsWorld.speed = 1
+
+        func visit(_ node: SCNNode) {
+            if node !== characterNode && !isCharacterPart(node) && !isQGridNode(node) {
+                configurePhysicsBody(for: node, forceDynamic: false)
+            }
+            for child in node.childNodes { visit(child) }
+        }
+        visit(scene.rootNode)
+    }
+
+    private func configurePhysicsBody(for node: SCNNode, forceDynamic: Bool) {
+        let hasOwnGeometry = node.geometry != nil
+        let hasDescendantGeometry = node.childNodes.contains { child in
+            child.geometry != nil || child.childNodes.contains(where: { $0.geometry != nil })
+        }
+        guard hasOwnGeometry || hasDescendantGeometry else { return }
+        let name = (node.name ?? "").lowercased()
+        if name.contains("chasm") || name.contains("void") || name.contains("gap") ||
+            name.contains("qfloorgrid") || name.contains("marker") ||
+            name.contains("camera") || name.contains("light") {
+            return
+        }
+        if isCharacterPart(node) || isQGridNode(node) { return }
+
+        let movableTokens = ["table", "crate", "box", "movable", "pickup", "chair", "stool", "block", "object"]
+        let supportTokens = ["floor", "ground", "platform", "stair", "step", "terrain", "wall", "doorframe"]
+        let shouldBeDynamic = forceDynamic || movableTokens.contains(where: { name.contains($0) })
+        let shouldBeStatic = supportTokens.contains(where: { name.contains($0) })
+
+        if shouldBeDynamic {
+            if node.physicsBody == nil || node.physicsBody?.type != .dynamic {
+                let shape = SCNPhysicsShape(node: node, options: nil)
+                let body = SCNPhysicsBody(type: .dynamic, shape: shape)
+                let size = worldDimensions(of: node)
+                let volume = max(0.01, size.x * size.y * size.z)
+                body.mass = CGFloat(min(30, max(0.5, volume * 3.0)))
+                body.friction = 0.8
+                body.rollingFriction = 0.8
+                body.restitution = 0.02
+                body.damping = 0.12
+                body.angularDamping = 0.2
+                body.allowsResting = true
+                node.physicsBody = body
+            }
+        } else if shouldBeStatic && node.physicsBody == nil {
+            let shape = SCNPhysicsShape(node: node, options: nil)
+            node.physicsBody = SCNPhysicsBody(type: .static, shape: shape)
         }
     }
 
@@ -1574,51 +1700,38 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             position.z + forward.z * reach
         )
 
-        // Detach, keeping the current world position.
+        // Release the object into the real scene. Do not snap it to a raycast
+        // height: gravity and collision shapes determine where it settles.
         let startWorld = carriedNode.presentation.worldPosition
         carriedNode.removeFromParentNode()
         scene.rootNode.addChildNode(carriedNode)
         carriedNode.position = scene.rootNode.convertPosition(startWorld, from: nil)
-
-        // Rest the object's base on the surface found at the destination.
-        let (minimum, _) = carriedNode.boundingBox
-        let baseOffset = -minimum.y * Float(abs(worldScale(of: carriedNode).y))
-        let surface = raycastSupport(
-            at: SCNVector3(destinationXZ.x, position.y + 2.0, destinationXZ.z),
-            in: scene,
-            riseAllowance: 1.5
-        ) ?? Float(position.y)
-
-        let finalPosition = SCNVector3(
+        carriedNode.position = SCNVector3(
             destinationXZ.x,
-            surface + baseOffset,
+            max(Float(carriedNode.position.y), Float(position.y) + 0.25),
             destinationXZ.z
         )
+
+        configurePhysicsBody(for: carriedNode, forceDynamic: true)
+        if let body = carriedNode.physicsBody {
+            body.type = .dynamic
+            body.velocity = SCNVector3Zero
+            body.angularVelocity = SCNVector4Zero
+            body.resetTransform()
+            if thrown {
+                body.applyForce(
+                    SCNVector3(forward.x * 2.2, 3.0, forward.z * 2.2),
+                    asImpulse: true
+                )
+            }
+        }
 
         self.carriedNode = nil
         carriedOriginalParent = nil
 
-        let settle = { [weak carriedNode] in
-            carriedNode?.position = finalPosition
-            carriedNode?.physicsBody?.resetTransform()
-        }
-
-        if thrown {
-            let start = carriedNode.position
-            let flight = SCNAction.customAction(duration: 0.55) { node, elapsed in
-                let t = Float(elapsed / 0.55)
-                node.position = SCNVector3(
-                    start.x + (finalPosition.x - start.x) * t,
-                    start.y + (finalPosition.y - start.y) * t + 1.2 * 4 * t * (1 - t),
-                    start.z + (finalPosition.z - start.z) * t
-                )
-            }
-            carriedNode.runAction(flight) { settle() }
-            publishDebug("Threw object ahead.")
-        } else {
-            settle()
-            publishDebug("Placed object ahead.")
-        }
+        publishDebug(thrown
+            ? "Object released with an impulse; gravity and collisions determine its trajectory."
+            : "Object released; gravity and collisions determine its final support.")
 
         return true
     }
