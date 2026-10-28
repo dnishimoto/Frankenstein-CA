@@ -240,29 +240,28 @@ final class FrankensteinQFloorGrid {
         )
     }
 
+    
     private func shortName(_ action: FrankensteinAction) -> String {
         switch action {
-        case .walk: return "WALK"
-        case .run: return "RUN"
-        case .turnLeft: return "TURN L"
-        case .turnRight: return "TURN R"
-        case .jump: return "JUMP"
-        case .crouch: return "CROUCH"
-        case .stepUp: return "STEP UP"
-        case .stepDown: return "STEP DN"
-        case .roll: return "ROLL"
-        case .crawl: return "CRAWL"
-        case .recover: return "RECOVER"
-        case .backward: return "BACK"
+        case .walk:        return "WALK"
+        case .run:         return "RUN"
+        case .turnLeft:    return "TURN L"
+        case .turnRight:   return "TURN R"
+        case .jump:        return "JUMP"
+        case .crouch:      return "CROUCH"
+        case .stepUp:      return "STEP UP"
+        case .stepDown:    return "STEP DN"
+        case .roll:        return "ROLL"
+        case .crawl:       return "CRAWL"
+        case .recover:     return "RECOVER"
+        case .backward:    return "BACK"
         case .stepForward: return "STEP FW"
-        case .liftObject: return "LIFT"
+        case .liftObject:  return "LIFT"
         case .placeObject: return "PLACE"
         case .throwObject: return "THROW"
-        case .liftObject: return "LIFT OBJECT"
-        case .placeObject: return "PLACE OBJECT"
-        case .throwObject: return "THROW OBJECT"
         }
     }
+
 
     private func image(
         top: String,

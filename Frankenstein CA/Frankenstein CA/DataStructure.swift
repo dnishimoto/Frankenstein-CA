@@ -9,6 +9,14 @@ import Foundation
 import SwiftUI
 import SceneKit
 
+struct FrankensteinPerceptionFrame {
+    let visibleObjects: [DetectedObjectInfo]
+    let nearestObstacle: DetectedObjectInfo?
+    let planningTarget: DetectedObjectInfo?
+    let summary: String
+    let immediateRisk: Float
+}
+
 struct FrankensteinPredictedOutcome {
     let actionName: String
     let expectedForwardDisplacement: Float
@@ -17,6 +25,7 @@ struct FrankensteinPredictedOutcome {
     let expectedGoalProgress: Float
     let confidence: Float
 }
+
 struct FrankensteinQUpdateRecord {
     let action: FrankensteinAction
     let newValue: Float

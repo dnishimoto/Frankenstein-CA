@@ -73,6 +73,9 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     // MARK: - Jump State
 
     private let standingHeight: Float = 1.8
+    /// Vertical distance from the character root origin to the lowest visible foot/boot point.
+    /// Grounding must compare the feet with the support surface, not the model origin.
+    private var characterFootOffset: Float = 0
     private var jumpBaseY: Float?
 
     // MARK: - Object Interaction
@@ -157,6 +160,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         self.scene = scene
         self.characterNode = characterNode
 
+        characterFootOffset = measureCharacterFootOffset(characterNode)
         configurePhysicsWorld(in: scene)
         characterVerticalVelocity = 0
         hasReportedFall = false
@@ -834,7 +838,9 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         let options: [String: Any] = [
             SCNHitTestOption.ignoreHiddenNodes.rawValue: true,
-            SCNHitTestOption.backFaceCulling.rawValue: true
+            // Include both face orientations; the upward-normal test below still
+            // rejects walls/ceilings but avoids missing thin floor meshes.
+            SCNHitTestOption.backFaceCulling.rawValue: false
         ]
 
         let hits = scene.rootNode.hitTestWithSegment(
@@ -845,8 +851,13 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         for hit in hits {
             guard !isCharacterPart(hit.node),
-                  !isQGridNode(hit.node),
-                  hit.worldNormal.y > 0.5 else {
+                  !isQGridNode(hit.node) else {
+                continue
+            }
+
+            // Prefer an upward-facing surface. Named floor/ground/platform nodes
+            // are also accepted when imported mesh normals are reversed.
+            if hit.worldNormal.y <= 0.35 && !isGroundLikeNode(hit.node) {
                 continue
             }
 
@@ -1229,22 +1240,17 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         character: SCNNode,
         scene: SCNScene
     ) {
-        heading = output.heading
+        guard dt.isFinite, dt > 0 else { return }
 
+        heading = output.heading
         let forward = forwardVector()
-        // moveDirection is -1 while the CA commands .backward.
         let speed = max(0, output.speed) * output.moveDirection
 
-        // The CA commanded .liftObject: perform the pickup.
-        // Only while a lift is the pending action, so it is tried and
-        // rewarded once per decision.
+        // Execute CA-requested object interactions once for the pending action.
         if output.liftRequested,
            locomotion.policy.pendingAction == .liftObject {
-            let succeeded = attemptPickup()
-            locomotion.reportPickupOutcome(succeeded: succeeded)
+            locomotion.reportPickupOutcome(succeeded: attemptPickup())
         }
-
-        // Place or throw what he carries. Each is rewarded once.
         if output.placeRequested,
            locomotion.policy.pendingAction == .placeObject {
             let ok = placeCarriedObjectAhead()
@@ -1256,18 +1262,16 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             locomotion.reportObjectActionOutcome(.throwObject, reward: ok ? 0.3 : -0.5)
         }
 
-        // Recharge feedback requires measured contact with the station's top,
-        // not merely being nearby. Report once per contact episode.
+        // Recharge requires contact with the station's top surface.
         if let station = rechargeStationNode {
             let c = character.presentation.worldPosition
             let size = worldDimensions(of: station)
             let s = station.presentation.worldPosition
             let topY = worldTopY(of: station)
-            let withinTopFootprint =
-                abs(Float(c.x - s.x)) <= max(0.15, size.x * 0.5) &&
-                abs(Float(c.z - s.z)) <= max(0.15, size.z * 0.5)
-            let feetTouchTop = abs(Float(c.y) - topY) <= 0.18
-            if withinTopFootprint && feetTouchTop {
+            let onTop = abs(Float(c.x - s.x)) <= max(0.15, size.x * 0.5) &&
+                abs(Float(c.z - s.z)) <= max(0.15, size.z * 0.5) &&
+                abs(Float(c.y) - topY) <= 0.18
+            if onTop {
                 if !hasReportedRecharge {
                     locomotion.reportRecharge()
                     hasReportedRecharge = true
@@ -1278,80 +1282,142 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             }
         }
 
-        let oldPosition = character.position
-
-        var newPosition = SCNVector3(
-            oldPosition.x + forward.x * speed * dt,
-            oldPosition.y,
-            oldPosition.z + forward.z * speed * dt
+        // IMPORTANT: all calculations below use world coordinates. SceneKit's
+        // node.position is parent-local and must not be mixed with raycast world Y.
+        let oldWorld = character.presentation.worldPosition
+        var proposedWorld = SCNVector3(
+            oldWorld.x + forward.x * speed * dt,
+            oldWorld.y,
+            oldWorld.z + forward.z * speed * dt
         )
 
-        // Prevent unverified movement over a gap.
+        // Do not walk into a known gap unless perception has identified a safe landing.
         if speed > 0,
-            latestTerrainSample.terrain == .gap,
-            !latestTerrainSample.isLandingAreaClear {
-            newPosition.x = oldPosition.x
-            newPosition.z = oldPosition.z
+           latestTerrainSample.terrain == .gap,
+           !latestTerrainSample.isLandingAreaClear {
+            proposedWorld.x = oldWorld.x
+            proposedWorld.z = oldWorld.z
         }
 
-        // Prevent walking directly through a nearby hurdle.
+        // Block ordinary walking into a close hurdle. Parentheses make the
+        // terrain conditions apply together rather than only to one branch.
         let isClimbing = locomotion.stepUpInProgress ||
-            output.action == .stepUp ||
-            output.action == .jump
+            output.action == .stepUp || output.action == .jump
+        let isBlockingObstacle = latestTerrainSample.terrain == .hurdle ||
+            latestTerrainSample.terrain == .raisedStep
         if output.jump <= 0,
            speed > 0,
            !isClimbing,
-           latestTerrainSample.terrain == .hurdle ||
-           latestTerrainSample.terrain == .raisedStep,
+           isBlockingObstacle,
            latestTerrainSample.distance < 0.5 {
-            newPosition.x = oldPosition.x
-            newPosition.z = oldPosition.z
+            proposedWorld.x = oldWorld.x
+            proposedWorld.z = oldWorld.z
         }
 
-        // Jump trajectory is supplied by locomotion. Outside an active jump,
-        // apply gravity whenever the projected feet have no supporting surface.
         if output.jump > 0 {
+            // Locomotion supplies the jump height relative to standing height.
             if jumpBaseY == nil {
-                jumpBaseY = Float(oldPosition.y)
-                characterVerticalVelocity = max(characterVerticalVelocity, 0)
+                jumpBaseY = Float(oldWorld.y)
+                characterVerticalVelocity = 0
             }
-
-            let baseY = jumpBaseY ?? Float(oldPosition.y)
+            let baseY = jumpBaseY ?? Float(oldWorld.y)
             let heightOffset = max(0, locomotion.body.height - standingHeight)
-            newPosition.y = baseY + heightOffset
+            proposedWorld.y = baseY + heightOffset
         } else {
             jumpBaseY = nil
 
-            let probe = SCNVector3(newPosition.x, oldPosition.y, newPosition.z)
-            if let ground = raycastSupport(at: probe, in: scene, riseAllowance: 0.45) {
-                let verticalGap = ground - Float(oldPosition.y)
-                // Only snap to surfaces within plausible step/landing range.
-                if verticalGap <= 0.45 && verticalGap >= -0.22 && characterVerticalVelocity <= 0.5 {
-                    newPosition.y = ground
+            let oldRootY = Float(oldWorld.y)
+            let oldFeetY = oldRootY + characterFootOffset
+            let probe = SCNVector3(proposedWorld.x, oldFeetY, proposedWorld.z)
+            let support = raycastSupport(
+                at: probe,
+                in: scene,
+                // Search high enough to reacquire the floor after a missed frame,
+                // but use the foot position so overhead geometry is not mistaken
+                // for support.
+                riseAllowance: max(1.0, abs(characterVerticalVelocity * dt) + 0.5)
+            )
+
+            characterVerticalVelocity -= worldGravity * dt
+            let fallingFeetY = oldFeetY + characterVerticalVelocity * dt
+
+            if let groundY = support, groundY.isFinite {
+                let feetAboveSurface = oldFeetY - groundY
+                let crossedSurface = oldFeetY >= groundY - 0.06 && fallingFeetY <= groundY
+                let standingOnSurface = feetAboveSurface >= -0.06 &&
+                    feetAboveSurface <= 0.10 && characterVerticalVelocity <= 0.5
+
+                if standingOnSurface || crossedSurface {
+                    // Set the FEET on the support surface; preserve root/foot offset.
+                    proposedWorld.y = groundY - characterFootOffset
                     characterVerticalVelocity = 0
-                } else if Float(oldPosition.y) > ground + 0.22 {
-                    characterVerticalVelocity -= worldGravity * dt
-                    newPosition.y = Float(oldPosition.y) + characterVerticalVelocity * dt
+                } else if oldFeetY < groundY {
+                    // If a support exists directly beneath the character, correct
+                    // small or large penetration instead of allowing the root to
+                    // continue below the floor. A real gap has no nearby support;
+                    // the lower pit surface, if present, is still a valid landing.
+                    proposedWorld.y = groundY - characterFootOffset
+                    characterVerticalVelocity = 0
                 } else {
-                    newPosition.y = Float(oldPosition.y)
+                    proposedWorld.y = fallingFeetY - characterFootOffset
                 }
             } else {
-                // No floor, box, table, or platform underneath: fall into the void.
-                characterVerticalVelocity -= worldGravity * dt
-                newPosition.y = Float(oldPosition.y) + characterVerticalVelocity * dt
+                // No support below: this is a genuine gap/fall, not a landing.
+                proposedWorld.y = fallingFeetY - characterFootOffset
             }
         }
 
-        character.position = newPosition
+        // Convert the calculated world-space position into parent-local coordinates.
+        if let parent = character.parent {
+            character.position = parent.convertPosition(proposedWorld, from: nil)
+        } else {
+            character.position = proposedWorld
+        }
         character.eulerAngles.y = heading
 
-        if newPosition.y < -3.0 && !hasReportedFall {
+        let finalWorldY = Float(character.presentation.worldPosition.y)
+        let finalFeetY = finalWorldY + characterFootOffset
+        if finalFeetY < -3.0 && !hasReportedFall {
             hasReportedFall = true
             locomotion.completeEpisode(.fell)
             publishDebug("FALL: no supporting surface detected; episode ended.")
-        } else if newPosition.y > -0.5 {
+        } else if finalFeetY > -0.5 {
             hasReportedFall = false
         }
+    }
+
+    /// Measure the visible character geometry's lowest point relative to the root.
+    /// This prevents the controller from treating the torso/root origin as the feet.
+    private func measureCharacterFootOffset(_ character: SCNNode) -> Float {
+        let rootWorldY = Float(character.presentation.worldPosition.y)
+        var minimumWorldY = Float.infinity
+
+        func visit(_ node: SCNNode) {
+            if node.geometry != nil {
+                let bounds = node.boundingBox
+                let xs = [bounds.min.x, bounds.max.x]
+                let ys = [bounds.min.y, bounds.max.y]
+                let zs = [bounds.min.z, bounds.max.z]
+
+                for x in xs {
+                    for y in ys {
+                        for z in zs {
+                            let worldPoint = node.presentation.convertPosition(
+                                SCNVector3(x, y, z),
+                                to: nil
+                            )
+                            minimumWorldY = min(minimumWorldY, Float(worldPoint.y))
+                        }
+                    }
+                }
+            }
+            for child in node.childNodes { visit(child) }
+        }
+
+        visit(character)
+        guard minimumWorldY.isFinite else { return 0 }
+        // Clamp tiny negative values from geometry precision; preserve real offsets.
+        return min(0.25, max(-0.25, minimumWorldY - rootWorldY))
     }
 
     // MARK: - Forward Vector
@@ -1464,9 +1530,14 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 body.allowsResting = true
                 node.physicsBody = body
             }
-        } else if shouldBeStatic && node.physicsBody == nil {
-            let shape = SCNPhysicsShape(node: node, options: nil)
-            node.physicsBody = SCNPhysicsBody(type: .static, shape: shape)
+        } else if shouldBeStatic {
+            if node.physicsBody == nil || node.physicsBody?.type != .static {
+                let shape = SCNPhysicsShape(node: node, options: nil)
+                let body = SCNPhysicsBody(type: .static, shape: shape)
+                body.friction = 0.9
+                body.restitution = 0
+                node.physicsBody = body
+            }
         }
     }
 
@@ -1905,4 +1976,3 @@ extension Coordinator {
         print("[Coordinator] terrain=\(terrain.terrain), Q updates=\(locomotion.policy.updateCount), states=\(locomotion.policy.learnedStateCount)")
     }
 }
-

@@ -1,9 +1,7 @@
-
 import Foundation
 
 /// Small online action-outcome model. It is intentionally an estimate, not a
 /// physics engine: SceneKit and measured scene feedback remain authoritative.
-
 
 final class FrankensteinPredictivePerception {
     private(set) var predictionCount = 0
@@ -74,7 +72,6 @@ final class FrankensteinPredictivePerception {
                 distance *= 0.15
             }
         }
-
         if body.fallen {
             distance = 0
             fall = 1
@@ -82,7 +79,6 @@ final class FrankensteinPredictivePerception {
         }
 
         predictionCount += 1
-
         return FrankensteinPredictedOutcome(
             actionName: actionName,
             expectedForwardDisplacement: max(0, distance * movementScale),
@@ -101,28 +97,16 @@ final class FrankensteinPredictivePerception {
         terrain: FrankensteinTerrainSample
     ) -> Float {
         guard actualForwardDisplacement.isFinite else { return 0 }
-
         let actual = max(0, actualForwardDisplacement)
         let error = actual - prediction.expectedForwardDisplacement
-
         observationCount += 1
-        meanAbsoluteError +=
-            (abs(error) - meanAbsoluteError) / Float(observationCount)
+        meanAbsoluteError += (abs(error) - meanAbsoluteError) / Float(observationCount)
 
         // Bounded, slow adaptation avoids letting one noisy raycast dominate.
         if prediction.expectedForwardDisplacement > 0.01 {
-            let ratio = min(
-                1.5,
-                max(0.5, actual / prediction.expectedForwardDisplacement)
-            )
-
-            movementScale = min(
-                1.5,
-                max(0.5, movementScale * (1 + 0.04 * (ratio - 1)))
-            )
+            let ratio = min(1.5, max(0.5, actual / prediction.expectedForwardDisplacement))
+            movementScale = min(1.5, max(0.5, movementScale * (1 + 0.04 * (ratio - 1))))
         }
-
         return error
     }
 }
-
