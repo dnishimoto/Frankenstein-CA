@@ -930,8 +930,20 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 0.20 * objectValue
         }
 
+        // Direct reflex override: when a pickupable block is right in front and hands are empty,
+        // strongly boost liftObject and penalize jumping over it.
+        if let detection = latestDetection,
+           carriedNode == nil,
+           detection.pickupable,
+           detection.distance <= pickupDistance {
+            
+            merged[.liftObject, default: 0] += 5.0
+            merged[.jump, default: 0] -= 5.0
+        }
+
         return merged
     }
+ 
 
     // MARK: - Full Object Perception
 
@@ -1398,147 +1410,150 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     // MARK: - Terrain Sensing
 
-    private func makeTerrainSample(
-        for character: SCNNode,
-        in scene: SCNScene
-    ) -> FrankensteinTerrainSample {
-        let position = character.presentation.worldPosition
-        let forward = forwardVector()
+    // MARK: - Terrain Sensing
 
-        var sample = FrankensteinTerrainSample()
+        private func makeTerrainSample(
+            for character: SCNNode,
+            in scene: SCNScene
+        ) -> FrankensteinTerrainSample {
+            let position = character.presentation.worldPosition
+            let forward = forwardVector()
 
-        let currentGround = raycastGround(near: position, in: scene)
+            var sample = FrankensteinTerrainSample()
 
-        sample.groundHeight = currentGround ?? Float(position.y)
-        sample.nextGroundHeight = sample.groundHeight
-        sample.distance = 5
-        sample.isGroundAhead = true
-        sample.isLandingAreaClear = false
-        sample.gapWidth = 0
-        sample.gapNearEdgeDistance = .infinity
-        sample.gapFarEdgeDistance = .infinity
-        sample.landingHeightDelta = 0
+            let currentGround = raycastGround(near: position, in: scene)
 
-        if let detection = detectObjectAhead(from: character, in: scene) {
-            sample.distance = detection.distance
+            sample.groundHeight = currentGround ?? Float(position.y)
+            sample.nextGroundHeight = sample.groundHeight
+            sample.distance = 5
+            sample.isGroundAhead = true
+            sample.isLandingAreaClear = false
+            sample.gapWidth = 0
+            sample.gapNearEdgeDistance = .infinity
+            sample.gapFarEdgeDistance = .infinity
+            sample.landingHeightDelta = 0
 
-            let rise = detection.topY > 0
-                ? max(0, detection.topY - sample.groundHeight)
-                : detection.dimensions.y
+            if let detection = detectObjectAhead(from: character, in: scene) {
+                sample.distance = detection.distance
 
-            sample.obstacleHeight = rise
-            sample.obstacleDepth = detection.dimensions.z
-            sample.objectName = detection.name
+                let rise = detection.topY > 0
+                    ? max(0, detection.topY - sample.groundHeight)
+                    : detection.dimensions.y
 
-            let name = detection.name.lowercased()
-            let bottomY =
-                Float(detection.worldPosition.y) - detection.dimensions.y * 0.5
+                sample.obstacleHeight = rise
+                sample.obstacleDepth = detection.dimensions.z
+                sample.objectName = detection.name
 
-            if name.contains("ceiling") ||
-                bottomY > sample.groundHeight + 0.8 {
-                sample.terrain = .lowCeiling
-            } else if rise <= 0.08 {
-                sample.terrain = .uneven
-            } else if rise <= 0.45 {
-                sample.terrain = .raisedStep
+                let name = detection.name.lowercased()
+                let bottomY =
+                    Float(detection.worldPosition.y) - detection.dimensions.y * 0.5
+
+                if name.contains("ceiling") ||
+                    bottomY > sample.groundHeight + 0.8 {
+                    sample.terrain = .lowCeiling
+                } else if rise <= 0.08 {
+                    sample.terrain = .uneven
+                } else if rise <= 0.45 {
+                    sample.terrain = .raisedStep
+                } else {
+                    sample.terrain = .hurdle
+                }
+
+                if sample.terrain == .hurdle || sample.terrain == .raisedStep {
+                    let landingDistance =
+                        detection.distance + max(detection.dimensions.z, 0.3) + 0.4
+
+                    let landingProbe = SCNVector3(
+                        position.x + forward.x * landingDistance,
+                        position.y,
+                        position.z + forward.z * landingDistance
+                    )
+
+                    if let landingHeight = raycastGround(near: landingProbe, in: scene) {
+                        let delta = landingHeight - sample.groundHeight
+
+                        sample.landingHeightDelta = delta
+                        sample.nextGroundHeight = landingHeight
+
+                        sample.isLandingAreaClear =
+                            abs(delta) <= 0.25 &&
+                            hasClearSpace(
+                                around: SCNVector3(
+                                    landingProbe.x,
+                                    landingHeight + 0.15,
+                                    landingProbe.z
+                                ),
+                                in: scene
+                            )
+                    }
+                }
             } else {
-                sample.terrain = .hurdle
+                sample.terrain = .flat
             }
 
-            if sample.terrain == .hurdle || sample.terrain == .raisedStep {
-                let landingDistance =
-                    detection.distance + max(detection.dimensions.z, 0.3) + 0.4
+            let distances: [Float] = [0.65, 1.0, 1.5, 2.2, 3.0]
 
-                let landingProbe = SCNVector3(
-                    position.x + forward.x * landingDistance,
-                    position.y,
-                    position.z + forward.z * landingDistance
+            var groundHits: [(distance: Float, height: Float)] = []
+            var firstProbeHasGround = false
+
+            for (index, distance) in distances.enumerated() {
+                let probe = SCNVector3(
+                    position.x + forward.x * distance,
+                    position.y + 3.0,
+                    position.z + forward.z * distance
                 )
 
-                if let landingHeight = raycastGround(near: landingProbe, in: scene) {
-                    let delta = landingHeight - sample.groundHeight
+                if let height = raycastGround(near: probe, in: scene) {
+                    groundHits.append((distance, height))
 
-                    sample.landingHeightDelta = delta
-                    sample.nextGroundHeight = landingHeight
+                    if index == 0 {
+                        firstProbeHasGround = true
+                    }
+                }
+            }
+
+            sample.isGroundAhead = firstProbeHasGround
+
+            if !firstProbeHasGround {
+                if let landing = groundHits.last {
+                    sample.terrain = .gap
+                    sample.distance = distances[0]
+                    sample.gapNearEdgeDistance = distances[0]
+                    sample.gapFarEdgeDistance = landing.distance
+                    sample.gapWidth = max(0, landing.distance - distances[0])
+                    sample.nextGroundHeight = landing.height
+                    sample.landingHeightDelta =
+                        landing.height - sample.groundHeight
 
                     sample.isLandingAreaClear =
-                        abs(delta) <= 0.25 &&
-                        hasClearSpace(
-                            around: SCNVector3(
-                                landingProbe.x,
-                                landingHeight + 0.15,
-                                landingProbe.z
-                            ),
-                            in: scene
-                        )
+                        sample.gapWidth > 0 &&
+                        sample.gapWidth <= 3.5
+                } else {
+                    sample.terrain = .gap
+                    sample.distance = distances[0]
+                    sample.isLandingAreaClear = false
                 }
+
+                return sample
             }
-        } else {
-            sample.terrain = .flat
-        }
 
-        let distances: [Float] = [0.65, 1.0, 1.5, 2.2, 3.0]
-
-        var groundHits: [(distance: Float, height: Float)] = []
-        var firstProbeHasGround = false
-
-        for (index, distance) in distances.enumerated() {
-            let probe = SCNVector3(
-                position.x + forward.x * distance,
-                position.y + 3.0,
-                position.z + forward.z * distance
-            )
-
-            if let height = raycastGround(near: probe, in: scene) {
-                groundHits.append((distance, height))
-
-                if index == 0 {
-                    firstProbeHasGround = true
-                }
-            }
-        }
-
-        sample.isGroundAhead = firstProbeHasGround
-
-        if !firstProbeHasGround {
-            if let landing = groundHits.last {
-                sample.terrain = .gap
-                sample.distance = distances[0]
-                sample.gapNearEdgeDistance = distances[0]
-                sample.gapFarEdgeDistance = landing.distance
-                sample.gapWidth = max(0, landing.distance - distances[0])
-                sample.nextGroundHeight = landing.height
+            if let nearest = groundHits.first {
+                sample.nextGroundHeight = nearest.height
                 sample.landingHeightDelta =
-                    landing.height - sample.groundHeight
+                    nearest.height - sample.groundHeight
 
-                sample.isLandingAreaClear =
-                    sample.gapWidth > 0 &&
-                    sample.gapWidth <= 3.5
-            } else {
-                sample.terrain = .gap
-                sample.distance = distances[0]
-                sample.isLandingAreaClear = false
+                let rise = nearest.height - sample.groundHeight
+
+                if rise > 0.05 && rise <= 0.45 {
+                    sample.terrain = .raisedStep
+                    sample.obstacleHeight = rise
+                    sample.distance = nearest.distance
+                }
             }
 
             return sample
         }
-
-        if let nearest = groundHits.first {
-            sample.nextGroundHeight = nearest.height
-            sample.landingHeightDelta =
-                nearest.height - sample.groundHeight
-
-            let rise = nearest.height - sample.groundHeight
-
-            if rise > 0.05 && rise <= 0.45 {
-                sample.terrain = .raisedStep
-                sample.obstacleHeight = rise
-                sample.distance = nearest.distance
-            }
-        }
-
-        return sample
-    }
+  
 
     // MARK: - Raycast Helpers
 
@@ -1788,278 +1803,281 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     // MARK: - Movement
 
-    private func applyMovement(
-        output: FrankensteinLocomotionOutput,
-        deltaTime dt: Float,
-        character: SCNNode,
-        scene: SCNScene
-    ) {
-        guard dt.isFinite, dt > 0 else { return }
+    // MARK: - Movement
 
-        // Preserve the CA-routed heading while path steering is active so
-        // the locomotion output cannot immediately overwrite it.
-        if currentFrameTime >= goalCorrectionActiveUntil {
-            heading = output.heading
-        }
+        private func applyMovement(
+            output: FrankensteinLocomotionOutput,
+            deltaTime dt: Float,
+            character: SCNNode,
+            scene: SCNScene
+        ) {
+            guard dt.isFinite, dt > 0 else { return }
 
-        // Calculate forward from the resolved heading.
-        let forward = forwardVector()
-        let speed = max(0, output.speed) * output.moveDirection
-
-        if output.liftRequested,
-           locomotion.policy.pendingAction == .liftObject {
-
-            let stateKeyBeforePickup = latestDetection.map {
-                objectStateKey(for: $0, terrain: latestTerrainSample)
+            // Preserve the CA-routed heading while path steering is active so
+            // the locomotion output cannot immediately overwrite it.
+            if currentFrameTime >= goalCorrectionActiveUntil {
+                heading = output.heading
             }
 
-            let succeeded = attemptPickup()
-            locomotion.reportPickupOutcome(succeeded: succeeded)
+            // Calculate forward from the resolved heading.
+            let forward = forwardVector()
+            let speed = max(0, output.speed) * output.moveDirection
 
-            if let stateKeyBeforePickup {
-                reinforceOutcome(
-                    stateKey: stateKeyBeforePickup,
-                    action: .liftObject,
-                    reward: succeeded ? 1.0 : -0.5
-                )
+            if output.liftRequested,
+               locomotion.policy.pendingAction == .liftObject {
+
+                let stateKeyBeforePickup = latestDetection.map {
+                    objectStateKey(for: $0, terrain: latestTerrainSample)
+                }
+
+                let succeeded = attemptPickup()
+                locomotion.reportPickupOutcome(succeeded: succeeded)
+
+                if let stateKeyBeforePickup {
+                    reinforceOutcome(
+                        stateKey: stateKeyBeforePickup,
+                        action: .liftObject,
+                        reward: succeeded ? 1.0 : -0.5
+                    )
+                }
             }
-        }
 
-        if output.placeRequested,
-           locomotion.policy.pendingAction == .placeObject {
+            if output.placeRequested,
+               locomotion.policy.pendingAction == .placeObject {
 
-            let stateKeyBeforePlace = latestDetection.map {
-                objectStateKey(for: $0, terrain: latestTerrainSample)
-            }
+                let stateKeyBeforePlace = latestDetection.map {
+                    objectStateKey(for: $0, terrain: latestTerrainSample)
+                }
 
-            let ok = placeCarriedObjectAhead()
+                let ok = placeCarriedObjectAhead()
 
-            locomotion.reportObjectActionOutcome(
-                .placeObject,
-                reward: ok ? 0.5 : -0.5
-            )
-
-            if let stateKeyBeforePlace {
-                reinforceOutcome(
-                    stateKey: stateKeyBeforePlace,
-                    action: .placeObject,
+                locomotion.reportObjectActionOutcome(
+                    .placeObject,
                     reward: ok ? 0.5 : -0.5
                 )
+
+                if let stateKeyBeforePlace {
+                    reinforceOutcome(
+                        stateKey: stateKeyBeforePlace,
+                        action: .placeObject,
+                        reward: ok ? 0.5 : -0.5
+                    )
+                }
             }
-        }
 
-        if output.throwRequested,
-           locomotion.policy.pendingAction == .throwObject {
+            if output.throwRequested,
+               locomotion.policy.pendingAction == .throwObject {
 
-            let stateKeyBeforeThrow = latestDetection.map {
-                objectStateKey(for: $0, terrain: latestTerrainSample)
-            }
+                let stateKeyBeforeThrow = latestDetection.map {
+                    objectStateKey(for: $0, terrain: latestTerrainSample)
+                }
 
-            let ok = throwCarriedObjectAhead()
+                let ok = throwCarriedObjectAhead()
 
-            locomotion.reportObjectActionOutcome(
-                .throwObject,
-                reward: ok ? 0.3 : -0.5
-            )
-
-            if let stateKeyBeforeThrow {
-                reinforceOutcome(
-                    stateKey: stateKeyBeforeThrow,
-                    action: .throwObject,
+                locomotion.reportObjectActionOutcome(
+                    .throwObject,
                     reward: ok ? 0.3 : -0.5
                 )
-            }
-        }
 
-        let oldWorld = character.presentation.worldPosition
-
-        var proposedWorld = SCNVector3(
-            oldWorld.x + forward.x * speed * dt,
-            oldWorld.y,
-            oldWorld.z + forward.z * speed * dt
-        )
-
-        let currentFeetY =
-            Float(oldWorld.y) + characterFootOffset
-
-        verifiedLandingSupport = verifyLandingSite(
-            proposedPosition: proposedWorld,
-            currentFeetY: currentFeetY,
-            in: scene
-        )
-
-        // Do not move into an unsupported gap.
-        if speed > 0,
-           latestTerrainSample.terrain == .gap,
-           !latestTerrainSample.isLandingAreaClear,
-           !verifiedLandingSupport {
-
-            proposedWorld.x = oldWorld.x
-            proposedWorld.z = oldWorld.z
-        }
-
-        let isClimbing =
-            locomotion.stepUpInProgress ||
-            output.action == .stepUp ||
-            output.action == .jump
-
-        let isBlockingObstacle =
-            latestTerrainSample.terrain == .hurdle ||
-            latestTerrainSample.terrain == .raisedStep
-
-        // Block ordinary walking into close obstacles.
-        if output.jump <= 0,
-           speed > 0,
-           !isClimbing,
-           isBlockingObstacle,
-           latestTerrainSample.distance < 0.5 {
-
-            proposedWorld.x = oldWorld.x
-            proposedWorld.z = oldWorld.z
-        }
-
-        // Vertical movement.
-        if output.jump > 0 {
-            if jumpBaseY == nil {
-                jumpBaseY = Float(oldWorld.y)
-                characterVerticalVelocity = 0
+                if let stateKeyBeforeThrow {
+                    reinforceOutcome(
+                        stateKey: stateKeyBeforeThrow,
+                        action: .throwObject,
+                        reward: ok ? 0.3 : -0.5
+                    )
+                }
             }
 
-            let baseY = jumpBaseY ?? Float(oldWorld.y)
-            let heightOffset = max(
-                0,
-                locomotion.body.height - standingHeight
+            let oldWorld = character.presentation.worldPosition
+
+            var proposedWorld = SCNVector3(
+                oldWorld.x + forward.x * speed * dt,
+                oldWorld.y,
+                oldWorld.z + forward.z * speed * dt
             )
 
-            proposedWorld.y = baseY + heightOffset
-        } else {
-            jumpBaseY = nil
+            let currentFeetY =
+                Float(oldWorld.y) + characterFootOffset
 
-            let oldFeetY = currentFeetY
+            verifiedLandingSupport = verifyLandingSite(
+                proposedPosition: proposedWorld,
+                currentFeetY: currentFeetY,
+                in: scene
+            )
 
-            let support = raycastSupport(
-                at: SCNVector3(
-                    proposedWorld.x,
-                    oldFeetY,
-                    proposedWorld.z
-                ),
-                in: scene,
-                riseAllowance: max(
-                    1.0,
-                    abs(characterVerticalVelocity * dt) + 0.5
+            // Do not move into an unsupported gap.
+            if speed > 0,
+               latestTerrainSample.terrain == .gap,
+               !latestTerrainSample.isLandingAreaClear,
+               !verifiedLandingSupport {
+
+                proposedWorld.x = oldWorld.x
+                proposedWorld.z = oldWorld.z
+            }
+
+            let isClimbing =
+                locomotion.stepUpInProgress ||
+                output.action == .stepUp ||
+                output.action == .jump
+
+            let isBlockingObstacle =
+                latestTerrainSample.terrain == .hurdle ||
+                latestTerrainSample.terrain == .raisedStep
+
+            // Block ordinary walking into close obstacles.
+            if output.jump <= 0,
+               speed > 0,
+               !isClimbing,
+               isBlockingObstacle,
+               latestTerrainSample.distance < 0.5 {
+
+                proposedWorld.x = oldWorld.x
+                proposedWorld.z = oldWorld.z
+            }
+
+            // Vertical movement.
+            if output.jump > 0 {
+                if jumpBaseY == nil {
+                    jumpBaseY = Float(oldWorld.y)
+                    characterVerticalVelocity = 0
+                }
+
+                let baseY = jumpBaseY ?? Float(oldWorld.y)
+                let heightOffset = max(
+                    0,
+                    locomotion.body.height - standingHeight
                 )
-            )
 
-            characterVerticalVelocity -= worldGravity * dt
+                proposedWorld.y = baseY + heightOffset
+            } else {
+                jumpBaseY = nil
 
-            let fallingFeetY =
-                oldFeetY + characterVerticalVelocity * dt
+                let oldFeetY = currentFeetY
 
-            if let groundY = support, groundY.isFinite {
-                let feetAboveSurface = oldFeetY - groundY
+                let support = raycastSupport(
+                    at: SCNVector3(
+                        proposedWorld.x,
+                        oldFeetY,
+                        proposedWorld.z
+                    ),
+                    in: scene,
+                    riseAllowance: max(
+                        1.0,
+                        abs(characterVerticalVelocity * dt) + 0.5
+                    )
+                )
 
-                let crossedSurface =
-                    oldFeetY >= groundY - 0.06 &&
-                    fallingFeetY <= groundY
+                characterVerticalVelocity -= worldGravity * dt
 
-                let standingOnSurface =
-                    feetAboveSurface >= -0.06 &&
-                    feetAboveSurface <= 0.10 &&
-                    characterVerticalVelocity <= 0.5
+                let fallingFeetY =
+                    oldFeetY + characterVerticalVelocity * dt
 
-                if standingOnSurface || crossedSurface {
-                    proposedWorld.y =
-                        groundY - characterFootOffset
+                if let groundY = support, groundY.isFinite {
+                    let feetAboveSurface = oldFeetY - groundY
 
-                    characterVerticalVelocity = 0
-                } else if oldFeetY < groundY {
-                    proposedWorld.y =
-                        groundY - characterFootOffset
+                    let crossedSurface =
+                        oldFeetY >= groundY - 0.06 &&
+                        fallingFeetY <= groundY
 
-                    characterVerticalVelocity = 0
+                    let standingOnSurface =
+                        feetAboveSurface >= -0.06 &&
+                        feetAboveSurface <= 0.10 &&
+                        characterVerticalVelocity <= 0.5
+
+                    if standingOnSurface || crossedSurface {
+                        proposedWorld.y =
+                            groundY - characterFootOffset
+
+                        characterVerticalVelocity = 0
+                    } else if oldFeetY < groundY {
+                        proposedWorld.y =
+                            groundY - characterFootOffset
+
+                        characterVerticalVelocity = 0
+                    } else {
+                        proposedWorld.y =
+                            fallingFeetY - characterFootOffset
+                    }
                 } else {
                     proposedWorld.y =
                         fallingFeetY - characterFootOffset
                 }
-            } else {
-                proposedWorld.y =
-                    fallingFeetY - characterFootOffset
             }
-        }
 
-        // Convert world coordinates to the character's parent space.
-        if let parent = character.parent {
-            character.position = parent.convertPosition(
-                proposedWorld,
-                from: nil
-            )
-        } else {
-            character.position = proposedWorld
-        }
+            // Convert world coordinates to the character's parent space.
+            if let parent = character.parent {
+                character.position = parent.convertPosition(
+                    proposedWorld,
+                    from: nil
+                )
+            } else {
+                character.position = proposedWorld
+            }
 
-        // Keep the resolved heading for visual orientation.
-        character.eulerAngles.y = heading
+            // Keep the resolved heading for visual orientation.
+            character.eulerAngles.y = heading
 
-        // Detect falling and terminate the episode once.
-        let finalWorldY =
-            Float(character.presentation.worldPosition.y)
+            // Detect falling and terminate the episode once.
+            let finalWorldY =
+                Float(character.presentation.worldPosition.y)
 
-        let finalFeetY =
-            finalWorldY + characterFootOffset
+            let finalFeetY =
+                finalWorldY + characterFootOffset
 
-        if finalFeetY < -3.0 && !hasReportedFall {
-            hasReportedFall = true
-            locomotion.completeEpisode(.fell)
+            if finalFeetY < -3.0 && !hasReportedFall {
+                hasReportedFall = true
+                locomotion.completeEpisode(.fell)
 
-            reinforceOutcome(
-                stateKey: goalStateKey(
-                    terrain: latestTerrainSample
-                ),
-                action: output.action,
-                reward: -2.0
-            )
+                reinforceOutcome(
+                    stateKey: goalStateKey(
+                        terrain: latestTerrainSample
+                    ),
+                    action: output.action,
+                    reward: -2.0
+                )
 
-            publishDebug(
-                "FALL: no supporting surface detected; episode ended."
-            )
-        } else if finalFeetY > -0.5 {
-            hasReportedFall = false
-        }
+                publishDebug(
+                    "FALL: no supporting surface detected; episode ended."
+                )
+            } else if finalFeetY > -0.5 {
+                hasReportedFall = false
+            }
 
-        // Verify recharge contact AFTER movement.
-        if let station = rechargeStationNode {
-            let c = character.presentation.worldPosition
-            let size = worldDimensions(of: station)
-            let s = station.presentation.worldPosition
-            let topY = worldTopY(of: station)
+            // Verify recharge contact AFTER movement.
+            if let station = rechargeStationNode {
+                let c = character.presentation.worldPosition
+                let size = worldDimensions(of: station)
+                let s = station.presentation.worldPosition
+                let topY = worldTopY(of: station)
 
-            let onTop =
-                abs(Float(c.x - s.x)) <= max(0.15, size.x * 0.5) &&
-                abs(Float(c.z - s.z)) <= max(0.15, size.z * 0.5) &&
-                abs(Float(c.y) + characterFootOffset - topY) <= 0.18
+                let onTop =
+                    abs(Float(c.x - s.x)) <= max(0.15, size.x * 0.5) &&
+                    abs(Float(c.z - s.z)) <= max(0.15, size.z * 0.5) &&
+                    abs(Float(c.y) + characterFootOffset - topY) <= 0.18
 
-            if onTop {
-                if !hasReportedRecharge {
-                    locomotion.reportRecharge()
-                    hasReportedRecharge = true
+                if onTop {
+                    if !hasReportedRecharge {
+                        locomotion.reportRecharge()
+                        hasReportedRecharge = true
 
-                    reinforceOutcome(
-                        stateKey: goalStateKey(
-                            terrain: latestTerrainSample
-                        ),
-                        action: output.action,
-                        reward: 2.0
-                    )
+                        reinforceOutcome(
+                            stateKey: goalStateKey(
+                                terrain: latestTerrainSample
+                            ),
+                            action: output.action,
+                            reward: 2.0
+                        )
 
-                    publishDebug(
-                        "Goal reached: recharge platform contact verified."
-                    )
+                        publishDebug(
+                            "Goal reached: recharge platform contact verified."
+                        )
+                    }
+                } else {
+                    hasReportedRecharge = false
                 }
-            } else {
-                hasReportedRecharge = false
             }
         }
-    }
+
 
     // MARK: - Measured Outcome Evaluation
 

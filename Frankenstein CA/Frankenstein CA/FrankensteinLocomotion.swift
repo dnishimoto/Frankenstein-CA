@@ -672,7 +672,8 @@ final class FrankensteinLocomotion {
             terrain: terrain,
             body: body,
             allowedActions: candidates,
-            qValues: qValues
+            qValues: qValues,
+            exploration: 0.12
         ) ?? fallbackCAAction(from: candidates)
 
         caCommandName = String(describing: proposedAction)
