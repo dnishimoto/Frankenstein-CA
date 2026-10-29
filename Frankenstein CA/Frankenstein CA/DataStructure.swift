@@ -9,6 +9,49 @@ import Foundation
 import SwiftUI
 import SceneKit
 
+struct FrankensteinCAPerception {
+    var headingError: Float = 0
+    var pathDistance: Float = .infinity
+    var isDetouring = false
+    var goalProgressRate: Float = 0
+    var atGoal = false
+
+    var clearanceAhead: Float = 4
+    var clearancePlus: Float = 4
+    var clearanceMinus: Float = 4
+
+    var nearestObjectClass = "none"
+    var nearestObjectDistance: Float = .infinity
+    var nearestObjectPickupable = false
+    var nearestObjectMovable = false
+    var nearestObjectName = ""
+
+    var distantObjectSummary = ""
+    var routeRelativeHeadings: [Float] = []
+    var advisoryValues: [FrankensteinAction: Float] = [:]
+    var stateKey = "none"
+    var timestamp: TimeInterval = 0
+}
+
+struct PlanStep: Identifiable, Equatable {
+    let id = UUID()
+    var action: FrankensteinAction
+    var targetLocation: SCNVector3?
+    var description: String
+    var isCompleted: Bool = false
+    var isFailed: Bool = false
+
+    static func == (lhs: PlanStep, rhs: PlanStep) -> Bool {
+        return lhs.id == rhs.id &&
+               lhs.action == rhs.action &&
+               lhs.description == rhs.description &&
+               lhs.isCompleted == rhs.isCompleted &&
+               lhs.isFailed == rhs.isFailed &&
+               lhs.targetLocation?.x == rhs.targetLocation?.x &&
+               lhs.targetLocation?.y == rhs.targetLocation?.y &&
+               lhs.targetLocation?.z == rhs.targetLocation?.z
+    }
+}
 // MARK: - Steering Result
 
 /// Output of the cellular-automaton path field: where to turn and how far the

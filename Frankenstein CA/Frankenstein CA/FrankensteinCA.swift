@@ -2,57 +2,7 @@
 import Foundation
 import Combine
 
-// MARK: - Perception handed to the CA by the Coordinator
 
-/// Everything the CA needs to choose an action. The Coordinator builds this
-/// every frame; the CA scores each permitted action against it.
-///
-/// Heading convention: `.turnRight` ADDS to `output.heading` and `.turnLeft`
-/// SUBTRACTS (see FrankensteinLocomotion.updateAnimation), so
-/// "plus" means "reached by .turnRight" and "minus" means "reached by .turnLeft".
-struct FrankensteinCAPerception {
-    /// Routed heading minus current heading, wrapped to [-pi, pi].
-    /// Positive: .turnRight reduces the error. Negative: .turnLeft does.
-    var headingError: Float = 0
-    /// Obstacle-aware path distance to the goal (m); .infinity if unknown.
-    var pathDistance: Float = .infinity
-    var isDetouring = false
-    /// Smoothed speed toward the goal along the routed path (m/s).
-    var goalProgressRate: Float = 0
-    /// True once the character is on or beside the goal; steering is muted.
-    var atGoal = false
-
-    /// Free distance (m) in each sector of a horizontal ray fan.
-    var clearanceAhead: Float = 4
-    var clearancePlus: Float = 4
-    var clearanceMinus: Float = 4
-
-    var nearestObjectClass = "none"
-    var nearestObjectDistance: Float = .infinity
-    var nearestObjectPickupable = false
-    var nearestObjectMovable = false
-    var nearestObjectName = ""
-
-    /// Sentence about objects farther than about 3 m (from the wide scan).
-    var distantObjectSummary = ""
-
-    /// Heading of each successive 0.5 m cell along the routed path, relative
-    /// to the current heading (positive: reached by .turnRight). The CA
-    /// plans a short sequence of actions against this preview.
-    var routeRelativeHeadings: [Float] = []
-
-    /// Learned object/goal Q-values (from FrankensteinCALearner), per action.
-    var advisoryValues: [FrankensteinAction: Float] = [:]
-
-    /// Coarse discretisation of this perception, used for visit counts.
-    var stateKey = "none"
-
-    var timestamp: TimeInterval = 0
-}
-
-/// 18 x 18 cellular automaton and executive action controller.
-/// Learned Q-values are stored in dedicated action-neuron cells.
-/// Futility detection discourages actions associated with repetitive paths.
 final class FrankensteinCA: ObservableObject {
 
     let size = 18
@@ -60,25 +10,21 @@ final class FrankensteinCA: ObservableObject {
     @Published private(set) var generation: Int = 0
     @Published private(set) var isRunning = false
     @Published private(set) var liveCellCount: Int = 0
-    @Published private(set) var lastDecisionDescription =
-        "Waiting for perception"
+    @Published private(set) var lastDecisionDescription = "Waiting for perception"
 
     @Published var networkQGrid: [[Float]]
-
-    // MARK: - Cellular automaton storage
+    
+    // Plan Buffer storage and reactive publisher
+    @Published var planBuffer = FrankensteinPlanBuffer()
 
     private var grid: [[Bool]]
     private var nextGrid: [[Bool]]
     private let qTieBreakWeight: Float = 0.04
 
-    // MARK: - Perception-driven control
-
     private var perception: FrankensteinCAPerception?
     private var perceptionMaxAge: TimeInterval = 0.6
     private var lastTimestamp: TimeInterval = 0
 
-    // Visit counts (perception state -> action id -> n) drive a directed
-    // exploration bonus: rarely tried actions in a state get a boost.
     private var visitCounts: [String: [Int: Int]] = [:]
     private(set) var totalDecisions = 0
 
@@ -86,33 +32,21 @@ final class FrankensteinCA: ObservableObject {
     private let alignedHeadingTolerance: Float = 0.2
     private let steeringDeadband: Float = 0.12
 
-    /// Directed exploration strength; decays as experience accumulates.
     private var noveltyScale: Float {
         max(0.08, 0.5 * powf(0.9997, Float(totalDecisions)))
     }
 
-    /// Random-action probability; small and decaying.
     private var randomExploration: Float {
         max(0.01, 0.06 * powf(0.9995, Float(totalDecisions)))
     }
 
-    /// Per-term breakdown of the most recent decision, for diagnostics.
     private(set) var lastScoreBreakdown: [FrankensteinAction: String] = [:]
 
-    /// Latest perception pushed by the Coordinator. Call every frame.
     func receivePerception(_ newPerception: FrankensteinCAPerception) {
         perception = newPerception
         lastTimestamp = max(lastTimestamp, newPerception.timestamp)
         decayFutility(to: newPerception.timestamp)
     }
-
-    // MARK: - Goal-directed learning
-    //
-    // The CA learns what each action actually does for the goal: a running
-    // average of measured goal progress (metres/second along the routed path,
-    // plus heading-alignment gain) per perception state and action. Actions
-    // that moved the character toward the goal are sought; actions that did
-    // nothing are dropped, and a stuck character is pushed to try something else.
 
     private struct EffectStat {
         var mean: Float = 0
@@ -124,7 +58,6 @@ final class FrankensteinCA: ObservableObject {
     private var decisionHeadingError: Float = 0
     private var decisionAction: FrankensteinAction?
 
-    /// Seconds of (almost) no goal progress; decays quickly once progressing.
     @Published private(set) var stuckSeconds: Float = 0
     @Published private(set) var goalSeekingStatus = "No goal outcome yet"
     private(set) var outcomesObserved = 0
@@ -132,11 +65,6 @@ final class FrankensteinCA: ObservableObject {
     private let goalProgressGain: Float = 1.6
     private let stuckThreshold: Float = 1.5
 
-    /// Report what the last executed action achieved. Call once per
-    /// outcome window (about 4 Hz) from the Coordinator.
-    ///
-    /// - goalProgressRate: reduction of routed goal distance, m/s.
-    /// - blocked: the body did not move although it tried to.
     func reportActionOutcome(
         action: FrankensteinAction,
         goalProgressRate: Float,
@@ -148,12 +76,14 @@ final class FrankensteinCA: ObservableObject {
             return
         }
 
-        // Turning toward the route has value even though it moves nowhere.
         let currentError = perception?.headingError ?? decisionHeadingError
         let alignmentGain = (abs(decisionHeadingError) - abs(currentError)) / windowDuration
 
         var measured = goalProgressRate + 0.8 * alignmentGain
-        if blocked { measured -= 0.3 }
+        if blocked {
+            measured -= 0.3
+            planBuffer.markCurrentStepFailed()
+        }
         measured = max(-3, min(3, measured))
 
         var stat = effectModel[decisionStateKey]?[action.rawValue] ?? EffectStat()
@@ -177,7 +107,6 @@ final class FrankensteinCA: ObservableObject {
             "stuck \(String(format: "%.1f", stuckSeconds)) s | outcomes \(outcomesObserved)"
     }
 
-    /// Learned worth of an action in the current perception state.
     private func learnedGoalValue(
         for action: FrankensteinAction,
         stateKey: String
@@ -190,8 +119,6 @@ final class FrankensteinCA: ObservableObject {
         return goalProgressGain * tanhf(stat.mean / 0.6)
     }
 
-    /// Model-based part: how much goal progress this action should give
-    /// right now, from speeds, heading error, clearance and goal proximity.
     private func predictedGoalScore(
         for action: FrankensteinAction,
         perception p: FrankensteinCAPerception
@@ -201,13 +128,12 @@ final class FrankensteinCA: ObservableObject {
         let alignment = max(0, cosf(p.headingError))
         let nearGoal = p.pathDistance.isFinite && p.pathDistance < 1.2
 
-        // Expected forward progress per second.
         switch action {
         case .walk:
             score += 0.25 * 1.0 * alignment
         case .run:
             score += 0.25 * 2.2 * alignment
-            if nearGoal { score -= 0.8 }              // do not overshoot
+            if nearGoal { score -= 0.8 }
             if p.clearanceAhead < 2.0 { score -= 0.4 }
         case .stepForward:
             score += 0.25 * 0.5 * alignment
@@ -215,7 +141,6 @@ final class FrankensteinCA: ObservableObject {
             break
         }
 
-        // Shoving a movable block that stands in the way of the route.
         if action == .pushObject {
             if p.nearestObjectMovable, p.nearestObjectDistance <= 1.0 {
                 score += alignment > 0.7 ? 0.35 : -0.2
@@ -228,7 +153,6 @@ final class FrankensteinCA: ObservableObject {
             }
         }
 
-        // On the goal: hold still so contact is maintained.
         if p.atGoal {
             switch action {
             case .walk, .run, .stepForward, .jump, .backward, .roll, .pushObject:
@@ -240,8 +164,6 @@ final class FrankensteinCA: ObservableObject {
             }
         }
 
-        // Stuck: abandon the repeated action and try alternatives that
-        // can clear the obstruction.
         if stuckSeconds > stuckThreshold, !p.atGoal {
             let pressure = min(2, 0.5 * stuckSeconds)
 
@@ -265,7 +187,6 @@ final class FrankensteinCA: ObservableObject {
             }
         }
 
-        // Goal unknown or unreachable: scan by turning rather than walking blind.
         if !p.pathDistance.isFinite {
             switch action {
             case .turnLeft, .turnRight: score += 0.2
@@ -277,41 +198,28 @@ final class FrankensteinCA: ObservableObject {
         return score
     }
 
-    // MARK: - Sequence planning
-    //
-    // The perception layer previews the routed path as a list of headings.
-    // The CA rolls a small kinematic model forward over the next few actions
-    // (turn, walk, run, ...) and credits each first action with the best
-    // route progress reachable by some sequence that starts with it. A turn
-    // that sets up a long run therefore beats a walk that will have to turn
-    // anyway.
-
     private let planHorizon = 3
     private let planActionSeconds: Float = 0.35
-    private let planTurnPerAction: Float = 0.9 * 0.35   // 0.9 rad/s turn rate
+    private let planTurnPerAction: Float = 0.9 * 0.35
     private let planCellLength: Float = 0.5
     private let planGain: Float = 1.5
 
-    /// Best action sequence found by the last plan, for diagnostics.
     private(set) var plannedSequence: [FrankensteinAction] = []
 
     private struct Rollout {
-        var heading: Float = 0      // relative to the current heading
-        var progress: Float = 0     // metres advanced along the route
-        var used: Float = 0         // clearance consumed in the current sector
-        var wasted: Int = 0         // steps that could not advance
+        var heading: Float = 0
+        var progress: Float = 0
+        var used: Float = 0
+        var wasted: Int = 0
     }
 
     private func wrapped(_ angle: Float) -> Float {
         var value = angle
-
         while value > .pi { value -= 2 * .pi }
         while value < -.pi { value += 2 * .pi }
-
         return value
     }
 
-    /// Forward speed used by the plan model (m/s); nil for non-moving actions.
     private func planSpeed(_ action: FrankensteinAction) -> (speed: Float, blockable: Bool)? {
         switch action {
         case .walk:        return (1.0, true)
@@ -333,11 +241,8 @@ final class FrankensteinCA: ObservableObject {
         perception p: FrankensteinCAPerception
     ) -> Float {
         let route = p.routeRelativeHeadings
-
         guard !route.isEmpty else { return p.headingError }
-
         let cell = max(0, Int(progress / planCellLength))
-
         return route[min(cell, route.count - 1)]
     }
 
@@ -347,7 +252,6 @@ final class FrankensteinCA: ObservableObject {
     ) -> Float {
         if heading > 0.5 { return p.clearancePlus }
         if heading < -0.5 { return p.clearanceMinus }
-
         return p.clearanceAhead
     }
 
@@ -374,7 +278,6 @@ final class FrankensteinCA: ObservableObject {
         }
 
         guard let motion = planSpeed(action) else {
-            // Lift / place / throw / recover: time passes, nothing advances.
             next.wasted += 1
             return next
         }
@@ -403,7 +306,6 @@ final class FrankensteinCA: ObservableObject {
 
         next.progress = state.progress + advance
 
-        // Cannot usefully advance past the goal.
         if p.pathDistance.isFinite {
             next.progress = min(next.progress, p.pathDistance)
         }
@@ -417,7 +319,6 @@ final class FrankensteinCA: ObservableObject {
     ) -> Float {
         let routeNow = routeHeading(atProgress: state.progress, perception: p)
         let alignment = cosf(wrapped(routeNow - state.heading))
-
         return state.progress + 0.4 * alignment - 0.5 * Float(state.wasted)
     }
 
@@ -447,7 +348,6 @@ final class FrankensteinCA: ObservableObject {
         return best
     }
 
-    /// Plan value of starting with each permitted action.
     private func planValues(
         for actions: [FrankensteinAction],
         perception p: FrankensteinCAPerception
@@ -481,16 +381,12 @@ final class FrankensteinCA: ObservableObject {
 
         plannedSequence = bestSequence
 
-        // Relative to the best option so the term ranks actions without
-        // shifting every score.
         for (action, value) in values {
             values[action] = planGain * (value - bestValue)
         }
 
         return values
     }
-
-    // MARK: - Futility learning
 
     @Published private(set) var futilityCount: Int = 0
     @Published private(set) var futilityStatus = "No loop detected"
@@ -531,8 +427,6 @@ final class FrankensteinCA: ObservableObject {
         randomize()
         liveCellCount = countLiveCells()
     }
-
-    // MARK: - Cellular automaton
 
     func isActive(_ x: Int, _ y: Int) -> Bool {
         guard (0..<size).contains(x),
@@ -587,6 +481,7 @@ final class FrankensteinCA: ObservableObject {
         lastLoopPenaltyTime = 0
         futilityCount = 0
         futilityStatus = "No loop detected"
+        planBuffer.clear()
 
         lastDecisionDescription = "Reset"
     }
@@ -607,8 +502,6 @@ final class FrankensteinCA: ObservableObject {
         generation += 1
         liveCellCount = countLiveCells()
     }
-
-    // MARK: - Action-neuron layout
 
     private func actionNeuronPosition(
         for action: FrankensteinAction
@@ -635,8 +528,6 @@ final class FrankensteinCA: ObservableObject {
         }
     }
 
-    // MARK: - Q-value network API
-
     func qValue(atX x: Int, y: Int) -> Float {
         guard (0..<size).contains(x),
               (0..<size).contains(y) else {
@@ -654,7 +545,6 @@ final class FrankensteinCA: ObservableObject {
         return networkQGrid[position.y][position.x]
     }
 
-    /// Loads policy Q-values into their corresponding CA cells.
     func setQValues(_ qValues: [FrankensteinAction: Float]) {
         for y in 0..<size {
             for x in 0..<size {
@@ -691,19 +581,12 @@ final class FrankensteinCA: ObservableObject {
         ]
     }
 
-    // MARK: - Futility observation
-
-    /// Call using the action actually executed and the character's
-    /// actual scene position, not merely the requested action.
-    ///
-    /// Position samples must be supplied regularly by Coordinator.
     func observeMovementForFutility(
         action: FrankensteinAction,
         x: Float,
         z: Float,
         timestamp: TimeInterval = Date.timeIntervalSinceReferenceDate
     ) {
-        // The Coordinator calls this every frame, so it doubles as the CA's clock.
         lastTimestamp = max(lastTimestamp, timestamp)
         decayFutility(to: timestamp)
 
@@ -721,8 +604,6 @@ final class FrankensteinCA: ObservableObject {
             action: action
         )
 
-        // Look for a return to a previous position after enough time
-        // and several intervening samples.
         var matchingSample: PositionSample?
 
         if recentPositions.count >= 8 {
@@ -752,8 +633,6 @@ final class FrankensteinCA: ObservableObject {
             return
         }
 
-        // Prevent the same short loop from being penalized repeatedly
-        // on every sample.
         guard timestamp - lastLoopPenaltyTime >= loopMinimumAge else {
             return
         }
@@ -761,8 +640,6 @@ final class FrankensteinCA: ObservableObject {
         lastLoopPenaltyTime = timestamp
         futilityCount += 1
 
-        // Penalize the current action and actions recorded along the
-        // repeated segment. This helps when turning actions alternate.
         var actionsToPenalize: Set<FrankensteinAction> = [action]
 
         for sample in recentPositions
@@ -781,17 +658,11 @@ final class FrankensteinCA: ObservableObject {
 
         futilityStatus =
             "Loop detected #\(futilityCount); reconsidering actions"
-
-        print("[CA Futility] Repeated position detected.")
-        print("[CA Futility] Actions penalized: \(actionsToPenalize)")
-        print("[CA Futility] Penalties: \(futilityPenalties)")
     }
 
     private var lastFutilityDecayTime: TimeInterval = 0
     private let futilityHalfLife: TimeInterval = 15
 
-    /// Penalties fade with a 15 s half-life so an action that failed once
-    /// in one place is not avoided forever.
     private func decayFutility(to timestamp: TimeInterval) {
         defer { lastFutilityDecayTime = timestamp }
 
@@ -815,8 +686,6 @@ final class FrankensteinCA: ObservableObject {
         }
     }
 
-    /// Called when the character is measurably making progress, so the
-    /// executed action stops carrying loop penalties.
     func forgiveFutility(for action: FrankensteinAction, amount: Float = 0.5) {
         guard let penalty = futilityPenalties[action] else { return }
 
@@ -825,12 +694,9 @@ final class FrankensteinCA: ObservableObject {
         futilityPenalties[action] = reduced > 0.05 ? reduced : nil
     }
 
-    /// Diagnostic access to the current penalty for an action.
     func futilityPenalty(for action: FrankensteinAction) -> Float {
         futilityPenalties[action, default: 0]
     }
-
-    // MARK: - Network scoring
 
     private func networkActivitySignal(
         for action: FrankensteinAction
@@ -847,12 +713,9 @@ final class FrankensteinCA: ObservableObject {
         return Float(neighbors) / 8.0 * qTieBreakWeight
     }
 
-    /// Fresh perception, or nil if none has arrived recently.
     private func currentPerception() -> FrankensteinCAPerception? {
         guard let perception else { return nil }
 
-        // Compare against the newest timestamp seen, so a stale context
-        // (Coordinator paused or detached) stops steering the CA.
         guard lastTimestamp - perception.timestamp <= perceptionMaxAge else {
             return nil
         }
@@ -869,7 +732,6 @@ final class FrankensteinCA: ObservableObject {
         }
     }
 
-    /// Turning toward the routed heading, moving forward only when aligned.
     private func steeringScore(
         for action: FrankensteinAction,
         perception p: FrankensteinCAPerception
@@ -899,7 +761,6 @@ final class FrankensteinCA: ObservableObject {
             return -0.8 * magnitude
 
         case .backward:
-            // Only reasonable when the goal is almost directly behind.
             return abs(error) > 2.6 ? 0.1 : -0.3
 
         default:
@@ -907,8 +768,6 @@ final class FrankensteinCA: ObservableObject {
         }
     }
 
-    /// Free-space reasoning from the ray fan: avoid driving into things,
-    /// turn toward the side with more room, run only in open space.
     private func clearanceScore(
         for action: FrankensteinAction,
         perception p: FrankensteinCAPerception
@@ -951,9 +810,6 @@ final class FrankensteinCA: ObservableObject {
         return noveltyScale / sqrtf(1 + Float(count))
     }
 
-    /// The outcome of the next window is credited to this decision. A
-    /// repeated decision keeps its original heading error so a multi-frame
-    /// turn is measured over the whole window.
     private func rememberDecision(
         _ action: FrankensteinAction,
         stateKey: String,
@@ -992,8 +848,6 @@ final class FrankensteinCA: ObservableObject {
         }
     }
 
-    /// Terrain priors so the CA picks competent maneuvers before Q-values
-    /// have been learned. Only used with live perception.
     private func terrainScore(
         for action: FrankensteinAction,
         terrain t: FrankensteinTerrainSample
@@ -1009,7 +863,6 @@ final class FrankensteinCA: ObservableObject {
             switch action {
             case .stepUp: return low ? 0.7 : -0.5
             case .jump:
-                // Onto a movable block counts as a valid, preferred landing.
                 if t.canLandOnObject { return 0.6 }
                 return t.isLandingAreaClear ? 0.45 : -0.5
             case .pushObject: return t.objectMovable ? 0.2 : -1.0
@@ -1065,14 +918,7 @@ final class FrankensteinCA: ObservableObject {
         return parts
     }
 
-    // MARK: - Executive action decision
-
-    /// Chooses the action. The CA owns the decision: it sums
-    ///   learned policy Q  +  learned object/goal advice  +  routed-path
-    ///   steering  +  free-space clearance  +  directed-exploration bonus
-    ///   +  cellular activity  -  futility penalty
-    /// over the permitted actions. Environmental safety stays in the
-    /// permitted-action filter and in FrankensteinLocomotion.
+    // MARK: - Executive decision with Plan Buffer evaluation
     func decideAction(
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
@@ -1085,14 +931,14 @@ final class FrankensteinCA: ObservableObject {
             return .walk
         }
 
-        // Load current policy values before scoring.
         setQValues(qValues)
 
         let p = currentPerception()
         let stateKey = p?.stateKey ?? "none"
 
-        // Occasional random action among permitted ones. Recovery is never
-        // a random choice.
+        // Synchronize Plan Buffer with fresh perception sequence
+        updatePlanBuffer(perception: p, terrain: terrain)
+
         let epsilon = max(exploration, randomExploration)
 
         if Float.random(in: 0..<1) < epsilon,
@@ -1109,6 +955,11 @@ final class FrankensteinCA: ObservableObject {
             lastDecisionDescription =
                 "Action=\(random) | exploring (eps=\(epsilon)) | futility-aware"
 
+            planBuffer.insertImmediateStep(
+                PlanStep(action: random, description: "Exploration step")
+            )
+            planBuffer.markCurrentStepCompleted()
+
             return random
         }
 
@@ -1116,60 +967,42 @@ final class FrankensteinCA: ObservableObject {
             planValues(for: allowedActions, perception: $0)
         } ?? [:]
 
-        var selected = allowedActions[0]
-        var bestParts = scoreParts(
-            for: selected,
-            perception: p,
-            terrain: terrain,
-            plan: plan
-        )
-        var breakdown: [FrankensteinAction: String] = [:]
-
-        func describe(_ parts: ScoreParts) -> String {
-            let head = "Q=\(parts.q) adv=\(parts.advisory) steer=\(parts.steering)"
-            let mid = "clear=\(parts.clearance) terr=\(parts.terrain) goal=\(parts.goal) plan=\(parts.plan) nov=\(parts.novelty) act=\(parts.activity)"
-            let tail = "fut=-\(parts.futility) => \(parts.total)"
-
-            return "\(head) \(mid) \(tail)"
-        }
-
-        breakdown[selected] = describe(bestParts)
-
-        for action in allowedActions.dropFirst() {
-            let parts = scoreParts(
-                for: action,
+        // Evaluate whether to execute from buffer or select optimal network score
+        let selected: FrankensteinAction
+        if let step = planBuffer.currentStep, allowedActions.contains(step.action) {
+            selected = step.action
+            planBuffer.markCurrentStepCompleted()
+        } else {
+            var candidate = allowedActions[0]
+            var bestParts = scoreParts(
+                for: candidate,
                 perception: p,
                 terrain: terrain,
                 plan: plan
             )
 
-            breakdown[action] = describe(parts)
+            for action in allowedActions.dropFirst() {
+                let parts = scoreParts(
+                    for: action,
+                    perception: p,
+                    terrain: terrain,
+                    plan: plan
+                )
 
-            if parts.total > bestParts.total {
-                selected = action
-                bestParts = parts
+                if parts.total > bestParts.total {
+                    candidate = action
+                    bestParts = parts
+                }
             }
+            selected = candidate
+            planBuffer.insertImmediateStep(
+                PlanStep(action: selected, description: phrase(for: selected, terrain: terrain, perception: p))
+            )
+            planBuffer.markCurrentStepCompleted()
         }
 
-        lastScoreBreakdown = breakdown
         recordVisit(action: selected, stateKey: stateKey)
         rememberDecision(selected, stateKey: stateKey, perception: p)
-
-        let cellDescription: String
-
-        if let position = actionNeuronPosition(for: selected) {
-            cellDescription = "cell=(\(position.x),\(position.y))"
-        } else {
-            cellDescription = "cell=unmapped"
-        }
-
-        let perceptionStatus = p == nil ? "stale" : "live"
-        let terms = describe(bestParts)
-
-        lastDecisionDescription =
-            "Action=\(selected) | \(terms) | \(cellDescription) | " +
-            "terrain=\(terrain.terrain) | fallen=\(body.fallen) | " +
-            "perception=\(perceptionStatus)"
 
         planNarrative = buildNarrative(
             selected: selected,
@@ -1177,27 +1010,34 @@ final class FrankensteinCA: ObservableObject {
             perception: p
         )
 
-        print("[CA] Executive selected: \(selected)")
-        print("[CA] Score terms: \(describe(bestParts))")
-        print("[CA] Planned sequence: \(plannedSequence)")
-        print("[CA] Permitted actions: \(allowedActions)")
-        print("[CA] Perception state: \(stateKey)")
-        print("[CA] Futility count: \(futilityCount)")
-        print("[CA] Generation=\(generation), live cells=\(liveCellCount)")
-
         return selected
     }
 
-    // MARK: - Plan narrative (what the CA is planning, in words)
+    private func updatePlanBuffer(
+        perception p: FrankensteinCAPerception?,
+        terrain: FrankensteinTerrainSample
+    ) {
+        guard let p else { return }
 
-    /// First-person account of the goal, the plan and the reasons. Refreshed
-    /// on every decision; the Coordinator forwards it to the UI.
+        let newSteps = plannedSequence.map { action in
+            PlanStep(
+                action: action,
+                description: phrase(for: action, terrain: terrain, perception: p)
+            )
+        }
+
+        if planBuffer.isEmpty {
+            planBuffer.setPlan(newSteps)
+        } else {
+            planBuffer.adaptPlan(with: newSteps)
+        }
+    }
+
     private(set) var planNarrative = "Waiting for perception…"
 
     private func plainName(_ raw: String) -> String {
         guard !raw.isEmpty else { return "object" }
 
-        // "MovableBlock" / "PickupCrate1" -> "movable block" / "pickup crate"
         var words = ""
 
         for character in raw {
@@ -1259,7 +1099,6 @@ final class FrankensteinCA: ObservableObject {
 
         var lines: [String] = []
 
-        // Goal
         if p.atGoal {
             lines.append("Goal: I am on the recharge station. I will hold still to charge.")
         } else if p.pathDistance.isFinite {
@@ -1271,7 +1110,6 @@ final class FrankensteinCA: ObservableObject {
             lines.append("Goal: find the recharge station. I do not have a route yet, so I am looking around.")
         }
 
-        // Now and next
         let now = phrase(for: selected, terrain: terrain, perception: p)
 
         var next: [String] = []
@@ -1286,7 +1124,6 @@ final class FrankensteinCA: ObservableObject {
             lines.append("Now: I will \(now). Then: \(next.joined(separator: ", then ")).")
         }
 
-        // Why
         var reasons: [String] = []
 
         let object = plainName(p.nearestObjectName)
@@ -1340,8 +1177,6 @@ final class FrankensteinCA: ObservableObject {
 
         return lines.joined(separator: "\n")
     }
-
-    // MARK: - Cellular activity
 
     private func countLiveNeighbors(x: Int, y: Int) -> Int {
         var count = 0
