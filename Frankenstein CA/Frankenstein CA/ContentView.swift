@@ -9,6 +9,7 @@ struct ContentView: View {
     @State private var generation = 0
     @State private var liveCells = 0
     @State private var resetRequested = false
+    @State private var visibleObjects: [DetectedObjectInfo] = []
  
     var body: some View {
         VStack(spacing: 0) {
@@ -28,6 +29,7 @@ struct ContentView: View {
                     resetRequested.toggle()
                     generation = 0
                     liveCells = 0
+                    visibleObjects = []
                 } label: {
                     Label("Reset", systemImage: "arrow.counterclockwise")
                 }
@@ -38,8 +40,11 @@ struct ContentView: View {
             FrankensteinSceneView(
                 generation: $generation,
                 liveCells: $liveCells,
-                resetRequested: $resetRequested
+                resetRequested: $resetRequested,
+                visibleObjects: $visibleObjects
             )
+
+            VisibleObjectsList(objects: visibleObjects)
 
             HStack(spacing: 24) {
                 VStack {
@@ -77,6 +82,68 @@ struct ContentView: View {
     }
 }
 
+
+// MARK: - Objects the robot sees
+
+struct VisibleObjectsList: View {
+    let objects: [DetectedObjectInfo]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label("Robot sees", systemImage: "eye")
+                    .font(.caption.bold())
+
+                Text("\(objects.count)")
+                    .font(.caption.monospacedDigit())
+                    .padding(.horizontal, 6)
+                    .background(.quaternary, in: Capsule())
+
+                Spacer()
+            }
+
+            if objects.isEmpty {
+                Text("Nothing in view")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    VStack(spacing: 4) {
+                        ForEach(objects.indices, id: \.self) { index in
+                            row(objects[index])
+                        }
+                    }
+                }
+                .frame(maxHeight: 130)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(.thinMaterial)
+    }
+
+    private func row(_ object: DetectedObjectInfo) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: object.pickupable ? "hand.raised" : "cube")
+                .frame(width: 18)
+                .foregroundStyle(object.pickupable ? .orange : .secondary)
+
+            Text(object.name)
+                .font(.caption.bold())
+                .lineLimit(1)
+
+            Spacer()
+
+            Text(object.dimensionsText)
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+
+            Text(object.distanceText)
+                .font(.caption.monospacedDigit())
+                .frame(width: 56, alignment: .trailing)
+        }
+    }
+}
 
 #Preview {
     ContentView()

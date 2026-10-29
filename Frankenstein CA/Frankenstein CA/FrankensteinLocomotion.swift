@@ -644,10 +644,10 @@ final class FrankensteinLocomotion {
     ) {
         lastSafetyOverride = "none"
 
+        // A fallen body leaves recover as the only candidate; the CA still
+        // makes that decision rather than locomotion assigning it.
         if body.fallen {
-            currentAction = .recover
-            lastSafetyOverride = "recovery required"
-            return
+            lastSafetyOverride = "recovery is the only permitted action"
         }
 
         // Candidate generation enforces terrain constraints before the CA decides.
@@ -688,9 +688,27 @@ final class FrankensteinLocomotion {
                 objectObservation: objectObservation
             )
         } else if policy.pendingAction != chosen {
-            // Never attribute the pending reward to a different action.
-            currentAction = policy.pendingAction ?? chosen
-            lastSafetyOverride = "held action until its outcome is recorded"
+            if let pending = policy.pendingAction,
+               candidates.contains(pending),
+               actionElapsed < 0.35 {
+                // The CA's own earlier choice is still inside its learning
+                // window; keep it so its reward is attributed correctly.
+                currentAction = pending
+                lastSafetyOverride = "CA commitment held until its outcome is recorded"
+            } else {
+                // The earlier choice is no longer permitted (new hazard) or
+                // its window is over: the CA's new decision wins and the
+                // stale learning transition is dropped, not credited.
+                policy.resetEpisode()
+                actionElapsed = 0
+                _ = policy.beginCAChosenAction(
+                    chosen,
+                    terrain: terrain,
+                    body: body,
+                    objectObservation: objectObservation
+                )
+                lastSafetyOverride = "CA decision replaced a commitment that was no longer permitted"
+            }
         }
 
         print("[CA] Executive decision: \(currentAction)")

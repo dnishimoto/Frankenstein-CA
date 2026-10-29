@@ -11,6 +11,7 @@ struct FrankensteinSceneView: UIViewRepresentable {
     @Binding var generation: Int
     @Binding var liveCells: Int
     @Binding var resetRequested: Bool
+    @Binding var visibleObjects: [DetectedObjectInfo]
 
     // Keep one CA instance for the lifetime of this view value.
     // The coordinator and UI statistics must refer to this same instance.
@@ -89,6 +90,17 @@ struct FrankensteinSceneView: UIViewRepresentable {
 
         // Attach the same CA instance used for the displayed statistics.
         context.coordinator.attachCA(ca)
+
+        // Publish the objects the robot currently sees to SwiftUI. The
+        // coordinator reports at sensor rate; only changes are forwarded,
+        // and at most about five times per second.
+        let throttle = VisibleObjectsThrottle()
+
+        context.coordinator.onDetectedObjects = { objects in
+            guard throttle.shouldPublish(objects) else { return }
+
+            self.visibleObjects = objects
+        }
 
         // Publish CA generation and live-cell updates to SwiftUI.
         context.coordinator.onCAStats = { generation, liveCells in
@@ -443,5 +455,34 @@ struct FrankensteinSceneView: UIViewRepresentable {
         root.addChildNode(leftHand)
 
         return root
+    }
+}
+
+// MARK: - Visible-object publishing
+
+/// Keeps the SwiftUI object list from re-rendering at sensor rate.
+final class VisibleObjectsThrottle {
+    private var lastSignature = ""
+    private var lastTime: TimeInterval = 0
+
+    private let minimumInterval: TimeInterval = 0.2
+
+    func shouldPublish(_ objects: [DetectedObjectInfo]) -> Bool {
+        // Name plus 0.1 m distance bucket: ignores sub-centimetre jitter.
+        let signature = objects
+            .map { "\($0.name)@\(Int(($0.distance * 10).rounded()))" }
+            .joined(separator: "|")
+
+        let now = Date.timeIntervalSinceReferenceDate
+
+        guard signature != lastSignature,
+              now - lastTime >= minimumInterval else {
+            return false
+        }
+
+        lastSignature = signature
+        lastTime = now
+
+        return true
     }
 }

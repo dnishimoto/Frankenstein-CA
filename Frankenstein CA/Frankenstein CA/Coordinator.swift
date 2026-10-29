@@ -5,14 +5,19 @@ import SwiftUI
 import UIKit
 
 final class Coordinator: NSObject, SCNSceneRendererDelegate {
-    private var goalCorrectionActiveUntil: TimeInterval = 0
     private var currentFrameTime: TimeInterval = 0
     private let requiredRechargeContactDuration: TimeInterval = 1.0
     private var hasCompletedRechargeGoal = false
 
-    private let pathTurnRate: Float = 2.4          // rad/s toward routed heading
-    private let pathHeadingHold: TimeInterval = 0.12
-    private let pathAlignmentDeadband: Float = 0.05
+    // CA perception state (the CA, not the Coordinator, turns the character
+    // by choosing turnLeft / turnRight; these values are only its inputs).
+    private var clearanceAhead: Float = 4
+    private var clearancePlus: Float = 4     // side reached by .turnRight
+    private var clearanceMinus: Float = 4    // side reached by .turnLeft
+    private var goalProgressRate: Float = 0
+    private var lastPathDistance: Float = .infinity
+    private var lastPathDistanceTime: TimeInterval = 0
+    private let clearanceRange: Float = 3.0
 
     private var lastGoalDistance: Float = .infinity
 
@@ -125,6 +130,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private var outcomeWindowElapsedTime: TimeInterval = 0
     private var outcomeWindowDisplacement: Float = 0
     private var outcomeWindowGoalProgress: Float = 0
+    private var outcomeWindowPathProgress: Float = 0
+    private var lastEvalPathDistance: Float = .infinity
     private let outcomeWindowDuration: TimeInterval = 0.25
 
     private var lastEvaluatedActionName = ""
@@ -552,6 +559,12 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         executive.reset()
         pathSteering = nil
         pathGoalDistance = .infinity
+        goalProgressRate = 0
+        lastPathDistance = .infinity
+        lastPathDistanceTime = 0
+        clearanceAhead = clearanceRange
+        clearancePlus = clearanceRange
+        clearanceMinus = clearanceRange
 
         latestDetections.removeAll()
         latestDetectionNodes.removeAll()
@@ -569,6 +582,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         outcomeWindowElapsedTime = 0
         outcomeWindowDisplacement = 0
         outcomeWindowGoalProgress = 0
+        outcomeWindowPathProgress = 0
+        lastEvalPathDistance = .infinity
 
         lastEvaluatedActionName = ""
         lastDisplayedActionName = ""
@@ -638,9 +653,15 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             )
 
             // CA: identified objects -> distance-path field.
+            let fanObstacles = scanClearanceFan(
+                from: character,
+                in: scene
+            )
+
             updatePathField(
                 character: character,
                 detections: latestDetections,
+                extraObstacles: fanObstacles,
                 time: time
             )
 
@@ -741,6 +762,12 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             )
         }
 
+        pushPerceptionToCA(
+            terrain: latestTerrainSample,
+            allowedActions: perceivedActions,
+            time: time
+        )
+
         let output = locomotion.step(
             deltaTime: dt,
             terrain: latestTerrainSample,
@@ -755,14 +782,11 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             objectObservation: objectObservation
         )
 
-        // MARK: 5. Apply CA decision (path steering first, then movement)
-
-        applyPathSteering(
-            output: output,
-            character: character,
-            deltaTime: dt,
-            time: time
-        )
+        // MARK: 5. Apply CA decision
+        //
+        // The CA chooses turnLeft / turnRight itself from the routed path
+        // and ray-fan clearance, so the Coordinator no longer overrides the
+        // heading; output.heading is the single source of truth.
 
         applyMovement(
             output: output,
@@ -770,6 +794,29 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             character: character,
             scene: scene
         )
+
+        // Loop detection uses the executed action and the real position.
+        let finalPosition = character.presentation.worldPosition
+
+        // Actions that are stationary by design (turning, recovering,
+        // object handling) must not look like a futile loop.
+        let stationaryByDesign: Set<FrankensteinAction> = [
+            .turnLeft, .turnRight, .recover,
+            .liftObject, .placeObject, .throwObject
+        ]
+
+        if !stationaryByDesign.contains(output.action) {
+            ca?.observeMovementForFutility(
+                action: output.action,
+                x: Float(finalPosition.x),
+                z: Float(finalPosition.z),
+                timestamp: time
+            )
+        }
+
+        if goalProgressRate > 0.15 {
+            ca?.forgiveFutility(for: output.action, amount: 0.05)
+        }
 
         // MARK: 6. Evaluate measured outcome
 
@@ -784,7 +831,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         animateCharacter(character: character)
 
         updateCarriedObject()
-        updateDoorInteraction()
+        updateDoorInteraction(executedAction: output.action)
 
         let policyUpdates = locomotion.policy.updateCount
 
@@ -822,6 +869,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private func updatePathField(
         character: SCNNode,
         detections: [DetectedObjectInfo],
+        extraObstacles: [FrankensteinCAPathField.Obstacle],
         time: TimeInterval
     ) {
         let c = character.presentation.worldPosition
@@ -857,47 +905,277 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             )
         }
 
+        obstacles.append(contentsOf: extraObstacles)
+
         executive.field.observe(obstacles, time: time)
         executive.field.rebuild(character: characterXZ, goal: goalXZ)
 
         pathSteering = executive.field.steering()
         pathGoalDistance = pathSteering?.pathDistance ?? .infinity
+
+        // Smoothed progress toward the goal along the routed path (m/s).
+        if pathGoalDistance.isFinite,
+           lastPathDistance.isFinite,
+           lastPathDistanceTime > 0,
+           time > lastPathDistanceTime {
+            let instant = (lastPathDistance - pathGoalDistance) /
+                Float(time - lastPathDistanceTime)
+
+            if instant.isFinite {
+                goalProgressRate = 0.85 * goalProgressRate + 0.15 * instant
+            }
+        }
+
+        lastPathDistance = pathGoalDistance
+        lastPathDistanceTime = time
     }
 
-    /// Replaces the old cooldown-based goal correction: the character turns
-    /// smoothly toward the CA-routed heading while walking or running.
-    private func applyPathSteering(
-        output: FrankensteinLocomotionOutput,
-        character: SCNNode,
-        deltaTime dt: Float,
+    // MARK: - Ray Fan (free space + wall memory)
+
+    /// Casts a horizontal fan of rays around the heading. Produces the
+    /// three clearance sectors the CA reasons with, plus small obstacle
+    /// points (walls and unnamed solids) so the path field can remember
+    /// what the rays hit even when no "object" was identified.
+    private func scanClearanceFan(
+        from character: SCNNode,
+        in scene: SCNScene
+    ) -> [FrankensteinCAPathField.Obstacle] {
+        let position = character.presentation.worldPosition
+
+        let angles: [Float] = [-60, -40, -20, 0, 20, 40, 60]
+        let range = clearanceRange
+
+        var ahead = range
+        var plus = range
+        var minus = range
+
+        var points: [FrankensteinCAPathField.Obstacle] = []
+
+        let options: [String: Any] = [
+            SCNHitTestOption.ignoreHiddenNodes.rawValue: true,
+            SCNHitTestOption.backFaceCulling.rawValue: true
+        ]
+
+        for degrees in angles {
+            let theta = heading + degrees * .pi / 180
+
+            // Same forward convention as forwardVector().
+            let dx = -sin(theta)
+            let dz = -cos(theta)
+
+            let origin = SCNVector3(
+                position.x,
+                position.y + 0.5,
+                position.z
+            )
+
+            let end = SCNVector3(
+                origin.x + dx * range,
+                origin.y,
+                origin.z + dz * range
+            )
+
+            let hits = scene.rootNode.hitTestWithSegment(
+                from: origin,
+                to: end,
+                options: options
+            )
+
+            var distance = range
+
+            for hit in hits {
+                let node = hit.node
+                let name = (node.name ?? "").lowercased()
+
+                guard !isCharacterPart(node),
+                      !isFloorSurface(node),
+                      !isQGridNode(node),
+                      !name.contains("marker"),
+                      !name.contains("rechargestation"),
+                      !name.contains("floor"),
+                      !name.contains("ground") else {
+                    continue
+                }
+
+                // Ignore ground-like slabs the ray happens to graze.
+                if hit.worldNormal.y > 0.85 { continue }
+
+                let hx = Float(hit.worldCoordinates.x - origin.x)
+                let hz = Float(hit.worldCoordinates.z - origin.z)
+                let hitDistance = sqrt(hx * hx + hz * hz)
+
+                guard hitDistance >= Self.minimumHitDistance else {
+                    continue
+                }
+
+                distance = min(range, hitDistance)
+
+                let target = meaningfulDetectionParent(for: node)
+
+                if !isContainerNode(target) {
+                    let className = objectClass(
+                        for: readableName(for: target)
+                    )
+
+                    if className != "rechargeStation" {
+                        points.append(
+                            FrankensteinCAPathField.Obstacle(
+                                center: SIMD2<Float>(
+                                    Float(hit.worldCoordinates.x),
+                                    Float(hit.worldCoordinates.z)
+                                ),
+                                halfExtent: SIMD2<Float>(0.15, 0.15),
+                                className: className
+                            )
+                        )
+                    }
+                }
+
+                break
+            }
+
+            switch degrees {
+            case -20...20:
+                ahead = min(ahead, distance)
+            case 21...:
+                plus = min(plus, distance)
+            default:
+                minus = min(minus, distance)
+            }
+        }
+
+        clearanceAhead = ahead
+        clearancePlus = plus
+        clearanceMinus = minus
+
+        return points
+    }
+
+    // MARK: - CA Perception Hand-off
+
+    private func wrappedAngle(_ value: Float) -> Float {
+        var angle = value
+
+        while angle > .pi { angle -= 2 * .pi }
+        while angle < -.pi { angle += 2 * .pi }
+
+        return angle
+    }
+
+    private func headingBand(_ error: Float) -> String {
+        switch abs(error) {
+        case ..<0.2:
+            return "aligned"
+        case ..<0.8:
+            return error > 0 ? "slightPlus" : "slightMinus"
+        case ..<2.4:
+            return error > 0 ? "farPlus" : "farMinus"
+        default:
+            return "behind"
+        }
+    }
+
+    private func clearanceBand(_ value: Float) -> String {
+        switch value {
+        case ..<0.9:
+            return "blocked"
+        case ..<2.0:
+            return "tight"
+        default:
+            return "open"
+        }
+    }
+
+    /// Builds the perception the CA scores actions against, and hands it
+    /// over. Called every frame, immediately before locomotion.step.
+    private func pushPerceptionToCA(
+        terrain: FrankensteinTerrainSample,
+        allowedActions: [FrankensteinAction],
         time: TimeInterval
     ) {
-        guard output.action == .walk || output.action == .run,
-              let steering = pathSteering else {
-            return
+        guard let ca else { return }
+
+        var perception = FrankensteinCAPerception()
+
+        let routedHeading = pathSteering?.heading ?? heading
+        perception.headingError = pathSteering == nil
+            ? 0
+            : wrappedAngle(routedHeading - heading)
+
+        perception.pathDistance = pathGoalDistance
+        perception.isDetouring = pathSteering?.isDetouring ?? false
+        perception.goalProgressRate = goalProgressRate
+
+        perception.atGoal =
+            hasReportedRecharge ||
+            (pathGoalDistance.isFinite && pathGoalDistance < 0.35)
+
+        perception.clearanceAhead = clearanceAhead
+        perception.clearancePlus = clearancePlus
+        perception.clearanceMinus = clearanceMinus
+
+        if let detection = latestDetection {
+            perception.nearestObjectClass = objectClass(for: detection.name)
+            perception.nearestObjectDistance = detection.distance
+            perception.nearestObjectPickupable = detection.pickupable
         }
 
-        var error = steering.heading - heading
+        // Route preview: the next ~4 m of the routed path as headings
+        // relative to where the character faces now.
+        perception.routeRelativeHeadings = executive.field
+            .routePreview(maxCells: 8)
+            .map { wrappedAngle($0 - heading) }
 
-        while error > .pi { error -= 2 * .pi }
-        while error < -.pi { error += 2 * .pi }
+        // Learned object/goal advice, per permitted action.
+        let goalValues = executive.learner.values(
+            for: goalStateKey(terrain: terrain)
+        )
 
-        guard abs(error) > pathAlignmentDeadband else {
-            goalCorrectionActiveUntil = time + pathHeadingHold
-            return
-        }
-
-        let maxTurn = pathTurnRate * dt
-        heading += min(max(error, -maxTurn), maxTurn)
-
-        goalCorrectionActiveUntil = time + pathHeadingHold
-
-        if steering.isDetouring {
-            publishDebug(
-                "CA path: detouring around identified objects; " +
-                "routed distance=\(String(format: "%.2f", steering.pathDistance)) m."
+        let objectValues = latestDetection.map {
+            executive.learner.values(
+                for: objectStateKey(for: $0, terrain: terrain)
             )
+        } ?? [:]
+
+        var advisory: [FrankensteinAction: Float] = [:]
+
+        // Advice for every action: the CA's permitted set comes from the
+        // locomotion policy and can differ from this coordinator's filter.
+        for action in FrankensteinAction.allCases {
+            let name = String(describing: action)
+
+            advisory[action] =
+                0.35 * (goalValues[name] ?? 0) +
+                0.20 * (objectValues[name] ?? 0)
         }
+
+        // Direct reflex (as a CA input, not an override): a pickupable block
+        // within reach with empty hands strongly favours lifting it and
+        // discourages jumping over it.
+        if let detection = latestDetection,
+           carriedNode == nil,
+           detection.pickupable,
+           detection.distance <= pickupDistance {
+            advisory[.liftObject, default: 0] += 5.0
+            advisory[.jump, default: 0] -= 5.0
+        }
+
+        perception.advisoryValues = advisory
+
+        perception.stateKey = [
+            String(describing: terrain.terrain),
+            headingBand(perception.headingError),
+            clearanceBand(clearanceAhead),
+            perception.nearestObjectClass,
+            perception.nearestObjectDistance.isFinite
+                ? distanceBand(perception.nearestObjectDistance)
+                : "none",
+            carriedNode != nil ? "carrying" : "empty"
+        ].joined(separator: "|")
+
+        perception.timestamp = time
+
+        ca.receivePerception(perception)
     }
 
     // MARK: - Advisory Values
@@ -1290,6 +1568,10 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         if value.contains("recharge") {
             return "rechargeStation"
+        }
+
+        if value.contains("wall") {
+            return "wall"
         }
 
         if value.contains("door") {
@@ -1813,11 +2095,9 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         ) {
             guard dt.isFinite, dt > 0 else { return }
 
-            // Preserve the CA-routed heading while path steering is active so
-            // the locomotion output cannot immediately overwrite it.
-            if currentFrameTime >= goalCorrectionActiveUntil {
-                heading = output.heading
-            }
+            // The CA turns the character through turnLeft / turnRight actions,
+            // so the locomotion heading is authoritative.
+            heading = output.heading
 
             // Calculate forward from the resolved heading.
             let forward = forwardVector()
@@ -2027,6 +2307,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             if finalFeetY < -3.0 && !hasReportedFall {
                 hasReportedFall = true
                 locomotion.completeEpisode(.fell)
+                executive.learner.clearTraces()
 
                 reinforceOutcome(
                     stateKey: goalStateKey(
@@ -2118,6 +2399,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             outcomeWindowElapsedTime = 0
             outcomeWindowDisplacement = 0
             outcomeWindowGoalProgress = 0
+            outcomeWindowPathProgress = 0
+            lastEvalPathDistance = pathGoalDistance
 
             previousGoalStateKey = currentStateKey
             previousGoalAction = action
@@ -2144,9 +2427,30 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         outcomeWindowDisplacement += displacement
         outcomeWindowGoalProgress += goalProgress
 
+        // Progress along the obstacle-aware route (what the CA is judged on).
+        if pathGoalDistance.isFinite, lastEvalPathDistance.isFinite {
+            outcomeWindowPathProgress += lastEvalPathDistance - pathGoalDistance
+        }
+
+        lastEvalPathDistance = pathGoalDistance
+
         guard outcomeWindowElapsedTime >= outcomeWindowDuration else {
             return
         }
+
+        // Tell the CA what its action achieved for the goal.
+        let movingActions: Set<FrankensteinAction> = [
+            .walk, .run, .stepForward, .crouch, .crawl, .roll
+        ]
+
+        ca?.reportActionOutcome(
+            action: action,
+            goalProgressRate: outcomeWindowPathProgress /
+                Float(outcomeWindowElapsedTime),
+            windowDuration: Float(outcomeWindowElapsedTime),
+            blocked: movingActions.contains(action) &&
+                abs(outcomeWindowDisplacement) < noProgressThreshold
+        )
 
         var reward: Float = 0
 
@@ -2238,6 +2542,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 )
 
                 locomotion.completeEpisode(.recharged)
+                executive.learner.clearTraces()
             }
         } else {
             rechargePlatformContactTime = 0
@@ -2271,6 +2576,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         outcomeWindowElapsedTime = 0
         outcomeWindowDisplacement = 0
         outcomeWindowGoalProgress = 0
+        outcomeWindowPathProgress = 0
     }
 
     // MARK: - Character Animation
@@ -2679,8 +2985,15 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     // MARK: - Door
 
-    private func updateDoorInteraction() {
-        guard let character = characterNode,
+    /// Doors open only when the CA's executed action pushes forward into
+    /// them: the CA decides to go through, the door does not act on its own.
+    private func updateDoorInteraction(executedAction: FrankensteinAction) {
+        let forwardActions: Set<FrankensteinAction> = [
+            .walk, .run, .stepForward, .stepUp, .jump
+        ]
+
+        guard forwardActions.contains(executedAction),
+              let character = characterNode,
               let door = doorNode else {
             return
         }
@@ -2694,6 +3007,20 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         guard distance < interactionDistance else {
             return
+        }
+
+        // The door must be in front of the character, not beside or behind it.
+        let facing = forwardVector()
+        let toDoor = SIMD2<Float>(-dx, -dz)
+        let toDoorLength = simd_length(toDoor)
+
+        if toDoorLength > 0.001 {
+            let alignment = simd_dot(
+                SIMD2<Float>(facing.x, facing.z),
+                toDoor / toDoorLength
+            )
+
+            guard alignment > 0.3 else { return }
         }
 
         guard door.name?.lowercased().contains("door") == true else {
@@ -2811,6 +3138,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         CA path distance: \(pathText) m
         CA path detour: \(pathSteering?.isDetouring ?? false)
         CA path generation: \(pathSteering?.generation ?? 0)
+        CA plan: \(ca?.plannedSequence.map { String(describing: $0) }.joined(separator: " > ") ?? "n/a")
+        CA goal seeking: \(ca?.goalSeekingStatus ?? "n/a")
         No-progress count: \(consecutiveNoProgressCount)
         """
 

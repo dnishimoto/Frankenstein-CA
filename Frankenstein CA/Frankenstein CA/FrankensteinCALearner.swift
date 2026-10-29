@@ -371,6 +371,56 @@ final class FrankensteinCAPathField {
         }
     }
 
+    // MARK: Route preview (the sequence of headings along the routed path)
+
+    /// Follows the distance field downhill from the character and returns the
+    /// absolute heading of each successive cell step (0.5 m per entry), so the
+    /// CA can plan several actions ahead instead of reacting to one cell.
+    func routePreview(maxCells: Int) -> [Float] {
+        var headings: [Float] = []
+
+        var col = half
+        var row = half
+
+        var current = distances[index(col: col, row: row)]
+
+        guard current.isFinite else { return [] }
+
+        for _ in 0..<maxCells {
+            var best = current
+            var step: (dc: Int, dr: Int)?
+
+            for dr in -1...1 {
+                for dc in -1...1 {
+                    if dc == 0 && dr == 0 { continue }
+
+                    let nc = col + dc
+                    let nr = row + dr
+
+                    guard inside(nc, nr) else { continue }
+
+                    let value = distances[index(col: nc, row: nr)]
+
+                    if value < best {
+                        best = value
+                        step = (dc, dr)
+                    }
+                }
+            }
+
+            guard let chosen = step else { break }
+
+            // Same convention as steering(): column is world x, row is world z.
+            headings.append(atan2(-Float(chosen.dc), -Float(chosen.dr)))
+
+            col += chosen.dc
+            row += chosen.dr
+            current = best
+        }
+
+        return headings
+    }
+
     // MARK: Steering
 
     func steering() -> CAPathSteering? {
@@ -440,3 +490,4 @@ final class FrankensteinCAExecutive {
         field.reset()
     }
 }
+

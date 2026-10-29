@@ -29,6 +29,12 @@ struct FrankensteinCAPerception {
 
     var nearestObjectClass = "none"
     var nearestObjectDistance: Float = .infinity
+    var nearestObjectPickupable = false
+
+    /// Heading of each successive 0.5 m cell along the routed path, relative
+    /// to the current heading (positive: reached by .turnRight). The CA
+    /// plans a short sequence of actions against this preview.
+    var routeRelativeHeadings: [Float] = []
 
     /// Learned object/goal Q-values (from FrankensteinCALearner), per action.
     var advisoryValues: [FrankensteinAction: Float] = [:]
@@ -93,6 +99,376 @@ final class FrankensteinCA: ObservableObject {
         perception = newPerception
         lastTimestamp = max(lastTimestamp, newPerception.timestamp)
         decayFutility(to: newPerception.timestamp)
+    }
+
+    // MARK: - Goal-directed learning
+    //
+    // The CA learns what each action actually does for the goal: a running
+    // average of measured goal progress (metres/second along the routed path,
+    // plus heading-alignment gain) per perception state and action. Actions
+    // that moved the character toward the goal are sought; actions that did
+    // nothing are dropped, and a stuck character is pushed to try something else.
+
+    private struct EffectStat {
+        var mean: Float = 0
+        var count: Int = 0
+    }
+
+    private var effectModel: [String: [Int: EffectStat]] = [:]
+    private var decisionStateKey = "none"
+    private var decisionHeadingError: Float = 0
+    private var decisionAction: FrankensteinAction?
+
+    /// Seconds of (almost) no goal progress; decays quickly once progressing.
+    @Published private(set) var stuckSeconds: Float = 0
+    @Published private(set) var goalSeekingStatus = "No goal outcome yet"
+    private(set) var outcomesObserved = 0
+
+    private let goalProgressGain: Float = 1.6
+    private let stuckThreshold: Float = 1.5
+
+    /// Report what the last executed action achieved. Call once per
+    /// outcome window (about 4 Hz) from the Coordinator.
+    ///
+    /// - goalProgressRate: reduction of routed goal distance, m/s.
+    /// - blocked: the body did not move although it tried to.
+    func reportActionOutcome(
+        action: FrankensteinAction,
+        goalProgressRate: Float,
+        windowDuration: Float,
+        blocked: Bool
+    ) {
+        guard windowDuration > 0.01,
+              goalProgressRate.isFinite else {
+            return
+        }
+
+        // Turning toward the route has value even though it moves nowhere.
+        let currentError = perception?.headingError ?? decisionHeadingError
+        let alignmentGain = (abs(decisionHeadingError) - abs(currentError)) / windowDuration
+
+        var measured = goalProgressRate + 0.8 * alignmentGain
+        if blocked { measured -= 0.3 }
+        measured = max(-3, min(3, measured))
+
+        var stat = effectModel[decisionStateKey]?[action.rawValue] ?? EffectStat()
+        let alpha = max(0.12, 1 / Float(stat.count + 1))
+        stat.mean += alpha * (measured - stat.mean)
+        stat.count += 1
+        effectModel[decisionStateKey, default: [:]][action.rawValue] = stat
+
+        outcomesObserved += 1
+
+        if measured < 0.05 {
+            stuckSeconds += windowDuration
+        } else {
+            stuckSeconds = max(0, stuckSeconds - 2 * windowDuration)
+        }
+
+        decisionHeadingError = currentError
+
+        goalSeekingStatus =
+            "last \(action): progress \(String(format: "%.2f", measured)) m/s | " +
+            "stuck \(String(format: "%.1f", stuckSeconds)) s | outcomes \(outcomesObserved)"
+    }
+
+    /// Learned worth of an action in the current perception state.
+    private func learnedGoalValue(
+        for action: FrankensteinAction,
+        stateKey: String
+    ) -> Float {
+        guard let stat = effectModel[stateKey]?[action.rawValue],
+              stat.count >= 2 else {
+            return 0
+        }
+
+        return goalProgressGain * tanhf(stat.mean / 0.6)
+    }
+
+    /// Model-based part: how much goal progress this action should give
+    /// right now, from speeds, heading error, clearance and goal proximity.
+    private func predictedGoalScore(
+        for action: FrankensteinAction,
+        perception p: FrankensteinCAPerception
+    ) -> Float {
+        var score: Float = 0
+
+        let alignment = max(0, cosf(p.headingError))
+        let nearGoal = p.pathDistance.isFinite && p.pathDistance < 1.2
+
+        // Expected forward progress per second.
+        switch action {
+        case .walk:
+            score += 0.25 * 1.0 * alignment
+        case .run:
+            score += 0.25 * 2.2 * alignment
+            if nearGoal { score -= 0.8 }              // do not overshoot
+            if p.clearanceAhead < 2.0 { score -= 0.4 }
+        case .stepForward:
+            score += 0.25 * 0.5 * alignment
+        default:
+            break
+        }
+
+        // On the goal: hold still so contact is maintained.
+        if p.atGoal {
+            switch action {
+            case .walk, .run, .stepForward, .jump, .backward, .roll:
+                score -= 1.0
+            case .turnLeft, .turnRight:
+                score += 0.3
+            default:
+                break
+            }
+        }
+
+        // Stuck: abandon the repeated action and try alternatives that
+        // can clear the obstruction.
+        if stuckSeconds > stuckThreshold, !p.atGoal {
+            let pressure = min(2, 0.5 * stuckSeconds)
+
+            if action == decisionAction {
+                score -= pressure
+            }
+
+            switch action {
+            case .jump, .stepUp:
+                score += 0.4
+            case .liftObject:
+                score += p.nearestObjectPickupable ? 1.2 : 0
+            case .turnLeft:
+                if p.clearanceMinus > p.clearancePlus { score += 0.6 }
+            case .turnRight:
+                if p.clearancePlus > p.clearanceMinus { score += 0.6 }
+            case .backward:
+                score += 0.3
+            default:
+                break
+            }
+        }
+
+        // Goal unknown or unreachable: scan by turning rather than walking blind.
+        if !p.pathDistance.isFinite {
+            switch action {
+            case .turnLeft, .turnRight: score += 0.2
+            case .run: score -= 0.4
+            default: break
+            }
+        }
+
+        return score
+    }
+
+    // MARK: - Sequence planning
+    //
+    // The perception layer previews the routed path as a list of headings.
+    // The CA rolls a small kinematic model forward over the next few actions
+    // (turn, walk, run, ...) and credits each first action with the best
+    // route progress reachable by some sequence that starts with it. A turn
+    // that sets up a long run therefore beats a walk that will have to turn
+    // anyway.
+
+    private let planHorizon = 3
+    private let planActionSeconds: Float = 0.35
+    private let planTurnPerAction: Float = 0.9 * 0.35   // 0.9 rad/s turn rate
+    private let planCellLength: Float = 0.5
+    private let planGain: Float = 1.5
+
+    /// Best action sequence found by the last plan, for diagnostics.
+    private(set) var plannedSequence: [FrankensteinAction] = []
+
+    private struct Rollout {
+        var heading: Float = 0      // relative to the current heading
+        var progress: Float = 0     // metres advanced along the route
+        var used: Float = 0         // clearance consumed in the current sector
+        var wasted: Int = 0         // steps that could not advance
+    }
+
+    private func wrapped(_ angle: Float) -> Float {
+        var value = angle
+
+        while value > .pi { value -= 2 * .pi }
+        while value < -.pi { value += 2 * .pi }
+
+        return value
+    }
+
+    /// Forward speed used by the plan model (m/s); nil for non-moving actions.
+    private func planSpeed(_ action: FrankensteinAction) -> (speed: Float, blockable: Bool)? {
+        switch action {
+        case .walk:        return (1.0, true)
+        case .run:         return (2.2, true)
+        case .stepForward: return (0.5, true)
+        case .backward:    return (-0.5, true)
+        case .crouch:      return (0.45, true)
+        case .crawl:       return (0.35, true)
+        case .roll:        return (1.1, true)
+        case .jump:        return (1.2, false)
+        case .stepUp:      return (0.6, false)
+        default:           return nil
+        }
+    }
+
+    private func routeHeading(
+        atProgress progress: Float,
+        perception p: FrankensteinCAPerception
+    ) -> Float {
+        let route = p.routeRelativeHeadings
+
+        guard !route.isEmpty else { return p.headingError }
+
+        let cell = max(0, Int(progress / planCellLength))
+
+        return route[min(cell, route.count - 1)]
+    }
+
+    private func clearance(
+        forHeading heading: Float,
+        perception p: FrankensteinCAPerception
+    ) -> Float {
+        if heading > 0.5 { return p.clearancePlus }
+        if heading < -0.5 { return p.clearanceMinus }
+
+        return p.clearanceAhead
+    }
+
+    private func planStep(
+        _ action: FrankensteinAction,
+        from state: Rollout,
+        perception p: FrankensteinCAPerception
+    ) -> Rollout {
+        var next = state
+
+        switch action {
+        case .turnRight:
+            next.heading += planTurnPerAction
+            next.used = 0
+            return next
+
+        case .turnLeft:
+            next.heading -= planTurnPerAction
+            next.used = 0
+            return next
+
+        default:
+            break
+        }
+
+        guard let motion = planSpeed(action) else {
+            // Lift / place / throw / recover: time passes, nothing advances.
+            next.wasted += 1
+            return next
+        }
+
+        let routeNow = routeHeading(atProgress: state.progress, perception: p)
+        let error = wrapped(routeNow - state.heading)
+
+        var advance = motion.speed * planActionSeconds * cosf(error)
+
+        if motion.blockable, advance > 0 {
+            let room = max(
+                0,
+                clearance(forHeading: state.heading, perception: p) - 0.3 - state.used
+            )
+
+            if advance > room {
+                advance = room
+            }
+
+            next.used += advance
+        }
+
+        if advance <= 0.01 && motion.speed > 0 {
+            next.wasted += 1
+        }
+
+        next.progress = state.progress + advance
+
+        // Cannot usefully advance past the goal.
+        if p.pathDistance.isFinite {
+            next.progress = min(next.progress, p.pathDistance)
+        }
+
+        return next
+    }
+
+    private func terminalPlanValue(
+        _ state: Rollout,
+        perception p: FrankensteinCAPerception
+    ) -> Float {
+        let routeNow = routeHeading(atProgress: state.progress, perception: p)
+        let alignment = cosf(wrapped(routeNow - state.heading))
+
+        return state.progress + 0.4 * alignment - 0.5 * Float(state.wasted)
+    }
+
+    private func bestContinuation(
+        from state: Rollout,
+        depth: Int,
+        perception p: FrankensteinCAPerception
+    ) -> (value: Float, sequence: [FrankensteinAction]) {
+        guard depth > 0 else {
+            return (terminalPlanValue(state, perception: p), [])
+        }
+
+        var best: (value: Float, sequence: [FrankensteinAction]) = (-.infinity, [])
+
+        for action in [FrankensteinAction.walk, .run, .turnLeft, .turnRight] {
+            let result = bestContinuation(
+                from: planStep(action, from: state, perception: p),
+                depth: depth - 1,
+                perception: p
+            )
+
+            if result.value > best.value {
+                best = (result.value, [action] + result.sequence)
+            }
+        }
+
+        return best
+    }
+
+    /// Plan value of starting with each permitted action.
+    private func planValues(
+        for actions: [FrankensteinAction],
+        perception p: FrankensteinCAPerception
+    ) -> [FrankensteinAction: Float] {
+        guard !p.atGoal,
+              !p.routeRelativeHeadings.isEmpty else {
+            plannedSequence = []
+            return [:]
+        }
+
+        var values: [FrankensteinAction: Float] = [:]
+        var bestValue: Float = -.infinity
+        var bestSequence: [FrankensteinAction] = []
+
+        for action in actions {
+            let first = planStep(action, from: Rollout(), perception: p)
+
+            let rest = bestContinuation(
+                from: first,
+                depth: planHorizon - 1,
+                perception: p
+            )
+
+            values[action] = rest.value
+
+            if rest.value > bestValue {
+                bestValue = rest.value
+                bestSequence = [action] + rest.sequence
+            }
+        }
+
+        plannedSequence = bestSequence
+
+        // Relative to the best option so the term ranks actions without
+        // shifting every score.
+        for (action, value) in values {
+            values[action] = planGain * (value - bestValue)
+        }
+
+        return values
     }
 
     // MARK: - Futility learning
@@ -179,6 +555,14 @@ final class FrankensteinCA: ObservableObject {
         recentPositions.removeAll()
         futilityPenalties.removeAll()
         perception = nil
+        effectModel.removeAll()
+        decisionAction = nil
+        decisionStateKey = "none"
+        decisionHeadingError = 0
+        stuckSeconds = 0
+        plannedSequence = []
+        outcomesObserved = 0
+        goalSeekingStatus = "No goal outcome yet"
         lastFutilityDecayTime = 0
         lastPositionSampleTime = 0
         lastLoopPenaltyTime = 0
@@ -547,6 +931,22 @@ final class FrankensteinCA: ObservableObject {
         return noveltyScale / sqrtf(1 + Float(count))
     }
 
+    /// The outcome of the next window is credited to this decision. A
+    /// repeated decision keeps its original heading error so a multi-frame
+    /// turn is measured over the whole window.
+    private func rememberDecision(
+        _ action: FrankensteinAction,
+        stateKey: String,
+        perception p: FrankensteinCAPerception?
+    ) {
+        if action != decisionAction || stateKey != decisionStateKey {
+            decisionHeadingError = p?.headingError ?? 0
+        }
+
+        decisionAction = action
+        decisionStateKey = stateKey
+    }
+
     private func recordVisit(
         action: FrankensteinAction,
         stateKey: String
@@ -561,17 +961,64 @@ final class FrankensteinCA: ObservableObject {
         var steering: Float = 0
         var clearance: Float = 0
         var novelty: Float = 0
+        var terrain: Float = 0
+        var goal: Float = 0
+        var plan: Float = 0
         var activity: Float = 0
         var futility: Float = 0
 
         var total: Float {
-            q + advisory + steering + clearance + novelty + activity - futility
+            q + advisory + steering + clearance + terrain + goal + plan + novelty + activity - futility
+        }
+    }
+
+    /// Terrain priors so the CA picks competent maneuvers before Q-values
+    /// have been learned. Only used with live perception.
+    private func terrainScore(
+        for action: FrankensteinAction,
+        terrain t: FrankensteinTerrainSample
+    ) -> Float {
+        let near = t.distance.isFinite && t.distance < 1.0
+
+        switch t.terrain {
+        case .hurdle, .raisedStep:
+            guard near else { return 0 }
+
+            let low = t.obstacleHeight > 0 && t.obstacleHeight <= 0.55
+
+            switch action {
+            case .stepUp: return low ? 0.7 : -0.5
+            case .jump:   return t.isLandingAreaClear ? 0.45 : -0.5
+            case .walk, .run: return -0.5
+            default: return 0
+            }
+
+        case .gap:
+            switch action {
+            case .jump:
+                return (t.gapWidth > 0 && t.gapWidth <= 1.8 && t.isLandingAreaClear)
+                    ? 0.6 : -1.0
+            case .walk, .run, .stepForward: return -1.0
+            default: return 0
+            }
+
+        case .lowCeiling:
+            switch action {
+            case .crouch: return 0.35
+            case .crawl:  return 0.25
+            default: return 0
+            }
+
+        default:
+            return 0
         }
     }
 
     private func scoreParts(
         for action: FrankensteinAction,
-        perception p: FrankensteinCAPerception?
+        perception p: FrankensteinCAPerception?,
+        terrain: FrankensteinTerrainSample,
+        plan: [FrankensteinAction: Float] = [:]
     ) -> ScoreParts {
         var parts = ScoreParts()
 
@@ -583,6 +1030,11 @@ final class FrankensteinCA: ObservableObject {
             parts.advisory = p.advisoryValues[action, default: 0]
             parts.steering = steeringScore(for: action, perception: p)
             parts.clearance = clearanceScore(for: action, perception: p)
+            parts.terrain = terrainScore(for: action, terrain: terrain)
+            parts.plan = plan[action, default: 0]
+            parts.goal =
+                learnedGoalValue(for: action, stateKey: p.stateKey) +
+                predictedGoalScore(for: action, perception: p)
             parts.novelty = explorationBonus(for: action, stateKey: p.stateKey)
         }
 
@@ -624,6 +1076,7 @@ final class FrankensteinCA: ObservableObject {
             .filter({ $0 != .recover })
             .randomElement() {
             recordVisit(action: random, stateKey: stateKey)
+            rememberDecision(random, stateKey: stateKey, perception: p)
 
             lastDecisionDescription =
                 "Action=\(random) | exploring (eps=\(epsilon)) | futility-aware"
@@ -631,13 +1084,22 @@ final class FrankensteinCA: ObservableObject {
             return random
         }
 
+        let plan: [FrankensteinAction: Float] = p.map {
+            planValues(for: allowedActions, perception: $0)
+        } ?? [:]
+
         var selected = allowedActions[0]
-        var bestParts = scoreParts(for: selected, perception: p)
+        var bestParts = scoreParts(
+            for: selected,
+            perception: p,
+            terrain: terrain,
+            plan: plan
+        )
         var breakdown: [FrankensteinAction: String] = [:]
 
         func describe(_ parts: ScoreParts) -> String {
             let head = "Q=\(parts.q) adv=\(parts.advisory) steer=\(parts.steering)"
-            let mid = "clear=\(parts.clearance) nov=\(parts.novelty) act=\(parts.activity)"
+            let mid = "clear=\(parts.clearance) terr=\(parts.terrain) goal=\(parts.goal) plan=\(parts.plan) nov=\(parts.novelty) act=\(parts.activity)"
             let tail = "fut=-\(parts.futility) => \(parts.total)"
 
             return "\(head) \(mid) \(tail)"
@@ -646,7 +1108,12 @@ final class FrankensteinCA: ObservableObject {
         breakdown[selected] = describe(bestParts)
 
         for action in allowedActions.dropFirst() {
-            let parts = scoreParts(for: action, perception: p)
+            let parts = scoreParts(
+                for: action,
+                perception: p,
+                terrain: terrain,
+                plan: plan
+            )
 
             breakdown[action] = describe(parts)
 
@@ -658,6 +1125,7 @@ final class FrankensteinCA: ObservableObject {
 
         lastScoreBreakdown = breakdown
         recordVisit(action: selected, stateKey: stateKey)
+        rememberDecision(selected, stateKey: stateKey, perception: p)
 
         let cellDescription: String
 
@@ -677,6 +1145,7 @@ final class FrankensteinCA: ObservableObject {
 
         print("[CA] Executive selected: \(selected)")
         print("[CA] Score terms: \(describe(bestParts))")
+        print("[CA] Planned sequence: \(plannedSequence)")
         print("[CA] Permitted actions: \(allowedActions)")
         print("[CA] Perception state: \(stateKey)")
         print("[CA] Futility count: \(futilityCount)")
