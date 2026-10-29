@@ -101,6 +101,32 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private var latestDetectionNodes: [ObjectIdentifier: DetectedObjectInfo] = [:]
     private var latestRayObservations: [RaycastObservation] = []
 
+    // MARK: - Wide Field of View
+    //
+    // The narrow corridor scan above drives terrain classification, so it
+    // stays as it is. This second, wide scan sees the whole forward half-plane
+    // out to a long range and feeds the path field, the CA and the UI.
+
+    private var wideDetections: [DetectedObjectInfo] = []
+    private var visibleObjects: [DetectedObjectInfo] = []
+    private var lastWideScanTime: TimeInterval = 0
+
+    private let wideScanInterval: TimeInterval = 1.0 / 6.0
+    private let wideScanRange: Float = 16
+    private let wideScanHalfAngleDegrees: Float = 85
+    private let wideScanStepDegrees: Float = 6
+    private let wideScanHeights: [Float] = [0.25, 0.9]
+    private let wideScanMaximumExtent: Float = 60
+
+    // MARK: - Pushing Movable Blocks
+
+    private weak var pushTargetNode: SCNNode?
+    private var pushLastNodePosition: SIMD2<Float>?
+    private var pushAccumulatedMeters: Float = 0
+    private let pushBlockSpeed: Float = 0.6
+
+    var onPlanText: ((String) -> Void)?
+
     // MARK: - Ground Verification
 
     private var verifiedGroundSupport: Bool = false
@@ -569,6 +595,11 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         latestDetections.removeAll()
         latestDetectionNodes.removeAll()
         latestRayObservations.removeAll()
+        wideDetections.removeAll()
+        visibleObjects.removeAll()
+        pushTargetNode = nil
+        pushLastNodePosition = nil
+        pushAccumulatedMeters = 0
 
         rechargePlatformDistance = .infinity
         lastGoalDistance = .infinity
@@ -647,6 +678,27 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
             latestDetection = latestDetections.first
 
+            // Block the CA could push (nearest movable thing within reach).
+            pushTargetNode = detailedDetections.first {
+                isMovableName($0.info.name) && $0.info.distance <= 1.4
+            }?.node
+
+            // Wide, long-range view for planning and the UI.
+            if time - lastWideScanTime >= wideScanInterval {
+                lastWideScanTime = time
+
+                wideDetections = scanWideFieldOfView(
+                    from: character,
+                    in: scene
+                )
+            }
+
+            visibleObjects = mergeVisibleObjects(
+                near: latestDetections,
+                wide: wideDetections,
+                character: character
+            )
+
             verifiedGroundSupport = verifySupportBeneathCharacter(
                 character: character,
                 in: scene
@@ -660,7 +712,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
             updatePathField(
                 character: character,
-                detections: latestDetections,
+                detections: visibleObjects,
                 extraObstacles: fanObstacles,
                 time: time
             )
@@ -670,11 +722,12 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 detections: detailedDetections
             )
 
-            let detections = latestDetections
+            let nearest = latestDetections.first
+            let everythingSeen = visibleObjects
 
             DispatchQueue.main.async { [weak self] in
-                self?.onDetectedObject?(detections.first)
-                self?.onDetectedObjects?(detections)
+                self?.onDetectedObject?(nearest)
+                self?.onDetectedObjects?(everythingSeen)
             }
 
             logRayObservations()
@@ -793,6 +846,12 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             deltaTime: dt,
             character: character,
             scene: scene
+        )
+
+        applyPush(
+            output: output,
+            deltaTime: dt,
+            character: character
         )
 
         // Loop detection uses the executed action and the real position.
@@ -1118,7 +1177,16 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             perception.nearestObjectClass = objectClass(for: detection.name)
             perception.nearestObjectDistance = detection.distance
             perception.nearestObjectPickupable = detection.pickupable
+            perception.nearestObjectMovable = isMovableName(detection.name)
+            perception.nearestObjectName = detection.name
         }
+
+        // What the wide scan sees farther out, for the CA's narrative.
+        let distant = visibleObjects.filter { $0.distance >= 3.0 }
+
+        perception.distantObjectSummary = distant.isEmpty
+            ? ""
+            : DetectedObjectInfo.summary(of: distant, limit: 3)
 
         // Route preview: the next ~4 m of the routed path as headings
         // relative to where the character faces now.
@@ -1155,6 +1223,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         if let detection = latestDetection,
            carriedNode == nil,
            detection.pickupable,
+           objectClass(for: detection.name) != "movable",
            detection.distance <= pickupDistance {
             advisory[.liftObject, default: 0] += 5.0
             advisory[.jump, default: 0] -= 5.0
@@ -1213,6 +1282,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         if let detection = latestDetection,
            carriedNode == nil,
            detection.pickupable,
+           objectClass(for: detection.name) != "movable",
            detection.distance <= pickupDistance {
             
             merged[.liftObject, default: 0] += 5.0
@@ -1222,6 +1292,176 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         return merged
     }
  
+
+    // MARK: - Wide Field of View Scan
+
+    private func isMovableName(_ name: String) -> Bool {
+        let value = name.lowercased()
+
+        return value.contains("movable") ||
+            value.contains("block") ||
+            value.contains("crate") ||
+            value.contains("box") ||
+            value.contains("pickup")
+    }
+
+    private func annotateBearing(
+        _ info: DetectedObjectInfo,
+        character: SCNNode
+    ) -> DetectedObjectInfo {
+        let c = character.presentation.worldPosition
+
+        let dx = Float(info.worldPosition.x - c.x)
+        let dz = Float(info.worldPosition.z - c.z)
+
+        var annotated = info
+
+        if dx * dx + dz * dz > 0.0001 {
+            annotated.bearing = wrappedAngle(atan2(-dx, -dz) - heading)
+        }
+
+        return annotated
+    }
+
+    /// Wide scan results plus anything the narrow scan sees that the wide
+    /// scan missed, nearest first, each with a bearing.
+    private func mergeVisibleObjects(
+        near: [DetectedObjectInfo],
+        wide: [DetectedObjectInfo],
+        character: SCNNode
+    ) -> [DetectedObjectInfo] {
+        var merged = wide.map { annotateBearing($0, character: character) }
+
+        for item in near {
+            let duplicate = merged.contains {
+                $0.name == item.name &&
+                abs(Float($0.worldPosition.x - item.worldPosition.x)) < 0.15 &&
+                abs(Float($0.worldPosition.z - item.worldPosition.z)) < 0.15
+            }
+
+            if !duplicate {
+                merged.append(annotateBearing(item, character: character))
+            }
+        }
+
+        return merged.sorted { $0.distance < $1.distance }
+    }
+
+    /// A fan of horizontal rays across about 170 degrees, out to
+    /// `wideScanRange` metres, at two heights. Unlike the corridor scan it
+    /// accepts large objects (walls, long hurdles) and objects off to the side.
+    private func scanWideFieldOfView(
+        from character: SCNNode,
+        in scene: SCNScene
+    ) -> [DetectedObjectInfo] {
+        let position = character.presentation.worldPosition
+
+        let options: [String: Any] = [
+            SCNHitTestOption.ignoreHiddenNodes.rawValue: true,
+            SCNHitTestOption.backFaceCulling.rawValue: true
+        ]
+
+        var nearestByNode: [ObjectIdentifier: DetectedObjectInfo] = [:]
+
+        var angle = -wideScanHalfAngleDegrees
+
+        while angle <= wideScanHalfAngleDegrees + 0.01 {
+            let theta = heading + angle * .pi / 180
+
+            // Same forward convention as forwardVector().
+            let dx = -sin(theta)
+            let dz = -cos(theta)
+
+            for rayHeight in wideScanHeights {
+                let origin = SCNVector3(
+                    position.x,
+                    position.y + rayHeight,
+                    position.z
+                )
+
+                let end = SCNVector3(
+                    origin.x + dx * wideScanRange,
+                    origin.y,
+                    origin.z + dz * wideScanRange
+                )
+
+                let hits = scene.rootNode.hitTestWithSegment(
+                    from: origin,
+                    to: end,
+                    options: options
+                )
+
+                for hit in hits {
+                    let hitNode = hit.node
+                    let lowered = (hitNode.name ?? "").lowercased()
+
+                    guard !isCharacterPart(hitNode),
+                          !isFloorSurface(hitNode),
+                          !isQGridNode(hitNode),
+                          !lowered.contains("marker") else {
+                        continue
+                    }
+
+                    let hx = Float(hit.worldCoordinates.x - position.x)
+                    let hz = Float(hit.worldCoordinates.z - position.z)
+                    let hitDistance = sqrt(hx * hx + hz * hz)
+
+                    guard hitDistance >= Self.minimumHitDistance else {
+                        continue
+                    }
+
+                    let target: SCNNode
+
+                    if let pickupNode = pickupTarget(for: hitNode) {
+                        target = pickupNode
+                    } else {
+                        target = meaningfulDetectionParent(for: hitNode)
+                    }
+
+                    guard !isContainerNode(target),
+                          !isCharacterPart(target),
+                          target !== character else {
+                        continue
+                    }
+
+                    let dimensions = worldDimensions(of: target)
+
+                    guard dimensions.x > 0.001,
+                          dimensions.y > 0.001,
+                          dimensions.z > 0.001,
+                          max(dimensions.x, max(dimensions.y, dimensions.z))
+                            <= wideScanMaximumExtent else {
+                        continue
+                    }
+
+                    let info = DetectedObjectInfo(
+                        name: readableName(for: target),
+                        dimensions: dimensions,
+                        distance: hitDistance,
+                        worldPosition: target.presentation.worldPosition,
+                        pickupable: pickupTarget(for: target) != nil,
+                        topY: worldTopY(of: target)
+                    )
+
+                    let key = ObjectIdentifier(target)
+
+                    if let existing = nearestByNode[key],
+                       existing.distance <= hitDistance {
+                        // Keep the nearest hit for this object.
+                    } else {
+                        nearestByNode[key] = info
+                    }
+
+                    // The first solid thing along a ray hides what is behind it.
+                    break
+                }
+            }
+
+            angle += wideScanStepDegrees
+        }
+
+        return nearestByNode.values.sorted { $0.distance < $1.distance }
+    }
 
     // MARK: - Full Object Perception
 
@@ -1741,6 +1981,25 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                     sample.terrain = .hurdle
                 }
 
+                // A movable block can be shoved, and its top may be a landing
+                // surface when it is within jump height and clear above.
+                sample.objectMovable = isMovableName(detection.name)
+
+                if sample.objectMovable,
+                   rise > 0.05,
+                   rise <= 1.0,
+                   detection.dimensions.x >= 0.3,
+                   detection.dimensions.z >= 0.3 {
+                    sample.canLandOnObject = hasClearSpace(
+                        around: SCNVector3(
+                            detection.worldPosition.x,
+                            detection.topY + 0.15,
+                            detection.worldPosition.z
+                        ),
+                        in: scene
+                    )
+                }
+
                 if sample.terrain == .hurdle || sample.terrain == .raisedStep {
                     let landingDistance =
                         detection.distance + max(detection.dimensions.z, 0.3) + 0.4
@@ -2198,7 +2457,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             let isClimbing =
                 locomotion.stepUpInProgress ||
                 output.action == .stepUp ||
-                output.action == .jump
+                output.action == .jump ||
+                output.action == .pushObject
 
             let isBlockingObstacle =
                 latestTerrainSample.terrain == .hurdle ||
@@ -2281,6 +2541,44 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 } else {
                     proposedWorld.y =
                         fallingFeetY - characterFootOffset
+                }
+            }
+
+            // Jump landing. Once the jump is coming down, land on the first
+            // surface reached: the ground, or the top of a block. Without this
+            // the jump would never end and would time out as a failure.
+            if output.jump > 0, locomotion.jumpIsDescending {
+                let feetNow = Float(proposedWorld.y) + characterFootOffset
+
+                if let surfaceY = raycastSupport(
+                    at: SCNVector3(
+                        proposedWorld.x,
+                        feetNow,
+                        proposedWorld.z
+                    ),
+                    in: scene,
+                    riseAllowance: 1.6
+                ), feetNow <= surfaceY + 0.04 {
+
+                    let takeoffY = jumpBaseY ?? Float(oldWorld.y)
+                    let landedOnTop =
+                        surfaceY - characterFootOffset - takeoffY > 0.2
+
+                    proposedWorld.y = surfaceY - characterFootOffset
+                    characterVerticalVelocity = 0
+                    jumpBaseY = nil
+
+                    locomotion.confirmJumpLanding(
+                        actualForwardDistance: locomotion.jumpTravelledDistance,
+                        actualHeight: surfaceY,
+                        landingAreaIsClear: true
+                    )
+
+                    publishDebug(
+                        landedOnTop
+                            ? "Jump landed on top of an object."
+                            : "Jump landed."
+                    )
                 }
             }
 
@@ -2898,6 +3196,71 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         })?.node
     }
 
+    // MARK: - Push
+
+    /// While the CA's action is pushObject, the block ahead is driven forward
+    /// along the character's heading, a little faster than the body walks so
+    /// it stays out in front. The distance it really moved is reported back
+    /// so the push is judged by its result.
+    private func applyPush(
+        output: FrankensteinLocomotionOutput,
+        deltaTime dt: Float,
+        character: SCNNode
+    ) {
+        guard output.pushRequested,
+              let node = pushTargetNode,
+              node.parent != nil else {
+            pushLastNodePosition = nil
+
+            if !output.pushRequested {
+                pushAccumulatedMeters = 0
+            }
+
+            return
+        }
+
+        let forward = forwardVector()
+
+        let c = character.presentation.worldPosition
+        let n = node.presentation.worldPosition
+
+        let dx = Float(n.x - c.x)
+        let dz = Float(n.z - c.z)
+
+        let ahead = dx * forward.x + dz * forward.z
+        let sideways = abs(dx * forward.z - dz * forward.x)
+
+        // The block must be in front of the body and within reach.
+        guard ahead > 0, ahead < 1.4, sideways < 0.5 else {
+            return
+        }
+
+        configurePhysicsBody(for: node, forceDynamic: true)
+
+        guard let body = node.physicsBody else { return }
+
+        body.velocity = SCNVector3(
+            forward.x * pushBlockSpeed,
+            body.velocity.y,
+            forward.z * pushBlockSpeed
+        )
+
+        // Keep it from tumbling while shoved.
+        body.angularVelocity = SCNVector4Zero
+
+        let current = SIMD2<Float>(Float(n.x), Float(n.z))
+
+        if let last = pushLastNodePosition {
+            let moved = current - last
+
+            pushAccumulatedMeters += moved.x * forward.x + moved.y * forward.z
+        }
+
+        pushLastNodePosition = current
+
+        locomotion.reportPushProgress(pushAccumulatedMeters)
+    }
+
     // MARK: - Place / Throw
 
     @discardableResult
@@ -3122,6 +3485,12 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             }
         }
 
+        if let narrative = ca?.planNarrative {
+            DispatchQueue.main.async { [weak self] in
+                self?.onPlanText?(narrative)
+            }
+        }
+
         let pathText = pathGoalDistance.isFinite
             ? String(format: "%.2f", Double(pathGoalDistance))
             : "n/a"
@@ -3133,7 +3502,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         Ground ahead: \(latestTerrainSample.isGroundAhead)
         Verified support: \(verifiedGroundSupport)
         Verified landing: \(verifiedLandingSupport)
-        Visible objects: \(latestDetections.count)
+        Visible objects: \(visibleObjects.count)
         Recharge distance: \(String(format: "%.2f", Double(rechargePlatformDistance))) m
         CA path distance: \(pathText) m
         CA path detour: \(pathSteering?.isDetouring ?? false)

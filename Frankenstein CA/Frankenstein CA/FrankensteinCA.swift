@@ -30,6 +30,11 @@ struct FrankensteinCAPerception {
     var nearestObjectClass = "none"
     var nearestObjectDistance: Float = .infinity
     var nearestObjectPickupable = false
+    var nearestObjectMovable = false
+    var nearestObjectName = ""
+
+    /// Sentence about objects farther than about 3 m (from the wide scan).
+    var distantObjectSummary = ""
 
     /// Heading of each successive 0.5 m cell along the routed path, relative
     /// to the current heading (positive: reached by .turnRight). The CA
@@ -210,10 +215,23 @@ final class FrankensteinCA: ObservableObject {
             break
         }
 
+        // Shoving a movable block that stands in the way of the route.
+        if action == .pushObject {
+            if p.nearestObjectMovable, p.nearestObjectDistance <= 1.0 {
+                score += alignment > 0.7 ? 0.35 : -0.2
+
+                if stuckSeconds > stuckThreshold {
+                    score += 0.8
+                }
+            } else {
+                score -= 1.0
+            }
+        }
+
         // On the goal: hold still so contact is maintained.
         if p.atGoal {
             switch action {
-            case .walk, .run, .stepForward, .jump, .backward, .roll:
+            case .walk, .run, .stepForward, .jump, .backward, .roll, .pushObject:
                 score -= 1.0
             case .turnLeft, .turnRight:
                 score += 0.3
@@ -305,6 +323,7 @@ final class FrankensteinCA: ObservableObject {
         case .roll:        return (1.1, true)
         case .jump:        return (1.2, false)
         case .stepUp:      return (0.6, false)
+        case .pushObject:  return (0.5, false)
         default:           return nil
         }
     }
@@ -611,6 +630,7 @@ final class FrankensteinCA: ObservableObject {
         case .liftObject:  return (2, 8)
         case .placeObject: return (2, 4)
         case .throwObject: return (2, 12)
+        case .pushObject:  return (14, 10)
         default:           return nil
         }
     }
@@ -667,7 +687,7 @@ final class FrankensteinCA: ObservableObject {
             .jump, .crouch, .recover, .stepUp,
             .stepDown, .crawl, .roll, .backward,
             .stepForward, .liftObject, .placeObject,
-            .throwObject
+            .throwObject, .pushObject
         ]
     }
 
@@ -988,7 +1008,11 @@ final class FrankensteinCA: ObservableObject {
 
             switch action {
             case .stepUp: return low ? 0.7 : -0.5
-            case .jump:   return t.isLandingAreaClear ? 0.45 : -0.5
+            case .jump:
+                // Onto a movable block counts as a valid, preferred landing.
+                if t.canLandOnObject { return 0.6 }
+                return t.isLandingAreaClear ? 0.45 : -0.5
+            case .pushObject: return t.objectMovable ? 0.2 : -1.0
             case .walk, .run: return -0.5
             default: return 0
             }
@@ -1078,6 +1102,10 @@ final class FrankensteinCA: ObservableObject {
             recordVisit(action: random, stateKey: stateKey)
             rememberDecision(random, stateKey: stateKey, perception: p)
 
+            planNarrative =
+                "Now: I will \(phrase(for: random, terrain: terrain, perception: p)) " +
+                "to see what happens. I explore a little so I can learn what works."
+
             lastDecisionDescription =
                 "Action=\(random) | exploring (eps=\(epsilon)) | futility-aware"
 
@@ -1143,6 +1171,12 @@ final class FrankensteinCA: ObservableObject {
             "terrain=\(terrain.terrain) | fallen=\(body.fallen) | " +
             "perception=\(perceptionStatus)"
 
+        planNarrative = buildNarrative(
+            selected: selected,
+            terrain: terrain,
+            perception: p
+        )
+
         print("[CA] Executive selected: \(selected)")
         print("[CA] Score terms: \(describe(bestParts))")
         print("[CA] Planned sequence: \(plannedSequence)")
@@ -1152,6 +1186,159 @@ final class FrankensteinCA: ObservableObject {
         print("[CA] Generation=\(generation), live cells=\(liveCellCount)")
 
         return selected
+    }
+
+    // MARK: - Plan narrative (what the CA is planning, in words)
+
+    /// First-person account of the goal, the plan and the reasons. Refreshed
+    /// on every decision; the Coordinator forwards it to the UI.
+    private(set) var planNarrative = "Waiting for perception…"
+
+    private func plainName(_ raw: String) -> String {
+        guard !raw.isEmpty else { return "object" }
+
+        // "MovableBlock" / "PickupCrate1" -> "movable block" / "pickup crate"
+        var words = ""
+
+        for character in raw {
+            if character.isUppercase, !words.isEmpty, words.last != " " {
+                words.append(" ")
+            }
+
+            if character.isNumber { continue }
+
+            words.append(character)
+        }
+
+        return words
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .lowercased()
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    private func phrase(
+        for action: FrankensteinAction,
+        terrain: FrankensteinTerrainSample,
+        perception p: FrankensteinCAPerception?
+    ) -> String {
+        let object = plainName(p?.nearestObjectName ?? terrain.objectName)
+
+        switch action {
+        case .walk:        return "walk"
+        case .run:         return "run"
+        case .turnLeft:    return "turn left"
+        case .turnRight:   return "turn right"
+        case .jump:
+            if terrain.canLandOnObject { return "jump onto the \(object)" }
+            if terrain.terrain == .gap { return "jump the gap" }
+            return "jump"
+        case .crouch:      return "crouch"
+        case .crawl:       return "crawl"
+        case .stepUp:      return "step up"
+        case .stepDown:    return "step down"
+        case .roll:        return "roll"
+        case .recover:     return "get back up"
+        case .backward:    return "back away"
+        case .stepForward: return "step forward"
+        case .liftObject:  return "pick up the \(object)"
+        case .placeObject: return "set the object down"
+        case .throwObject: return "throw the object"
+        case .pushObject:  return "push the \(object)"
+        }
+    }
+
+    private func buildNarrative(
+        selected: FrankensteinAction,
+        terrain: FrankensteinTerrainSample,
+        perception p: FrankensteinCAPerception?
+    ) -> String {
+        guard let p else {
+            return "I have no fresh view of the world yet, so I am choosing cautiously."
+        }
+
+        var lines: [String] = []
+
+        // Goal
+        if p.atGoal {
+            lines.append("Goal: I am on the recharge station. I will hold still to charge.")
+        } else if p.pathDistance.isFinite {
+            let meters = String(format: "%.1f", p.pathDistance)
+            let route = p.isDetouring ? " I am routing around obstacles." : ""
+
+            lines.append("Goal: reach the recharge station, \(meters) m away by my route.\(route)")
+        } else {
+            lines.append("Goal: find the recharge station. I do not have a route yet, so I am looking around.")
+        }
+
+        // Now and next
+        let now = phrase(for: selected, terrain: terrain, perception: p)
+
+        var next: [String] = []
+
+        for action in plannedSequence.dropFirst().prefix(3) {
+            next.append(phrase(for: action, terrain: terrain, perception: p))
+        }
+
+        if next.isEmpty {
+            lines.append("Now: I will \(now).")
+        } else {
+            lines.append("Now: I will \(now). Then: \(next.joined(separator: ", then ")).")
+        }
+
+        // Why
+        var reasons: [String] = []
+
+        let object = plainName(p.nearestObjectName)
+
+        if p.nearestObjectDistance.isFinite, p.nearestObjectDistance < 2.0,
+           p.nearestObjectClass != "none" {
+            let distance = String(format: "%.1f", p.nearestObjectDistance)
+
+            if terrain.canLandOnObject {
+                reasons.append("a \(object) is \(distance) m ahead and I can land on top of it")
+            } else if p.nearestObjectMovable {
+                reasons.append("a movable \(object) is \(distance) m ahead and can be pushed")
+            } else {
+                reasons.append("a \(object) is \(distance) m ahead")
+            }
+        }
+
+        if p.clearanceAhead < 0.9 {
+            let side = p.clearancePlus > p.clearanceMinus ? "right" : "left"
+            reasons.append("the way ahead is tight, more room on the \(side)")
+        }
+
+        if !p.atGoal, abs(p.headingError) > 0.5 {
+            let side = p.headingError > 0 ? "right" : "left"
+            reasons.append("the route bends to my \(side)")
+        }
+
+        if stuckSeconds > stuckThreshold {
+            reasons.append(
+                "I have made no progress for \(String(format: "%.1f", stuckSeconds)) s, so I am trying something different"
+            )
+        }
+
+        if futilityCount > 0, futilityPenalty(for: selected) > 0.5 {
+            reasons.append("I am avoiding a movement loop I noticed")
+        }
+
+        if p.goalProgressRate > 0.2 {
+            reasons.append(
+                "I am closing on the goal at \(String(format: "%.1f", p.goalProgressRate)) m/s"
+            )
+        }
+
+        if !reasons.isEmpty {
+            lines.append("Because: \(reasons.joined(separator: "; ")).")
+        }
+
+        if !p.distantObjectSummary.isEmpty {
+            lines.append("Further out: \(p.distantObjectSummary)")
+        }
+
+        return lines.joined(separator: "\n")
     }
 
     // MARK: - Cellular activity

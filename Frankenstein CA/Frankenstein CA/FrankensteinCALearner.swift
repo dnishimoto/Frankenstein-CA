@@ -265,6 +265,13 @@ final class FrankensteinCAPathField {
             let lower = cellCoordinates(for: minWorld)
             let upper = cellCoordinates(for: maxWorld)
 
+            // Objects seen far outside the local grid are not rasterized
+            // (and an empty range would be an invalid Swift range).
+            guard upper.col >= 0, lower.col <= dimension - 1,
+                  upper.row >= 0, lower.row <= dimension - 1 else {
+                continue
+            }
+
             for row in max(0, lower.row)...min(dimension - 1, max(lower.row, upper.row)) {
                 for col in max(0, lower.col)...min(dimension - 1, max(lower.col, upper.col)) {
                     guard inside(col, row) else { continue }

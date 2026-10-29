@@ -60,9 +60,18 @@ enum FrankensteinActionConstraints {
             }
 
         case .hurdle:
-            if terrain.obstacleHeight > 0,
-               terrain.obstacleHeight <= 0.75,
-               terrain.isLandingAreaClear {
+            let canClearOver =
+                terrain.obstacleHeight > 0 &&
+                terrain.obstacleHeight <= 0.75 &&
+                terrain.isLandingAreaClear
+
+            // A movable block can also be jumped ON, up to jump height.
+            let canJumpOnto =
+                terrain.canLandOnObject &&
+                terrain.obstacleHeight > 0 &&
+                terrain.obstacleHeight <= 1.0
+
+            if canClearOver || canJumpOnto {
                 actions = [.jump, .stepUp, .turnLeft, .turnRight, .backward]
             } else {
                 actions = [.turnLeft, .turnRight, .backward]
@@ -95,6 +104,14 @@ enum FrankensteinActionConstraints {
         // He can step down when the ground ahead is lower but safe.
         if terrain.isStepDownSafe(), terrain.nextGroundHeight < terrain.groundHeight {
             actions.append(.stepDown)
+        }
+
+        // A movable block in contact can be shoved forward.
+        if terrain.objectMovable,
+           !terrain.carryingObject,
+           terrain.distance.isFinite,
+           terrain.distance <= 1.0 {
+            actions.append(.pushObject)
         }
 
         // Lifting needs a liftable object within reach and free hands.

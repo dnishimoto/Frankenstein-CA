@@ -44,6 +44,15 @@ struct FrankensteinTerrainSample {
     /// True while Frankenstein is already holding an object.
     var carryingObject: Bool = false
 
+    /// True when the detected object is a movable block that can be shoved.
+    var objectMovable: Bool = false
+
+    /// True when the top of the detected movable block is within jump
+    /// height, big enough to stand on, and has clear space above it.
+    /// Jumping onto it is then a valid maneuver even if the ground beyond
+    /// the block is not a verified landing area.
+    var canLandOnObject: Bool = false
+
     // MARK: - Ground measurements
 
     /// Height of the ground beneath Frankenstein.

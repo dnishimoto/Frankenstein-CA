@@ -1,4 +1,3 @@
-
 import Foundation
 
 final class FrankensteinLearningPolicy {
@@ -729,9 +728,18 @@ final class FrankensteinLearningPolicy {
             }
 
         case .hurdle:
-            if terrain.obstacleHeight > 0,
-               terrain.obstacleHeight <= 0.75,
-               terrain.isLandingAreaClear {
+            let canClearOver =
+                terrain.obstacleHeight > 0 &&
+                terrain.obstacleHeight <= 0.75 &&
+                terrain.isLandingAreaClear
+
+            // A movable block can also be jumped ON, up to jump height.
+            let canJumpOnto =
+                terrain.canLandOnObject &&
+                terrain.obstacleHeight > 0 &&
+                terrain.obstacleHeight <= 1.0
+
+            if canClearOver || canJumpOnto {
                 actions = [.jump, .stepUp, .turnLeft, .turnRight, .walk]
             } else {
                 actions = [.turnLeft, .turnRight, .walk]
@@ -754,6 +762,13 @@ final class FrankensteinLearningPolicy {
 
         case .unknown:
             actions = [.turnLeft, .turnRight, .walk]
+        }
+
+        // A movable block in contact can be shoved forward.
+        if terrain.objectMovable,
+           !hasCarriedObject,
+           (objectObservation?.distance ?? terrain.distance) <= 1.0 {
+            actions.append(.pushObject)
         }
 
         if hasCarriedObject {

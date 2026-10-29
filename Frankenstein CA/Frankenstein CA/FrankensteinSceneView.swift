@@ -11,7 +11,8 @@ struct FrankensteinSceneView: UIViewRepresentable {
     @Binding var generation: Int
     @Binding var liveCells: Int
     @Binding var resetRequested: Bool
-    @Binding var visibleObjects: [DetectedObjectInfo]
+    @Binding var seenText: String
+    @Binding var planText: String
 
     // Keep one CA instance for the lifetime of this view value.
     // The coordinator and UI statistics must refer to this same instance.
@@ -91,15 +92,22 @@ struct FrankensteinSceneView: UIViewRepresentable {
         // Attach the same CA instance used for the displayed statistics.
         context.coordinator.attachCA(ca)
 
-        // Publish the objects the robot currently sees to SwiftUI. The
-        // coordinator reports at sensor rate; only changes are forwarded,
-        // and at most about five times per second.
+        // Publish what the robot sees, as one sentence, to SwiftUI. The
+        // coordinator reports at scan rate; only changes are forwarded, and
+        // at most about five times per second.
         let throttle = VisibleObjectsThrottle()
 
         context.coordinator.onDetectedObjects = { objects in
             guard throttle.shouldPublish(objects) else { return }
 
-            self.visibleObjects = objects
+            self.seenText = DetectedObjectInfo.summary(of: objects)
+        }
+
+        // Publish what the CA is planning, in words.
+        context.coordinator.onPlanText = { text in
+            if self.planText != text {
+                self.planText = text
+            }
         }
 
         // Publish CA generation and live-cell updates to SwiftUI.
@@ -470,7 +478,10 @@ final class VisibleObjectsThrottle {
     func shouldPublish(_ objects: [DetectedObjectInfo]) -> Bool {
         // Name plus 0.1 m distance bucket: ignores sub-centimetre jitter.
         let signature = objects
-            .map { "\($0.name)@\(Int(($0.distance * 10).rounded()))" }
+            .map {
+                "\($0.name)@\(Int(($0.distance * 10).rounded()))" +
+                "/\(Int(($0.bearing * 4).rounded()))"
+            }
             .joined(separator: "|")
 
         let now = Date.timeIntervalSinceReferenceDate

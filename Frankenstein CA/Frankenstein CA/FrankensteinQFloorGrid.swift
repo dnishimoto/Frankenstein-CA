@@ -259,6 +259,7 @@ final class FrankensteinQFloorGrid {
         case .liftObject:  return "LIFT"
         case .placeObject: return "PLACE"
         case .throwObject: return "THROW"
+        case .pushObject:  return "PUSH"
         }
     }
 

@@ -9,7 +9,8 @@ struct ContentView: View {
     @State private var generation = 0
     @State private var liveCells = 0
     @State private var resetRequested = false
-    @State private var visibleObjects: [DetectedObjectInfo] = []
+    @State private var seenText = "I have not looked around yet."
+    @State private var planText = "I have not made a plan yet."
  
     var body: some View {
         VStack(spacing: 0) {
@@ -29,7 +30,8 @@ struct ContentView: View {
                     resetRequested.toggle()
                     generation = 0
                     liveCells = 0
-                    visibleObjects = []
+                    seenText = "I have not looked around yet."
+                    planText = "I have not made a plan yet."
                 } label: {
                     Label("Reset", systemImage: "arrow.counterclockwise")
                 }
@@ -41,10 +43,11 @@ struct ContentView: View {
                 generation: $generation,
                 liveCells: $liveCells,
                 resetRequested: $resetRequested,
-                visibleObjects: $visibleObjects
+                seenText: $seenText,
+                planText: $planText
             )
 
-            VisibleObjectsList(objects: visibleObjects)
+            RobotMindPanel(seen: seenText, plan: planText)
 
             HStack(spacing: 24) {
                 VStack {
@@ -83,64 +86,51 @@ struct ContentView: View {
 }
 
 
-// MARK: - Objects the robot sees
+// MARK: - What Frankenstein sees and is planning
 
-struct VisibleObjectsList: View {
-    let objects: [DetectedObjectInfo]
+struct RobotMindPanel: View {
+    let seen: String
+    let plan: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Label("Robot sees", systemImage: "eye")
-                    .font(.caption.bold())
+        VStack(alignment: .leading, spacing: 8) {
+            section(
+                title: "Frankenstein sees",
+                symbol: "eye",
+                text: seen
+            )
 
-                Text("\(objects.count)")
-                    .font(.caption.monospacedDigit())
-                    .padding(.horizontal, 6)
-                    .background(.quaternary, in: Capsule())
+            Divider()
 
-                Spacer()
-            }
-
-            if objects.isEmpty {
-                Text("Nothing in view")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                ScrollView {
-                    VStack(spacing: 4) {
-                        ForEach(objects.indices, id: \.self) { index in
-                            row(objects[index])
-                        }
-                    }
-                }
-                .frame(maxHeight: 130)
-            }
+            section(
+                title: "Frankenstein is planning",
+                symbol: "point.topleft.down.curvedto.point.bottomright.up",
+                text: plan
+            )
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(.thinMaterial)
     }
 
-    private func row(_ object: DetectedObjectInfo) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: object.pickupable ? "hand.raised" : "cube")
-                .frame(width: 18)
-                .foregroundStyle(object.pickupable ? .orange : .secondary)
-
-            Text(object.name)
+    private func section(
+        title: String,
+        symbol: String,
+        text: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Label(title, systemImage: symbol)
                 .font(.caption.bold())
-                .lineLimit(1)
-
-            Spacer()
-
-            Text(object.dimensionsText)
-                .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
 
-            Text(object.distanceText)
-                .font(.caption.monospacedDigit())
-                .frame(width: 56, alignment: .trailing)
+            ScrollView {
+                Text(text)
+                    .font(.callout)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+            .frame(maxHeight: 96)
         }
     }
 }

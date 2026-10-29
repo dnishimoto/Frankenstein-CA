@@ -139,6 +139,20 @@ final class FrankensteinLocomotion {
     private let maximumJumpSpeed: Float = 4.0
 
     private let jumpClearance: Float = 0.30
+
+    // Landing ON a block: the jump is aimed at the middle of its top.
+    private let maximumJumpOntoRise: Float = 1.0
+    private let minimumJumpSpeed_onto: Float = 0.6
+
+    /// Forward speed used by the jump now in progress. Normally the adaptive
+    /// jumpForwardSpeed; a jump onto a block sets it so the flight ends over
+    /// the block's top.
+    private var activeJumpSpeed: Float = 1.3
+
+    private let pushWalkSpeed: Float = 0.5
+
+    /// Block displacement along the push direction reported by the Coordinator.
+    private var pushDisplacementReport: Float = 0
     private let maximumJumpDuration: Float = 3.0
 
     // MARK: - Step Movement
@@ -413,6 +427,7 @@ final class FrankensteinLocomotion {
         output.liftRequested = false
         output.placeRequested = false
         output.throwRequested = false
+        output.pushRequested = false
 
         // Stop if the episode has ended.
         guard pendingEpisodeEnd == nil else {
@@ -463,6 +478,7 @@ final class FrankensteinLocomotion {
         output.liftRequested = currentAction == .liftObject
         output.placeRequested = currentAction == .placeObject
         output.throwRequested = currentAction == .throwObject
+        output.pushRequested = currentAction == .pushObject
         output.moveDirection = 1
 
         updateMovement(deltaTime: dt, terrain: terrain)
@@ -475,7 +491,14 @@ final class FrankensteinLocomotion {
         // This prevents one Q update per render frame for the same action.
         output.reward = calculateReward(terrain: terrain)
         if actionElapsed >= 0.35, policy.isAwaitingOutcome, output.reward.isFinite {
-            let completedReward = output.reward + min(0.5, max(-0.5, lastActualDisplacement * 2.0))
+            var completedReward = output.reward + min(0.5, max(-0.5, lastActualDisplacement * 2.0))
+
+            if currentAction == .pushObject {
+                // Judge a push by what the block did, not by how far the body moved.
+                completedReward += min(0.8, max(-0.4, pushDisplacementReport * 3.0 - 0.1))
+                pushDisplacementReport = 0
+            }
+
             _ = policy.learn(
                 reward: completedReward,
                 terrain: terrain,
@@ -746,7 +769,7 @@ final class FrankensteinLocomotion {
             requestedSpeed = 0
 
         case .jump:
-            requestedSpeed = jumpForwardSpeed
+            requestedSpeed = activeJumpSpeed
 
         case .crouch:
             requestedSpeed = 0.45
@@ -768,6 +791,11 @@ final class FrankensteinLocomotion {
 
         case .stepForward:
             requestedSpeed = 0.5
+
+        case .pushObject:
+            // Slower than the block is shoved (Coordinator), so the block
+            // stays ahead of the body instead of being walked through.
+            requestedSpeed = pushWalkSpeed
 
         case .recover,
              .liftObject,
@@ -972,7 +1000,7 @@ final class FrankensteinLocomotion {
         guard grounded, !jumpInProgress, !body.fallen else { return }
         
         if terrain.terrain == .hurdle {
-            guard terrain.isLandingAreaClear else {
+            guard terrain.isLandingAreaClear || terrain.canLandOnObject else {
                 currentAction = .walk
                 output.action = .walk
                 output.speed = 0
@@ -1023,14 +1051,56 @@ final class FrankensteinLocomotion {
             terrain.distance + terrain.gapWidth + 0.8
         )
 
+        activeJumpSpeed = jumpForwardSpeed
+
+        // Jump ONTO a movable block: aim for the middle of its top.
+        // Apex must clear the top by jumpClearance, and the time to come back
+        // down to the top surface sets the forward speed needed to arrive over it.
+        if terrain.canLandOnObject,
+           terrain.obstacleHeight > 0,
+           terrain.obstacleHeight <= maximumJumpOntoRise {
+
+            let top = terrain.obstacleHeight
+            let apexRise = top + jumpClearance
+
+            let launch = min(
+                maximumJumpImpulse,
+                max(minimumJumpImpulse, sqrt(2 * gravity * apexRise))
+            )
+
+            let discriminant = launch * launch - 2 * gravity * top
+
+            if discriminant > 0 {
+                let timeAtTop = (launch + sqrt(discriminant)) / gravity
+
+                let aimDistance = max(
+                    0.5,
+                    terrain.distance + 0.5 * max(0.3, terrain.obstacleDepth)
+                )
+
+                jumpLaunchVelocity = launch
+                jumpTargetHeight = jumpStartHeight + top
+                jumpTargetDistance = aimDistance
+
+                activeJumpSpeed = min(
+                    maximumJumpSpeed,
+                    max(minimumJumpSpeed_onto, aimDistance / timeAtTop)
+                )
+
+                output.status = "Jumping onto block"
+            }
+        }
+
         verticalVelocity = jumpLaunchVelocity
         grounded = false
 
         currentAction = .jump
         output.jump = 1
-        output.speed = jumpForwardSpeed
+        output.speed = activeJumpSpeed
         output.action = .jump
-        output.status = "Jump initiated"
+        if output.status != "Jumping onto block" {
+            output.status = "Jump initiated"
+        }
     }
 
     // MARK: - Jump Physics
@@ -1051,7 +1121,7 @@ final class FrankensteinLocomotion {
         body.height += verticalVelocity * dt
 
         output.jump = 1
-        output.speed = jumpForwardSpeed
+        output.speed = activeJumpSpeed
         output.action = .jump
         output.lean = verticalVelocity > 0 ? 0.12 : -0.05
 
@@ -1061,6 +1131,33 @@ final class FrankensteinLocomotion {
                 heightError: max(0, jumpTargetHeight - body.height)
             )
         }
+    }
+
+    // MARK: - Jump state for the Coordinator
+
+    /// True once the jump has passed its apex and is coming down.
+    var jumpIsDescending: Bool {
+        jumpInProgress && verticalVelocity <= 0
+    }
+
+    /// Forward distance covered since take-off.
+    var jumpTravelledDistance: Float {
+        actualJumpDistance
+    }
+
+    /// Height of the body above where the jump started.
+    var jumpRiseSoFar: Float {
+        max(0, body.height - jumpStartHeight)
+    }
+
+    // MARK: - Push feedback
+
+    /// How far the pushed block actually moved along the push direction
+    /// (metres since the previous report). Reward for pushObject follows it.
+    func reportPushProgress(_ metres: Float) {
+        guard metres.isFinite else { return }
+
+        pushDisplacementReport = metres
     }
 
     // MARK: - Jump Landing
