@@ -4,9 +4,12 @@ import Foundation
 final class FrankensteinLearningPolicy {
 
     // MARK: - Encoded state
-    
+
     private(set) var updateLog: [FrankensteinQUpdateRecord] = []
     private(set) var updateCount: Int = 0
+    private(set) var completedActionCount: Int = 0
+
+    // Retained for compatibility with callers that provide perceived values.
     private var learnedActionValues: [FrankensteinAction: Float] = [:]
 
     private struct State: Hashable {
@@ -14,20 +17,27 @@ final class FrankensteinLearningPolicy {
         let distanceBand: Int
         let tiltBand: Int
         let grounded: Bool
+        let fallen: Bool
+
+        let obstacleHeightBand: Int
+        let obstacleDepthBand: Int
+        let groundAhead: Bool
+        let landingAreaClear: Bool
+
         let objectCategory: Int
         let objectDistanceBand: Int
         let objectHeightBand: Int
         let objectDepthBand: Int
         let objectPickupable: Bool
+        let carryingObject: Bool
     }
 
     // State -> action ID -> Q-value
     private var values: [State: [Int: Float]] = [:]
 
-    // Pending decision; at most one action may await an outcome.
+    // One pending transition at a time.
     private var lastState: State?
     private var lastAction: FrankensteinAction?
-    private var pendingAllowedActions: Set<FrankensteinAction> = []
     private var actionPendingLearning = false
 
     // MARK: - Learning parameters
@@ -36,8 +46,8 @@ final class FrankensteinLearningPolicy {
     var discount: Float = 0.90
     var exploration: Float = 0.20
 
-    /// Legacy compatibility weight for callers that still use choose(preferredAction:).
-    /// The executive path uses learnedActionValues and lets the CA make the final choice.
+    /// Used only by the legacy policy-owned action-selection API.
+    /// It does not affect the CA's executive decision.
     var caPreferenceWeight: Float = 0.15
 
     private let minimumExploration: Float = 0.03
@@ -45,33 +55,30 @@ final class FrankensteinLearningPolicy {
 
     // MARK: - Diagnostics
 
-    private(set) var completedActionCount: Int = 0
-
     var isAwaitingOutcome: Bool {
         actionPendingLearning
-    }
-
-    var learnedStateCount: Int {
-        values.count
     }
 
     var pendingAction: FrankensteinAction? {
         guard actionPendingLearning else { return nil }
         return lastAction
     }
-    
-    
-    // MARK: - Perceived Action Values
 
+    var learnedStateCount: Int {
+        values.count
+    }
+
+    // MARK: - Perceived action values
+
+    /// Retains finite values supplied by an upstream caller.
+    /// These values do not overwrite the learned Q-table.
     func updatePerceivedActionValues(
         allowedActions: [FrankensteinAction],
         qValues: [FrankensteinAction: Float]
     ) {
-        // Keep only actions that are currently available.
-        let validActions = Set(allowedActions)
+        learnedActionValues.removeAll(keepingCapacity: true)
 
-        // Store the perception-derived values in the existing Q-value table.
-        for action in validActions {
+        for action in Set(allowedActions) {
             guard let value = qValues[action], value.isFinite else {
                 continue
             }
@@ -80,19 +87,21 @@ final class FrankensteinLearningPolicy {
         }
     }
 
-
     // MARK: - State encoding
 
     private func makeState(
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
-        objectObservation: FrankensteinObjectObservation? = nil
+        objectObservation: FrankensteinObjectObservation? = nil,
+        hasCarriedObject: Bool = false
     ) -> State {
 
         let distance = terrain.distanceAhead
-        let distanceBand: Int
 
-        if !distance.isFinite || distance < 0.8 {
+        let distanceBand: Int
+        if !distance.isFinite || distance < 0 {
+            distanceBand = 3
+        } else if distance < 0.8 {
             distanceBand = 0
         } else if distance < 2.0 {
             distanceBand = 1
@@ -101,9 +110,11 @@ final class FrankensteinLearningPolicy {
         }
 
         let tilt = abs(body.tilt)
-        let tiltBand: Int
 
-        if !tilt.isFinite || tilt < 0.12 {
+        let tiltBand: Int
+        if !tilt.isFinite {
+            tiltBand = 3
+        } else if tilt < 0.12 {
             tiltBand = 0
         } else if tilt < 0.35 {
             tiltBand = 1
@@ -111,12 +122,42 @@ final class FrankensteinLearningPolicy {
             tiltBand = 2
         }
 
+        let obstacleHeight = terrain.obstacleHeight
+        let obstacleHeightBand: Int
+
+        if !obstacleHeight.isFinite || obstacleHeight <= 0 {
+            obstacleHeightBand = 0
+        } else if obstacleHeight < 0.4 {
+            obstacleHeightBand = 1
+        } else if obstacleHeight < 1.0 {
+            obstacleHeightBand = 2
+        } else {
+            obstacleHeightBand = 3
+        }
+
+        let obstacleDepth = terrain.obstacleDepth
+        let obstacleDepthBand: Int
+
+        if !obstacleDepth.isFinite || obstacleDepth <= 0 {
+            obstacleDepthBand = 0
+        } else if obstacleDepth < 0.3 {
+            obstacleDepthBand = 1
+        } else if obstacleDepth < 1.0 {
+            obstacleDepthBand = 2
+        } else {
+            obstacleDepthBand = 3
+        }
+
         let objectCategory = objectObservation?.categoryIndex ?? 0
         let objectDistance = objectObservation?.distance ?? .infinity
+
         let objectDistanceBand: Int
+
         if objectObservation == nil {
             objectDistanceBand = 0
-        } else if !objectDistance.isFinite || objectDistance < 0.8 {
+        } else if !objectDistance.isFinite || objectDistance < 0 {
+            objectDistanceBand = 4
+        } else if objectDistance < 0.8 {
             objectDistanceBand = 1
         } else if objectDistance < 2.0 {
             objectDistanceBand = 2
@@ -125,22 +166,51 @@ final class FrankensteinLearningPolicy {
         }
 
         let objectHeight = objectObservation?.height ?? 0
-        let objectHeightBand = objectObservation == nil ? 0 :
-            (objectHeight < 0.4 ? 1 : (objectHeight < 1.0 ? 2 : 3))
+
+        let objectHeightBand: Int
+        if objectObservation == nil {
+            objectHeightBand = 0
+        } else if !objectHeight.isFinite || objectHeight < 0 {
+            objectHeightBand = 4
+        } else if objectHeight < 0.4 {
+            objectHeightBand = 1
+        } else if objectHeight < 1.0 {
+            objectHeightBand = 2
+        } else {
+            objectHeightBand = 3
+        }
+
         let objectDepth = objectObservation?.depth ?? 0
-        let objectDepthBand = objectObservation == nil ? 0 :
-            (objectDepth < 0.3 ? 1 : (objectDepth < 1.0 ? 2 : 3))
+
+        let objectDepthBand: Int
+        if objectObservation == nil {
+            objectDepthBand = 0
+        } else if !objectDepth.isFinite || objectDepth < 0 {
+            objectDepthBand = 4
+        } else if objectDepth < 0.3 {
+            objectDepthBand = 1
+        } else if objectDepth < 1.0 {
+            objectDepthBand = 2
+        } else {
+            objectDepthBand = 3
+        }
 
         return State(
             terrain: terrainIndex(for: terrain.terrain),
             distanceBand: distanceBand,
             tiltBand: tiltBand,
             grounded: body.grounded,
+            fallen: body.fallen,
+            obstacleHeightBand: obstacleHeightBand,
+            obstacleDepthBand: obstacleDepthBand,
+            groundAhead: terrain.isGroundAhead,
+            landingAreaClear: terrain.isLandingAreaClear,
             objectCategory: objectCategory,
             objectDistanceBand: objectDistanceBand,
             objectHeightBand: objectHeightBand,
             objectDepthBand: objectDepthBand,
-            objectPickupable: objectObservation?.pickupable ?? false
+            objectPickupable: objectObservation?.pickupable ?? false,
+            carryingObject: hasCarriedObject
         )
     }
 
@@ -148,22 +218,14 @@ final class FrankensteinLearningPolicy {
         for terrain: FrankensteinTerrain
     ) -> Int {
         switch terrain {
-        case .flat:
-            return 0
-        case .hurdle:
-            return 1
-        case .gap:
-            return 2
-        case .lowCeiling:
-            return 3
-        case .raisedStep:
-            return 4
-        case .slope:
-            return 5
-        case .uneven:
-            return 6
-        case .unknown:
-            return 7
+        case .flat:       return 0
+        case .hurdle:     return 1
+        case .gap:        return 2
+        case .lowCeiling: return 3
+        case .raisedStep: return 4
+        case .slope:      return 5
+        case .uneven:     return 6
+        case .unknown:    return 7
         }
     }
 
@@ -184,53 +246,74 @@ final class FrankensteinLearningPolicy {
         values[state, default: [:]][action.rawValue] = value
     }
 
-    // MARK: - CA executive-controller interface
+    // MARK: - CA executive interface
 
-    /// Q-values are advice to the CA. This method does not select or execute an action.
+    /// Returns learned Q-values for the current observation.
+    /// The CA uses these values as advice and selects the action.
     func learnedActionValues(
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
-        objectObservation: FrankensteinObjectObservation? = nil
+        objectObservation: FrankensteinObjectObservation? = nil,
+        hasCarriedObject: Bool = false
     ) -> [FrankensteinAction: Float] {
+
         actionValues(
             terrain: terrain,
             body: body,
-            objectObservation: objectObservation
+            objectObservation: objectObservation,
+            hasCarriedObject: hasCarriedObject
         )
     }
 
-    /// Starts a learning transition for the action the CA actually chose.
-    /// The Q-policy records the CA decision, rather than replacing it.
+    /// Records the action selected by the CA.
+    ///
+    /// The CA is the final decision-maker. This method does not
+    /// reject an action because it is absent from the policy's
+    /// suggested action set.
+    ///
+    /// Returns false only if a previous transition is still pending.
     @discardableResult
     func beginCAChosenAction(
         _ action: FrankensteinAction,
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
-        objectObservation: FrankensteinObjectObservation? = nil
+        objectObservation: FrankensteinObjectObservation? = nil,
+        hasCarriedObject: Bool = false
     ) -> Bool {
+
         guard !actionPendingLearning else {
-            print("[Q-Learning] Cannot begin CA action: previous action still awaits its outcome.")
+            print(
+                "[Q-Learning] Cannot record CA decision: " +
+                "previous action still awaits its outcome."
+            )
             return false
         }
-        let state = makeState(terrain: terrain, body: body, objectObservation: objectObservation)
-        let allowed = allowedActions(terrain: terrain, body: body)
-        guard allowed.contains(action) else {
-            print("[Q-Learning] CA action rejected by policy constraints: \(action)")
-            return false
-        }
+
+        let state = makeState(
+            terrain: terrain,
+            body: body,
+            objectObservation: objectObservation,
+            hasCarriedObject: hasCarriedObject
+        )
+
         _ = values[state, default: [:]]
+
         lastState = state
         lastAction = action
-        pendingAllowedActions = Set(allowed)
         actionPendingLearning = true
-        print("[Q-Learning] Learning target set by CA: \(action)")
+
+        print("[Q-Learning] CA selected action: \(action)")
+        print("[Q-Learning] Learning state recorded.")
+        print("[Q-Learning] Awaiting movement outcome: true")
+
         return true
     }
 
-    // MARK: - Action selection
+    // MARK: - Legacy action selection
 
-    /// Existing API: preserves compatibility with callers that do
-    /// not supply a CA preference.
+    /// Compatibility API for callers that still ask the policy
+    /// to choose an action. The CA executive path should not use this
+    /// method to replace its own decision.
     func choose(
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState
@@ -242,16 +325,12 @@ final class FrankensteinLearningPolicy {
         )
     }
 
-    /// Selects an action using Q-values, exploration, and optional
-    /// CA preference. The selected action stays pending until its
-    /// outcome has been recorded.
     func choose(
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
         preferredAction: FrankensteinAction?
     ) -> FrankensteinAction {
 
-        // Never replace a pending decision with a new decision.
         if actionPendingLearning, let lastAction {
             return lastAction
         }
@@ -267,29 +346,25 @@ final class FrankensteinLearningPolicy {
         )
 
         guard !candidates.isEmpty else {
-            // Defensive fallback. The movement controller must
-            // still decide whether stopping or recovering is safe.
             let fallback: FrankensteinAction = .walk
 
             lastState = state
             lastAction = fallback
-            pendingAllowedActions = [fallback]
             actionPendingLearning = true
 
             _ = values[state, default: [:]]
 
-            print("[Q-Learning] Selected fallback: \(fallback)")
+            print("[Q-Learning] Legacy fallback selected: \(fallback)")
             return fallback
         }
 
-        // Create the table entry so a newly encountered state is
-        // counted even before its first reward update.
         _ = values[state, default: [:]]
 
         let selected: FrankensteinAction
 
-        if Double.random(in: 0.0..<1.0) < Double(exploration) {
-            // Exploration only considers allowed actions.
+        if Double.random(in: 0.0..<1.0) < Double(
+            min(max(exploration, 0), 1)
+        ) {
             selected = candidates.randomElement() ?? .walk
         } else {
             selected = candidates.max { lhs, rhs in
@@ -307,24 +382,15 @@ final class FrankensteinLearningPolicy {
 
         lastState = state
         lastAction = selected
-        pendingAllowedActions = Set(candidates)
         actionPendingLearning = true
 
-        print("[Q-Learning] Selected action: \(selected)")
-        print("[Q-Learning] CA preference: \(String(describing: preferredAction))")
-        print("[Q-Learning] Terrain ID: \(state.terrain)")
-        print("[Q-Learning] Distance band: \(state.distanceBand)")
-        print("[Q-Learning] Tilt band: \(state.tiltBand)")
-        print("[Q-Learning] Grounded: \(state.grounded)")
+        print("[Q-Learning] Legacy policy selected: \(selected)")
         print("[Q-Learning] Distinct states: \(learnedStateCount)")
         print("[Q-Learning] Updates: \(updateCount)")
-        print("[Q-Learning] Awaiting outcome: true")
 
         return selected
     }
 
-    /// Scores an action. The CA provides a small preference bonus;
-    /// it cannot add an action that is absent from the allowed set.
     private func selectionScore(
         action: FrankensteinAction,
         state: State,
@@ -343,16 +409,14 @@ final class FrankensteinLearningPolicy {
         return learnedValue + caPreferenceWeight
     }
 
-    // MARK: - Confirm actual execution
+    // MARK: - Execution feedback
 
-    /// Call after the controller has applied its safety checks and
-    /// decided which action will actually execute.
+    /// Reports the action that actually executed.
     ///
-    /// Returns false if there is no pending decision or the executed
-    /// action was not in the pending decision's allowed-action set.
+    /// The CA remains the decision-maker. If the movement controller
+    /// applies a safety override, learning records the reported action.
     ///
-    /// If the controller performs a safety override, that executed
-    /// action becomes the action evaluated by the learning update.
+    /// Safety checks must still be performed by the movement controller.
     @discardableResult
     func confirmExecutedAction(
         _ executedAction: FrankensteinAction
@@ -360,19 +424,18 @@ final class FrankensteinLearningPolicy {
 
         guard actionPendingLearning,
               let selectedAction = lastAction else {
-            print("[Q-Learning] Execution confirmation failed: no pending decision.")
-            return false
-        }
-
-        guard pendingAllowedActions.contains(executedAction) else {
-            print("[Q-Learning] Execution confirmation failed: action was not in the allowed set.")
-            print("[Q-Learning] Selected: \(selectedAction)")
-            print("[Q-Learning] Reported executed: \(executedAction)")
+            print(
+                "[Q-Learning] Execution confirmation failed: " +
+                "no pending CA decision."
+            )
             return false
         }
 
         if selectedAction != executedAction {
-            print("[Q-Learning] Execution override: \(selectedAction) -> \(executedAction)")
+            print(
+                "[Q-Learning] Executed action differs from CA decision: " +
+                "\(selectedAction) -> \(executedAction)"
+            )
         } else {
             print("[Q-Learning] Execution confirmed: \(executedAction)")
         }
@@ -383,24 +446,32 @@ final class FrankensteinLearningPolicy {
 
     // MARK: - Outcome-based learning
 
-    /// Records one outcome for the pending action.
-    ///
-    /// Returns false if no action is awaiting an outcome. This guard
-    /// prevents repeated frame-loop calls from updating the same
-    /// completed action multiple times.
+    /// Applies one Q-learning update to the pending transition.
     @discardableResult
     func learn(
         reward: Float,
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
         terminal: Bool = false,
-        objectObservation: FrankensteinObjectObservation? = nil
+        objectObservation: FrankensteinObjectObservation? = nil,
+        hasCarriedObject: Bool = false
     ) -> Bool {
 
         guard actionPendingLearning,
               let state = lastState,
               let action = lastAction else {
             print("[Q-Learning] Ignored outcome: no pending action.")
+            return false
+        }
+
+        guard reward.isFinite,
+              learningRate.isFinite,
+              discount.isFinite,
+              (0.0...1.0).contains(learningRate),
+              (0.0...1.0).contains(discount) else {
+            print(
+                "[Q-Learning] Rejected invalid reward or learning parameters."
+            )
             return false
         }
 
@@ -412,7 +483,8 @@ final class FrankensteinLearningPolicy {
         let nextState = makeState(
             terrain: terrain,
             body: body,
-            objectObservation: objectObservation
+            objectObservation: objectObservation,
+            hasCarriedObject: hasCarriedObject
         )
 
         let nextValue: Float
@@ -422,20 +494,26 @@ final class FrankensteinLearningPolicy {
         } else {
             let nextActions = allowedActions(
                 terrain: terrain,
-                body: body
+                body: body,
+                objectObservation: objectObservation,
+                hasCarriedObject: hasCarriedObject
             )
 
             nextValue = nextActions
                 .map { qValue(for: $0, in: nextState) }
+                .filter(\.isFinite)
                 .max() ?? 0
         }
 
-        // Q-learning update:
-        // Q(s,a) <- Q(s,a) + alpha * (target - Q(s,a))
         let target = reward + (terminal ? 0 : discount * nextValue)
 
         let updatedValue =
             oldValue + learningRate * (target - oldValue)
+
+        guard updatedValue.isFinite else {
+            print("[Q-Learning] Rejected non-finite Q-value.")
+            return false
+        }
 
         setQValue(
             updatedValue,
@@ -448,7 +526,7 @@ final class FrankensteinLearningPolicy {
 
         exploration = max(
             minimumExploration,
-            exploration * explorationDecay
+            min(max(exploration, 0), 1) * explorationDecay
         )
 
         print("[Q-Learning] Outcome action: \(action)")
@@ -464,23 +542,24 @@ final class FrankensteinLearningPolicy {
         return true
     }
 
-    /// Compatibility API used by the existing locomotion adapter.
-  
+    // MARK: - Jump feedback
 
-    /// Use for jump completion instead of also recording the same
-    /// jump through the ordinary completion path.
     @discardableResult
     func reportJumpOutcome(
         succeeded: Bool,
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
         terminal: Bool = false,
-        objectObservation: FrankensteinObjectObservation? = nil
+        objectObservation: FrankensteinObjectObservation? = nil,
+        hasCarriedObject: Bool = false
     ) -> Bool {
 
         guard actionPendingLearning,
               lastAction == .jump else {
-            print("[Q-Learning] Ignored jump outcome: pending action is not jump.")
+            print(
+                "[Q-Learning] Ignored jump outcome: " +
+                "pending action is not jump."
+            )
             return false
         }
 
@@ -489,14 +568,14 @@ final class FrankensteinLearningPolicy {
             terrain: terrain,
             body: body,
             terminal: terminal,
-            objectObservation: objectObservation
+            objectObservation: objectObservation,
+            hasCarriedObject: hasCarriedObject
         )
     }
 
     private func clearPendingAction() {
         lastState = nil
         lastAction = nil
-        pendingAllowedActions.removeAll()
         actionPendingLearning = false
     }
 
@@ -506,13 +585,15 @@ final class FrankensteinLearningPolicy {
         for action: FrankensteinAction,
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
-        objectObservation: FrankensteinObjectObservation? = nil
+        objectObservation: FrankensteinObjectObservation? = nil,
+        hasCarriedObject: Bool = false
     ) -> Float {
 
         let state = makeState(
             terrain: terrain,
             body: body,
-            objectObservation: objectObservation
+            objectObservation: objectObservation,
+            hasCarriedObject: hasCarriedObject
         )
 
         return qValue(
@@ -524,18 +605,22 @@ final class FrankensteinLearningPolicy {
     func preferredAction(
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
-        objectObservation: FrankensteinObjectObservation? = nil
+        objectObservation: FrankensteinObjectObservation? = nil,
+        hasCarriedObject: Bool = false
     ) -> FrankensteinAction? {
 
         let state = makeState(
             terrain: terrain,
             body: body,
-            objectObservation: objectObservation
+            objectObservation: objectObservation,
+            hasCarriedObject: hasCarriedObject
         )
 
         let candidates = allowedActions(
             terrain: terrain,
-            body: body
+            body: body,
+            objectObservation: objectObservation,
+            hasCarriedObject: hasCarriedObject
         )
 
         return candidates.max {
@@ -547,21 +632,27 @@ final class FrankensteinLearningPolicy {
     func actionValues(
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
-        objectObservation: FrankensteinObjectObservation? = nil
+        objectObservation: FrankensteinObjectObservation? = nil,
+        hasCarriedObject: Bool = false
     ) -> [FrankensteinAction: Float] {
 
         let state = makeState(
             terrain: terrain,
             body: body,
-            objectObservation: objectObservation
+            objectObservation: objectObservation,
+            hasCarriedObject: hasCarriedObject
         )
 
         var result: [FrankensteinAction: Float] = [:]
 
-        for action in allowedActions(
+        let candidates = allowedActions(
             terrain: terrain,
-            body: body
-        ) {
+            body: body,
+            objectObservation: objectObservation,
+            hasCarriedObject: hasCarriedObject
+        )
+
+        for action in candidates {
             result[action] = qValue(
                 for: action,
                 in: state
@@ -571,35 +662,41 @@ final class FrankensteinLearningPolicy {
         return result
     }
 
-    /// Prints the actual encoded state so a stuck state count can
-    /// be investigated against the terrain sensor's output.
     func printStateDiagnostics(
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
-        objectObservation: FrankensteinObjectObservation? = nil
+        objectObservation: FrankensteinObjectObservation? = nil,
+        hasCarriedObject: Bool = false
     ) {
 
         let state = makeState(
             terrain: terrain,
             body: body,
-            objectObservation: objectObservation
+            objectObservation: objectObservation,
+            hasCarriedObject: hasCarriedObject
         )
 
         print("[Q State] Terrain ID: \(state.terrain)")
         print("[Q State] Distance band: \(state.distanceBand)")
         print("[Q State] Tilt band: \(state.tiltBand)")
         print("[Q State] Grounded: \(state.grounded)")
+        print("[Q State] Fallen: \(state.fallen)")
+        print("[Q State] Obstacle height/depth bands: \(state.obstacleHeightBand)/\(state.obstacleDepthBand)")
+        print("[Q State] Ground ahead: \(state.groundAhead)")
+        print("[Q State] Landing area clear: \(state.landingAreaClear)")
         print("[Q State] Object category: \(state.objectCategory)")
         print("[Q State] Object distance band: \(state.objectDistanceBand)")
         print("[Q State] Object height/depth bands: \(state.objectHeightBand)/\(state.objectDepthBand)")
         print("[Q State] Object pickupable: \(state.objectPickupable)")
+        print("[Q State] Carrying object: \(state.carryingObject)")
         print("[Q State] Distinct states: \(learnedStateCount)")
+        print("[Q State] Update count: \(updateCount)")
     }
 
-    // MARK: - Allowed actions
+    // MARK: - Suggested actions
 
-    /// This is a policy-side constraint, not a replacement for
-    /// collision checks and real-time safety in the controller.
+    /// This method supplies suggestions to legacy policy callers.
+    /// It is NOT the authority for the CA's final decision.
     func allowedActions(
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
@@ -607,11 +704,16 @@ final class FrankensteinLearningPolicy {
         hasCarriedObject: Bool = false
     ) -> [FrankensteinAction] {
 
-        // Recover first if the character has fallen.
-        if body.fallen { return [.recover] }
-        if !body.grounded { return [.walk] }
+        if body.fallen {
+            return [.recover]
+        }
+
+        if !body.grounded {
+            return [.walk]
+        }
 
         var actions: [FrankensteinAction]
+
         switch terrain.terrain {
         case .gap:
             if terrain.gapWidth > 0,
@@ -625,6 +727,7 @@ final class FrankensteinLearningPolicy {
             } else {
                 actions = [.turnLeft, .turnRight]
             }
+
         case .hurdle:
             if terrain.obstacleHeight > 0,
                terrain.obstacleHeight <= 0.75,
@@ -633,8 +736,10 @@ final class FrankensteinLearningPolicy {
             } else {
                 actions = [.turnLeft, .turnRight, .walk]
             }
+
         case .lowCeiling:
             actions = [.crouch, .crawl, .turnLeft, .turnRight]
+
         case .raisedStep:
             if terrain.obstacleHeight > 0,
                terrain.obstacleHeight <= 0.55,
@@ -643,14 +748,14 @@ final class FrankensteinLearningPolicy {
             } else {
                 actions = [.turnLeft, .turnRight, .walk]
             }
+
         case .flat, .slope, .uneven:
             actions = [.walk, .run, .turnLeft, .turnRight]
+
         case .unknown:
-            actions = [.turnLeft, .turnRight]
+            actions = [.turnLeft, .turnRight, .walk]
         }
 
-        // Object actions are candidates only when their preconditions are sensed.
-        // A pickup is not considered safe from a distant or non-pickupable hit.
         if hasCarriedObject {
             actions.append(contentsOf: [.placeObject, .throwObject])
         } else if let objectObservation,
@@ -660,19 +765,22 @@ final class FrankensteinLearningPolicy {
                   objectObservation.distance <= 0.95 {
             actions.append(.liftObject)
         }
-        return actions
+
+        return Array(Set(actions))
     }
 
     // MARK: - Episode reset
 
-    /// Clears the pending transition while preserving learned Q-values.
+    /// Clears the pending transition but preserves learned Q-values.
     func resetEpisode() {
         clearPendingAction()
     }
 }
+
 // MARK: - Policy adapter
 
 protocol FrankensteinStage1PolicyAdapter: AnyObject {
+
     func chooseAction(
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState
@@ -686,9 +794,7 @@ protocol FrankensteinStage1PolicyAdapter: AnyObject {
     )
 }
 
-
 // MARK: - Adapter conformance
-
 
 extension FrankensteinLearningPolicy: FrankensteinStage1PolicyAdapter {
 
@@ -696,7 +802,7 @@ extension FrankensteinLearningPolicy: FrankensteinStage1PolicyAdapter {
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState
     ) -> FrankensteinAction {
-        return choose(
+        choose(
             terrain: terrain,
             body: body
         )
@@ -708,7 +814,7 @@ extension FrankensteinLearningPolicy: FrankensteinStage1PolicyAdapter {
         body: FrankensteinBodyState,
         terminal: Bool
     ) {
-        learn(
+        _ = learn(
             reward: reward,
             terrain: terrain,
             body: body,
