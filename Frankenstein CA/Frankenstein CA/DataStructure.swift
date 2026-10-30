@@ -10,6 +10,7 @@ import SwiftUI
 import SceneKit
 
 struct FrankensteinCAPerception {
+    var position: SIMD3<Float> = .zero
     var headingError: Float = 0
     var pathDistance: Float = .infinity
     var isDetouring = false
@@ -32,7 +33,6 @@ struct FrankensteinCAPerception {
     var stateKey = "none"
     var timestamp: TimeInterval = 0
 }
-
 
 
 struct PlanStep: Identifiable, Equatable {

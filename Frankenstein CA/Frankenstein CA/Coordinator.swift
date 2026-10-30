@@ -3839,7 +3839,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             }
         }
 
-        if let narrative = ca?.planNarrative {
+        if let narrative = ca?.lastDecisionDescription {
             DispatchQueue.main.async { [weak self] in
                 self?.onPlanText?(narrative)
             }

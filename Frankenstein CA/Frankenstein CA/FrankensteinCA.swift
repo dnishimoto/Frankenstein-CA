@@ -3,7 +3,6 @@ import Combine
 import SceneKit
 import UIKit
 
-
 final class FrankensteinCA: ObservableObject {
 
     let size = 18
@@ -19,6 +18,7 @@ final class FrankensteinCA: ObservableObject {
     // MARK: - Letter Blueprint Coordinates & 12 Movable Blocks Setup for Spelling "FRANKENSTEIN"
     private let spellingTargetWord = "FRANKENSTEIN"
     private var currentLetterSlotIndex = 0
+    private weak var cachedRootNode: SCNNode?
     
     private var letterCoordinates: [SIMD2<Float>] {
         [
@@ -50,6 +50,7 @@ final class FrankensteinCA: ObservableObject {
 
     /// Spawns 12 compact movable letter blocks with embossed letter labels on top.
     func setupSpellingBlocks(in rootNode: SCNNode) {
+        self.cachedRootNode = rootNode
         let blockSideLength: CGFloat = 0.4
         let cornerRadius: CGFloat = 0.04
         let startX: Float = -2.2
@@ -112,6 +113,35 @@ final class FrankensteinCA: ObservableObject {
             blockNode.addChildNode(letterNode)
             rootNode.addChildNode(blockNode)
         }
+    }
+
+    /// Scans the scene graph for movable blocks matching the current target letter.
+    func findNextTargetBlock(from robotPosition: SIMD2<Float>) -> (position: SIMD2<Float>, character: Character)? {
+        guard let root = cachedRootNode else { return nil }
+        let targetChar = Array(spellingTargetWord)[currentLetterSlotIndex]
+        
+        var closestBlockPos: SIMD2<Float>? = nil
+        var minDistance: Float = .infinity
+        
+        for child in root.childNodes {
+            guard let name = child.name, name.hasPrefix("MovableBlock_") else { continue }
+            let components = name.split(separator: "_")
+            guard components.count >= 3, let char = components[2].first else { continue }
+            
+            if char == targetChar {
+                let pos = SIMD2<Float>(Float(child.position.x), Float(child.position.z))
+                let dist = simd_distance(robotPosition, pos)
+                if dist < minDistance {
+                    minDistance = dist
+                    closestBlockPos = pos
+                }
+            }
+        }
+        
+        if let pos = closestBlockPos {
+            return (pos, targetChar)
+        }
+        return nil
     }
 
     private var grid: [[Bool]]
@@ -194,7 +224,7 @@ final class FrankensteinCA: ObservableObject {
         if measured < 0.05 {
             stuckSeconds += windowDuration
         } else {
-            stuckSeconds = max(0, stuckSeconds - 2 * windowDuration)
+            stuckSeconds = max(0, stuckSeconds - 2.0 * windowDuration)
         }
 
         decisionHeadingError = currentError
@@ -206,16 +236,27 @@ final class FrankensteinCA: ObservableObject {
 
     // MARK: - Q-Path Search and Goal Queue Routing
     
-    /// Evaluates queued goals and searches Q-paths to pick the best navigation vector.
+    /// Evaluates queued goals, tracks the specific letter block, and searches Q-paths to pick the best navigation vector.
     func evaluateGoalQueuePath(
         currentPosition: SIMD2<Float>,
         qValues: [FrankensteinAction: Float],
         pathField: FrankensteinCAPathField
     ) -> Float? {
-        let targetSlot = currentLetterSlot
+        let targetGoalPosition: SIMD2<Float>
+        if let blockInfo = findNextTargetBlock(from: currentPosition) {
+            targetGoalPosition = blockInfo.position
+            
+            let slotPosition = currentLetterSlot
+            if simd_distance(blockInfo.position, slotPosition) < 0.3 {
+                advanceToNextLetter()
+            }
+        } else {
+            targetGoalPosition = currentLetterSlot
+        }
+        
         return pathField.searchOptimalQPath(
             currentPosition: currentPosition,
-            goalPosition: targetSlot,
+            goalPosition: targetGoalPosition,
             qValues: qValues
         )
     }
@@ -278,7 +319,7 @@ final class FrankensteinCA: ObservableObject {
         }
 
         if stuckSeconds > stuckThreshold, !p.atGoal {
-            let pressure = min(2, 0.5 * stuckSeconds)
+            let pressure = min(2.0, 0.5 * stuckSeconds)
 
             if action == decisionAction {
                 score -= pressure
@@ -328,8 +369,8 @@ final class FrankensteinCA: ObservableObject {
 
     private func wrapped(_ angle: Float) -> Float {
         var value = angle
-        while value > .pi { value -= 2 * .pi }
-        while value < -.pi { value += 2 * .pi }
+        while value > .pi { value -= 2.0 * .pi }
+        while value < -.pi { value += 2.0 * .pi }
         return value
     }
 
@@ -1031,98 +1072,7 @@ final class FrankensteinCA: ObservableObject {
         return parts
     }
 
-    func decideAction(
-        terrain: FrankensteinTerrainSample,
-        body: FrankensteinBodyState,
-        allowedActions: [FrankensteinAction],
-        qValues: [FrankensteinAction: Float],
-        exploration: Float = 0
-    ) -> FrankensteinAction {
-        guard !allowedActions.isEmpty else {
-            lastDecisionDescription = "No permitted action"
-            return .walk
-        }
-
-        setQValues(qValues)
-
-        let p = currentPerception()
-        let stateKey = p?.stateKey ?? "none"
-
-        updatePlanBuffer(perception: p, terrain: terrain)
-
-        let epsilon = max(exploration, randomExploration)
-
-        if Float.random(in: 0..<1) < epsilon,
-           let random = allowedActions
-            .filter({ $0 != .recover })
-            .randomElement() {
-            recordVisit(action: random, stateKey: stateKey)
-            rememberDecision(random, stateKey: stateKey, perception: p)
-
-            planNarrative =
-                "Now: I will \(phrase(for: random, terrain: terrain, perception: p)) " +
-                "to see what happens. I explore a little so I can learn what works."
-
-            lastDecisionDescription =
-                "Action=\(random) | exploring (eps=\(epsilon)) | futility-aware"
-
-            planBuffer.insertImmediateStep(
-                PlanStep(action: random, description: "Exploration step")
-            )
-            planBuffer.markCurrentStepCompleted()
-
-            return random
-        }
-
-        let plan: [FrankensteinAction: Float] = p.map {
-            planValues(for: allowedActions, perception: $0)
-        } ?? [:]
-
-        let selected: FrankensteinAction
-        if let step = planBuffer.currentStep, allowedActions.contains(step.action) {
-            selected = step.action
-            planBuffer.markCurrentStepCompleted()
-        } else {
-            var candidate = allowedActions[0]
-            var bestParts = scoreParts(
-                for: candidate,
-                perception: p,
-                terrain: terrain,
-                plan: plan
-            )
-
-            for action in allowedActions.dropFirst() {
-                let parts = scoreParts(
-                    for: action,
-                    perception: p,
-                    terrain: terrain,
-                    plan: plan
-                )
-
-                if parts.total > bestParts.total {
-                    candidate = action
-                    bestParts = parts
-                }
-            }
-            selected = candidate
-            planBuffer.insertImmediateStep(
-                PlanStep(action: selected, description: phrase(for: selected, terrain: terrain, perception: p))
-            )
-            planBuffer.markCurrentStepCompleted()
-        }
-
-        recordVisit(action: selected, stateKey: stateKey)
-        rememberDecision(selected, stateKey: stateKey, perception: p)
-
-        planNarrative = buildNarrative(
-            selected: selected,
-            terrain: terrain,
-            perception: p
-        )
-
-        return selected
-    }
-
+    // MARK: - Extended Plan Buffer Logic with Stacking Support
     private func updatePlanBuffer(
         perception p: FrankensteinCAPerception?,
         terrain: FrankensteinTerrainSample
@@ -1132,7 +1082,7 @@ final class FrankensteinCA: ObservableObject {
         let newSteps = plannedSequence.map { action in
             PlanStep(
                 action: action,
-                description: phrase(for: action, terrain: terrain, perception: p)
+                description: "Execute action \(action)"
             )
         }
 
@@ -1143,158 +1093,88 @@ final class FrankensteinCA: ObservableObject {
         }
     }
 
-    private(set) var planNarrative = "Waiting for perception…"
-
-    private func plainName(_ raw: String) -> String {
-        guard !raw.isEmpty else { return "object" }
-
-        var words = ""
-
-        for character in raw {
-            if character.isUppercase, !words.isEmpty, words.last != " " {
-                words.append(" ")
+    func decideAction(
+            terrain: FrankensteinTerrainSample,
+            body: FrankensteinBodyState,
+            allowedActions: [FrankensteinAction],
+            qValues: [FrankensteinAction: Float],
+            exploration: Float = 0
+        ) -> FrankensteinAction {
+            guard !allowedActions.isEmpty else {
+                lastDecisionDescription = "No permitted action"
+                return .walk
             }
 
-            if character.isNumber { continue }
+            setQValues(qValues)
 
-            words.append(character)
-        }
+            let p = currentPerception()
+            let stateKey = p?.stateKey ?? "none"
 
-        return words
-            .replacingOccurrences(of: "_", with: " ")
-            .replacingOccurrences(of: "-", with: " ")
-            .lowercased()
-            .trimmingCharacters(in: .whitespaces)
-    }
+            updatePlanBuffer(perception: p, terrain: terrain)
 
-    private func phrase(
-        for action: FrankensteinAction,
-        terrain: FrankensteinTerrainSample,
-        perception p: FrankensteinCAPerception?
-    ) -> String {
-        let object = plainName(p?.nearestObjectName ?? terrain.objectName)
+            let epsilon = max(exploration, randomExploration)
 
-        switch action {
-        case .walk:        return "walk"
-        case .run:         return "run"
-        case .turnLeft:    return "turn left"
-        case .turnRight:   return "turn right"
-        case .jump:
-            if terrain.canLandOnObject { return "jump onto the \(object)" }
-            if terrain.terrain == .gap { return "jump the gap" }
-            return "jump"
-        case .crouch:      return "crouch"
-        case .crawl:       return "crawl"
-        case .stepUp:      return "step up"
-        case .stepDown:    return "step down"
-        case .roll:        return "roll"
-        case .recover:     return "get back up"
-        case .backward:    return "back away"
-        case .stepForward: return "step forward"
-        case .liftObject:  return "pick up the \(object)"
-        case .placeObject: return "set the object down"
-        case .throwObject: return "throw the object"
-        case .pushObject:  return "push the \(object) toward letter slot '\(Array(spellingTargetWord)[currentLetterSlotIndex])'"
-        }
-    }
+            if Float.random(in: 0..<1) < epsilon,
+               let random = allowedActions
+                .filter({ $0 != .recover })
+                .randomElement() {
+                recordVisit(action: random, stateKey: stateKey)
+                rememberDecision(random, stateKey: stateKey, perception: p)
+                planBuffer.insertImmediateStep(
+                    PlanStep(action: random, description: "Exploration step")
+                )
+                planBuffer.markCurrentStepCompleted()
+                
+                lastDecisionDescription = "Decided to explore \(random) (State: \(stateKey))"
+                return random
+            }
 
-    private func buildNarrative(
-        selected: FrankensteinAction,
-        terrain: FrankensteinTerrainSample,
-        perception p: FrankensteinCAPerception?
-    ) -> String {
-        guard let p else {
-            return "I have no fresh view of the world yet, so I am choosing cautiously."
-        }
+            let plan: [FrankensteinAction: Float] = p.map {
+                planValues(for: allowedActions, perception: $0)
+            } ?? [:]
 
-        let currentLetter = Array(spellingTargetWord)[currentLetterSlotIndex]
-        var lines: [String] = []
-
-        if outcomesObserved > 5 || p.atGoal {
-            lines.append("Spelling Goal: fully charged! Arranging blocks to form letter '\(currentLetter)' at slot \(currentLetterSlotIndex + 1)/\(spellingTargetWord.count).")
-            lines.append("Now: I will \(phrase(for: selected, terrain: terrain, perception: p)).")
-            return lines.joined(separator: "\n")
-        }
-
-        if p.atGoal {
-            lines.append("Goal: I am on the recharge station. I will hold still to charge.")
-        } else if p.pathDistance.isFinite {
-            let meters = String(format: "%.1f", p.pathDistance)
-            let route = p.isDetouring ? " I am routing around obstacles." : ""
-
-            lines.append("Goal: reach the recharge station, \(meters) m away by my route.\(route)")
-        } else {
-            lines.append("Goal: find the recharge station. I do not have a route yet, so I am looking around.")
-        }
-
-        let now = phrase(for: selected, terrain: terrain, perception: p)
-
-        var next: [String] = []
-
-        for action in plannedSequence.dropFirst().prefix(3) {
-            next.append(phrase(for: action, terrain: terrain, perception: p))
-        }
-
-        if next.isEmpty {
-            lines.append("Now: I will \(now).")
-        } else {
-            lines.append("Now: I will \(now). Then: \(next.joined(separator: ", then ")).")
-        }
-
-        var reasons: [String] = []
-
-        let object = plainName(p.nearestObjectName)
-
-        if p.nearestObjectDistance.isFinite, p.nearestObjectDistance < 2.0,
-           p.nearestObjectClass != "none" {
-            let distance = String(format: "%.1f", p.nearestObjectDistance)
-
-            if terrain.canLandOnObject {
-                reasons.append("a \(object) is \(distance) m ahead and I can land on top of it")
-            } else if p.nearestObjectMovable {
-                reasons.append("a movable \(object) is \(distance) m ahead and can be pushed toward letter slot '\(currentLetter)'")
+            let selected: FrankensteinAction
+            if let step = planBuffer.currentStep, allowedActions.contains(step.action) {
+                selected = step.action
+                planBuffer.markCurrentStepCompleted()
             } else {
-                reasons.append("a \(object) is \(distance) m ahead")
-            }
-        }
+                var candidate = allowedActions[0]
+                var bestParts = scoreParts(
+                    for: candidate,
+                    perception: p,
+                    terrain: terrain,
+                    plan: plan
+                )
 
-        if p.clearanceAhead < 0.9 {
-            let side = p.clearancePlus > p.clearanceMinus ? "right" : "left"
-            reasons.append("the way ahead is tight, more room on the \(side)")
-        }
+                for action in allowedActions.dropFirst() {
+                    let parts = scoreParts(
+                        for: action,
+                        perception: p,
+                        terrain: terrain,
+                        plan: plan
+                    )
 
-        if !p.atGoal, abs(p.headingError) > 0.5 {
-                    let side = p.headingError > 0 ? "right" : "left"
-                    reasons.append("the route bends to my \(side)")
+                    if parts.total > bestParts.total {
+                        candidate = action
+                        bestParts = parts
+                    }
                 }
+                selected = candidate
+                planBuffer.insertImmediateStep(
+                    PlanStep(action: selected, description: "Action step")
+                )
+                planBuffer.markCurrentStepCompleted()
+            }
 
-        if stuckSeconds > stuckThreshold {
-            reasons.append(
-                "I have made no progress for \(String(format: "%.1f", stuckSeconds)) s, so I am trying something different"
-            )
+            recordVisit(action: selected, stateKey: stateKey)
+            rememberDecision(selected, stateKey: stateKey, perception: p)
+            
+            // Updates the decision description for the UI panel
+            lastDecisionDescription = "Decided to execute \(selected) (State: \(stateKey))"
+            
+            return selected
         }
-
-        if futilityCount > 0, futilityPenalty(for: selected) > 0.5 {
-            reasons.append("I am avoiding a movement loop I noticed")
-        }
-
-        if p.goalProgressRate > 0.2 {
-            reasons.append(
-                "I am closing on the goal at \(String(format: "%.1f", p.goalProgressRate)) m/s"
-            )
-        }
-
-        if !reasons.isEmpty {
-            lines.append("Because: \(reasons.joined(separator: "; ")).")
-        }
-
-        if !p.distantObjectSummary.isEmpty {
-            lines.append("Further out: \(p.distantObjectSummary)")
-        }
-
-        return lines.joined(separator: "\n")
-    }
-
+    
     private func countLiveNeighbors(x: Int, y: Int) -> Int {
         var count = 0
 
@@ -1333,8 +1213,6 @@ final class FrankensteinCA: ObservableObject {
 
 // MARK: - Q-Path Field Extension Helper
 extension FrankensteinCAPathField {
-    /// Searches neighboring grid cells and path directions, returning the optimal
-    /// heading that maximizes Q-values and aligns with the active goal queue.
     func searchOptimalQPath(
         currentPosition: SIMD2<Float>,
         goalPosition: SIMD2<Float>?,

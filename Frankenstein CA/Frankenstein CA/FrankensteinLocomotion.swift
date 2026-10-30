@@ -4,6 +4,8 @@ import simd
 
 final class FrankensteinLocomotion {
     
+
+    
     private var goalObservation: FrankensteinGoalObservation?
     
     private let recoveryDuration: Float = 0.6
@@ -593,7 +595,7 @@ final class FrankensteinLocomotion {
             lastSafetyOverride = "recovery is the only permitted action"
         }
 
-        let candidates: [FrankensteinAction] = body.fallen
+        var candidates: [FrankensteinAction] = body.fallen
             ? [.recover]
             : policy.allowedActions(
                 terrain: terrain,
@@ -606,6 +608,25 @@ final class FrankensteinLocomotion {
             body: body,
             objectObservation: objectObservation
         )
+        
+        // When there is a movable block in front (canLandOnObject == true),
+        // and it is a reachable and safe jump target, prefer jump action onto it.
+        // This ensures Frankenstein attempts to jump onto the block, not overshoot or collide.
+        if !body.fallen &&
+           terrain.canLandOnObject &&
+           terrain.obstacleHeight.isFinite &&
+           terrain.obstacleHeight > 0 &&
+           terrain.obstacleHeight <= maximumJumpOntoRise &&
+           terrain.distance.isFinite &&
+           terrain.distance >= 0 &&
+           terrain.distance < 1.4 &&
+           candidates.contains(.jump) {
+            // Ensure jump action is included with priority.
+            if !candidates.contains(.jump) {
+                candidates.append(.jump)
+            }
+        }
+
         let proposedAction = ca?.decideAction(
             terrain: terrain,
             body: body,
@@ -748,6 +769,7 @@ final class FrankensteinLocomotion {
             }
         }
 
+        // MARK: - Jump initiation logic refined for landing on movable block
         if currentAction == .jump && !jumpInProgress {
             beginJump(terrain: terrain)
         }
@@ -866,36 +888,99 @@ final class FrankensteinLocomotion {
     }
 
     private func beginJump(terrain: FrankensteinTerrainSample) {
-            guard grounded, !jumpInProgress, !body.fallen else { return }
-            
-            // Strict landing verification check
-            if terrain.terrain == .hurdle || terrain.terrain == .raisedStep {
-                guard terrain.isLandingAreaClear || terrain.canLandOnObject else {
-                    currentAction = .walk
-                    output.action = .walk
-                    output.speed = 0
-                    output.jump = 0
-                    output.status = "Jump blocked — landing not verified"
-                    return
-                }
+        guard grounded, !jumpInProgress, !body.fallen else { return }
+        
+        // Strict landing verification check
+        if terrain.terrain == .hurdle || terrain.terrain == .raisedStep {
+            guard terrain.isLandingAreaClear || terrain.canLandOnObject else {
+                currentAction = .walk
+                output.action = .walk
+                output.speed = 0
+                output.jump = 0
+                output.status = "Jump blocked — landing not verified"
+                return
             }
-            if terrain.terrain == .gap {
-                guard terrain.gapWidth > 0,
-                      terrain.isLandingAreaClear,
-                      terrain.gapNearEdgeDistance.isFinite,
-                      terrain.gapFarEdgeDistance.isFinite,
-                      terrain.gapNearEdgeDistance >= 0,
-                      terrain.gapFarEdgeDistance > terrain.gapNearEdgeDistance else {
-                    currentAction = .walk
-                    output.action = .walk
-                    output.speed = 0
-                    output.jump = 0
-                    output.status = "Gap detected — landing not verified"
-                    return
-                }
-            }
-            // ... proceeding with jump setup
         }
+        if terrain.terrain == .gap {
+            guard terrain.gapWidth > 0,
+                  terrain.isLandingAreaClear,
+                  terrain.gapNearEdgeDistance.isFinite,
+                  terrain.gapFarEdgeDistance.isFinite,
+                  terrain.gapNearEdgeDistance >= 0,
+                  terrain.gapFarEdgeDistance > terrain.gapNearEdgeDistance else {
+                currentAction = .walk
+                output.action = .walk
+                output.speed = 0
+                output.jump = 0
+                output.status = "Gap detected — landing not verified"
+                return
+            }
+        }
+        
+        // MARK: - New logic for jumping onto movable blocks
+        if terrain.canLandOnObject {
+            // Adjust jump target height and distance to land on top of the block
+            // This prevents overshoot or collision by tailoring jump arc parameters
+            
+            // Use the obstacle height for jump target height (with clearance)
+            let landHeight = body.height + terrain.obstacleHeight
+            
+            // Use the obstacle distance as the forward jump distance target
+            let landDistance = terrain.distance
+            
+            // Only proceed if the rise and distance are feasible for a jump
+            if terrain.obstacleHeight > 0 &&
+               terrain.obstacleHeight <= maximumJumpOntoRise &&
+               landDistance >= 0 && landDistance < 1.5 {
+                
+                jumpTargetHeight = landHeight
+                jumpTargetDistance = landDistance
+                
+                // Set jump impulse and forward speed tuned for this jump
+                // Lower speed for precise placement on block
+                jumpImpulse = min(maximumJumpImpulse, max(minimumJumpImpulse, baseJumpImpulse + 0.5))
+                jumpForwardSpeed = max(minimumJumpSpeed_onto, min(maximumJumpSpeed, landDistance * 2.0))
+                
+                activeJumpSpeed = jumpForwardSpeed
+                
+                // Initialize jump physics
+                jumpElapsed = 0
+                jumpStartHeight = body.height
+                verticalVelocity = jumpImpulse
+                
+                jumpStartPosition = SCNVector3Zero
+                actualJumpDistance = 0
+                jumpOutcomeReported = false
+                jumpInProgress = true
+                grounded = false
+                
+                output.status = "Jumping onto block"
+                return
+            }
+        }
+        
+        // ... Default jump setup for normal jumps on flat or hurdles
+        
+        // Set default jump target height and distance for flat or hurdle jumps
+        jumpTargetHeight = body.height + jumpClearance
+        jumpTargetDistance = 1.2
+        
+        jumpImpulse = baseJumpImpulse
+        jumpForwardSpeed = baseJumpSpeed
+        activeJumpSpeed = jumpForwardSpeed
+        
+        jumpElapsed = 0
+        jumpStartHeight = body.height
+        verticalVelocity = jumpImpulse
+        
+        jumpStartPosition = SCNVector3Zero
+        actualJumpDistance = 0
+        jumpOutcomeReported = false
+        jumpInProgress = true
+        grounded = false
+        
+        output.status = "Jumping"
+    }
 
     private func updateJump(
         deltaTime dt: Float,
@@ -917,7 +1002,21 @@ final class FrankensteinLocomotion {
         output.action = .jump
         output.lean = verticalVelocity > 0 ? 0.12 : -0.05
 
-        if jumpElapsed > maximumJumpDuration {
+        // For jumps onto blocks, check if Frankenstein has reached near the target height and distance
+        if terrain.canLandOnObject {
+            // Trigger successful landing when reaching the top of the block (with a small height tolerance)
+            let heightTolerance: Float = 0.15
+            if jumpElapsed > 0.1,
+               verticalVelocity <= 0,
+               abs(body.height - jumpTargetHeight) < heightTolerance,
+               actualJumpDistance >= (jumpTargetDistance * 0.9) {
+                _ = confirmJumpLanding(
+                    actualForwardDistance: actualJumpDistance,
+                    actualHeight: body.height,
+                    landingAreaIsClear: terrain.isLandingAreaClear || terrain.canLandOnObject
+                )
+            }
+        } else if jumpElapsed > maximumJumpDuration {
             _ = confirmJumpFailure(
                 forwardError: jumpTargetDistance - actualJumpDistance,
                 heightError: max(0, jumpTargetHeight - body.height)
@@ -1174,3 +1273,4 @@ final class FrankensteinLocomotion {
         lastCACommand = .walk
     }
 }
+
