@@ -1199,10 +1199,9 @@ final class FrankensteinCA: ObservableObject {
 
         // MARK: 5. Controlled exploration
 
-        let epsilon = max(
-            0,
-            min(0.25, max(exploration, randomExploration))
-        )
+        let epsilon: Float = exploration >= 1
+            ? 1
+            : max(0, min(0.25, max(exploration, randomExploration)))
 
         if Float.random(in: 0..<1) < epsilon {
             let alternatives = candidates.filter {
