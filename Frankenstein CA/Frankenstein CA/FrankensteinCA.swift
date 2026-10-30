@@ -1217,8 +1217,13 @@ final class FrankensteinCA: ObservableObject {
             if let alternative = alternatives.randomElement() {
                 let alternativeScore = scores[alternative]?.total ?? -.infinity
 
-                // Explore only when the alternative is reasonably competitive.
-                if alternativeScore >= best.value.total - 0.75 {
+                // Ordinary exploration only tries alternatives that are
+                // reasonably competitive. Full exploration (exploration >= 1,
+                // as in tests or a deliberate exploration phase) samples
+                // from every permitted candidate, however low its score.
+                let forcedExploration = exploration >= 1
+
+                if forcedExploration || alternativeScore >= best.value.total - 0.75 {
                     selected = alternative
                 }
             }
