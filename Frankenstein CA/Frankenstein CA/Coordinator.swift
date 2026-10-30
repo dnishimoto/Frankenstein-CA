@@ -121,7 +121,12 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     // MARK: - Pushing Movable Blocks
 
     private weak var pushTargetNode: SCNNode?
+    private var lastStuckSamplePosition: SCNVector3?
+    private var stuckSeconds: Float = 0
+    private let stuckThreshold: Float = 0.8
+    private var spawnedMovableBlocks = false
     private var pushLastNodePosition: SIMD2<Float>?
+    private var pushTrackedNodeID: ObjectIdentifier?
     private var pushAccumulatedMeters: Float = 0
     private let pushBlockSpeed: Float = 0.6
 
@@ -336,6 +341,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         characterFootOffset = measureCharacterFootOffset(characterNode)
         configurePhysicsWorld(in: scene)
+        addMovableBlockCourse(to: scene)
 
         characterVerticalVelocity = 0
         hasReportedFall = false
@@ -357,6 +363,83 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         qFloorGrid.attach(to: scene)
 
         publishDebug("Coordinator attached to displayed scene.")
+    }
+
+    /// Add a useful supply of genuinely movable, stackable blocks to the
+    /// existing course. Positions are kept in side bays so the original route
+    /// remains traversable. Names deliberately match the perception/pickup rules.
+    private func addMovableBlockCourse(to scene: SCNScene) {
+        guard !spawnedMovableBlocks else { return }
+        spawnedMovableBlocks = true
+
+        let existing = scene.rootNode.childNodes(passingTest: { node, _ in
+            let name = node.name?.lowercased() ?? ""
+            return name.contains("movableblock_") || name.contains("stackblock_")
+        })
+        guard existing.isEmpty else { return }
+
+        let blockSize: CGFloat = 0.8
+        let placements: [(name: String, x: Float, y: Float, z: Float)] = [
+            ("MovableBlock_01", 3.7, 0.4, 4.6),
+            ("MovableBlock_02", 4.6, 0.4, 4.6),
+            ("MovableBlock_03", 3.7, 0.4, 3.7),
+            ("StackBlock_04", -3.8, 0.4, 2.8),
+            ("StackBlock_05", -4.7, 0.4, 2.8),
+            ("StackBlock_06", -3.8, 1.2, 2.8),
+            ("MovableBlock_07", 3.8, 0.4, -1.8),
+            ("MovableBlock_08", 4.7, 0.4, -1.8),
+            ("MovableBlock_09", -3.8, 0.4, -4.5),
+            ("MovableBlock_10", -4.7, 0.4, -4.5)
+        ]
+
+        for placement in placements {
+            let box = SCNBox(
+                width: blockSize,
+                height: blockSize,
+                length: blockSize,
+                chamferRadius: 0.035
+            )
+            let material = SCNMaterial()
+            material.diffuse.contents = UIColor(
+                hue: CGFloat((placements.firstIndex(where: { $0.name == placement.name }) ?? 0)) / CGFloat(placements.count),
+                saturation: 0.55,
+                brightness: 0.82,
+                alpha: 1
+            )
+            material.specular.contents = UIColor(white: 0.22, alpha: 1)
+            box.materials = [material]
+
+            let node = SCNNode(geometry: box)
+            node.name = placement.name
+            node.position = SCNVector3(placement.x, placement.y, placement.z)
+            node.physicsBody = SCNPhysicsBody(type: .dynamic, shape: SCNPhysicsShape(geometry: box, options: nil))
+            node.physicsBody?.mass = 1.5
+            node.physicsBody?.friction = 0.9
+            node.physicsBody?.rollingFriction = 0.9
+            node.physicsBody?.restitution = 0.02
+            node.physicsBody?.damping = 0.15
+            node.physicsBody?.angularDamping = 0.3
+            node.physicsBody?.allowsResting = true
+            scene.rootNode.addChildNode(node)
+        }
+
+        publishDebug("Added 10 movable blocks, including a two-block stack; blocks can be pushed, carried where supported, and used as jump-up surfaces.")
+    }
+
+    private func updateStuckDuration(position: SCNVector3, deltaTime: Float) {
+        guard deltaTime.isFinite, deltaTime > 0 else { return }
+        if let previous = lastStuckSamplePosition {
+            let dx = Float(position.x - previous.x)
+            let dz = Float(position.z - previous.z)
+            let moved = sqrt(dx * dx + dz * dz)
+            let blocked = clearanceAhead < 0.9 || latestTerrainSample.terrain == .hurdle || latestTerrainSample.terrain == .raisedStep
+            if blocked && moved < 0.015 {
+                stuckSeconds = min(5, stuckSeconds + deltaTime)
+            } else if moved >= 0.04 || !blocked {
+                stuckSeconds = max(0, stuckSeconds - deltaTime * 2)
+            }
+        }
+        lastStuckSamplePosition = position
     }
 
     private func isQGridNode(_ node: SCNNode) -> Bool {
@@ -678,10 +761,14 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
             latestDetection = latestDetections.first
 
-            // Block the CA could push (nearest movable thing within reach).
-            pushTargetNode = detailedDetections.first {
-                isMovableName($0.info.name) && $0.info.distance <= 1.4
-            }?.node
+            // Resolve push targets geometrically, not only from the narrow
+            // ray list. The narrow scan can miss a block when a higher/nearer
+            // surface masks it, which previously left applyPush with no target.
+            pushTargetNode = findPushTargetNode(
+                character: character,
+                in: scene,
+                detections: detailedDetections
+            )
 
             // Wide, long-range view for planning and the UI.
             if time - lastWideScanTime >= wideScanInterval {
@@ -746,9 +833,46 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             (latestDetection?.pickupable ?? false) &&
             (latestDetection?.distance ?? .infinity) <= pickupDistance
 
+        // Keep movable-block classification independent of which surface won
+        // the narrow raycast. This is required both for the 1 m push gate and
+        // for permitting a jump onto the block's measured top surface.
+        if let target = pushTargetNode, target.parent != nil {
+            let c = character.presentation.worldPosition
+            let n = target.presentation.worldPosition
+            let dx = Float(n.x - c.x)
+            let dz = Float(n.z - c.z)
+            let targetDistance = sqrt(dx * dx + dz * dz)
+            if targetDistance.isFinite && targetDistance <= 2.3 {
+                let dimensions = worldDimensions(of: target)
+                let targetTop = Float(n.y) + dimensions.y * 0.5
+                latestTerrainSample.objectMovable = true
+                latestTerrainSample.objectName = target.name ?? "MovableBlock"
+                latestTerrainSample.distance = targetDistance
+                latestTerrainSample.obstacleHeight = max(
+                    0,
+                    targetTop - latestTerrainSample.groundHeight
+                )
+                latestTerrainSample.obstacleDepth = dimensions.z
+                latestTerrainSample.canLandOnObject =
+                    dimensions.x >= 0.3 && dimensions.z >= 0.3 &&
+                    latestTerrainSample.obstacleHeight > 0.05 &&
+                    latestTerrainSample.obstacleHeight <= 1.0 &&
+                    hasClearSpace(
+                        around: SCNVector3(n.x, Float(targetTop + 0.15), n.z),
+                        in: scene
+                    )
+                if latestTerrainSample.obstacleHeight > 0.45 {
+                    latestTerrainSample.terrain = .hurdle
+                } else if latestTerrainSample.obstacleHeight > 0.05 {
+                    latestTerrainSample.terrain = .raisedStep
+                }
+            }
+        }
+
         // MARK: 2. Actual displacement and prediction
 
         let currentPosition = character.presentation.worldPosition
+        updateStuckDuration(position: currentPosition, deltaTime: dt)
 
         let actualDisplacement: Float?
 
@@ -804,16 +928,41 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         // MARK: 4. CA executive decision
 
-        let objectObservation: FrankensteinObjectObservation? = latestDetection.map { item in
-            FrankensteinObjectObservation(
-                name: item.name,
-                width: item.dimensions.x,
-                height: item.dimensions.y,
-                depth: item.dimensions.z,
-                distance: item.distance,
-                pickupable: item.pickupable
-            )
-        }
+        // Prefer the block that is actually pushable in front of Frankenstein
+        // over a nearer wall/floor ray hit. This is the observation passed to
+        // action constraints, the CA executive, and Q-learning.
+        let objectObservation: FrankensteinObjectObservation? = {
+            if let target = pushTargetNode,
+               target.parent != nil,
+               let character = characterNode {
+                let c = character.presentation.worldPosition
+                let n = target.presentation.worldPosition
+                let dx = Float(n.x - c.x)
+                let dz = Float(n.z - c.z)
+                let distance = sqrt(dx * dx + dz * dz)
+                if distance.isFinite && distance <= 2.3 {
+                    let size = worldDimensions(of: target)
+                    return FrankensteinObjectObservation(
+                        name: target.name ?? "MovableBlock",
+                        width: max(0.05, size.x),
+                        height: max(0.05, size.y),
+                        depth: max(0.05, size.z),
+                        distance: distance,
+                        pickupable: false
+                    )
+                }
+            }
+            return latestDetection.map { item in
+                FrankensteinObjectObservation(
+                    name: item.name,
+                    width: item.dimensions.x,
+                    height: item.dimensions.y,
+                    depth: item.dimensions.z,
+                    distance: item.distance,
+                    pickupable: item.pickupable
+                )
+            }
+        }()
 
         pushPerceptionToCA(
             terrain: latestTerrainSample,
@@ -897,7 +1046,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         if policyUpdates > lastRecordedQUpdate {
             let newCount = policyUpdates - lastRecordedQUpdate
 
-            for record in locomotion.policy.updateLog.suffix(newCount) {
+            for record in locomotion.policy.qUpdateRecords.suffix(newCount) {
                 qFloorGrid.record(
                     position: character.presentation.worldPosition,
                     action: record.action,
@@ -1173,6 +1322,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         perception.clearancePlus = clearancePlus
         perception.clearanceMinus = clearanceMinus
 
+        // MARK: - Nearby object perception
+
         if let detection = latestDetection {
             perception.nearestObjectClass = objectClass(for: detection.name)
             perception.nearestObjectDistance = detection.distance
@@ -1181,20 +1332,47 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             perception.nearestObjectName = detection.name
         }
 
-        // What the wide scan sees farther out, for the CA's narrative.
-        let distant = visibleObjects.filter { $0.distance >= 3.0 }
+        // Include the actual push target when available.
+        if let target = pushTargetNode,
+           target.parent != nil,
+           let character = characterNode {
+
+            let c = character.presentation.worldPosition
+            let n = target.presentation.worldPosition
+
+            let dx = Float(n.x - c.x)
+            let dz = Float(n.z - c.z)
+            let distance = sqrt(dx * dx + dz * dz)
+
+            if distance.isFinite && distance <= 2.3 {
+                perception.nearestObjectClass = "movable"
+                perception.nearestObjectDistance = distance
+                perception.nearestObjectPickupable = false
+                perception.nearestObjectMovable = true
+                perception.nearestObjectName = target.name ?? "MovableBlock"
+            }
+        }
+
+        // MARK: - Distant object perception
+
+        let distant = visibleObjects.filter {
+            $0.distance >= 3.0
+        }
 
         perception.distantObjectSummary = distant.isEmpty
             ? ""
             : DetectedObjectInfo.summary(of: distant, limit: 3)
 
-        // Route preview: the next ~4 m of the routed path as headings
-        // relative to where the character faces now.
+        // MARK: - Route preview
+
         perception.routeRelativeHeadings = executive.field
             .routePreview(maxCells: 8)
-            .map { wrappedAngle($0 - heading) }
+            .map {
+                wrappedAngle($0 - heading)
+            }
 
-        // Learned object/goal advice, per permitted action.
+        // MARK: - Learned goal and object values
+
         let goalValues = executive.learner.values(
             for: goalStateKey(terrain: terrain)
         )
@@ -1207,8 +1385,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         var advisory: [FrankensteinAction: Float] = [:]
 
-        // Advice for every action: the CA's permitted set comes from the
-        // locomotion policy and can differ from this coordinator's filter.
+        // Combine learned goal and object values.
         for action in FrankensteinAction.allCases {
             let name = String(describing: action)
 
@@ -1217,19 +1394,75 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 0.20 * (objectValues[name] ?? 0)
         }
 
-        // Direct reflex (as a CA input, not an override): a pickupable block
-        // within reach with empty hands strongly favours lifting it and
-        // discourages jumping over it.
+        // MARK: - Jump onto a reachable movable object
+
+        if terrain.objectMovable,
+           terrain.canLandOnObject,
+           terrain.obstacleHeight > 0.05,
+           terrain.obstacleHeight <= 1.0 {
+
+            advisory[.jump, default: 0] += 4.0
+        }
+
+        // MARK: - Pickup preference
+
         if let detection = latestDetection,
            carriedNode == nil,
            detection.pickupable,
            objectClass(for: detection.name) != "movable",
            detection.distance <= pickupDistance {
+
             advisory[.liftObject, default: 0] += 5.0
             advisory[.jump, default: 0] -= 5.0
         }
 
+        // MARK: - Push preference
+
+        if let target = pushTargetNode,
+           target.parent != nil,
+           let character = characterNode {
+
+            let c = character.presentation.worldPosition
+            let n = target.presentation.worldPosition
+
+            let dx = Float(n.x - c.x)
+            let dz = Float(n.z - c.z)
+
+            let distance = sqrt(dx * dx + dz * dz)
+
+            let forward = forwardVector()
+            let ahead = dx * forward.x + dz * forward.z
+            let sideways = abs(dx * forward.z - dz * forward.x)
+
+            let alignment = distance > 0.001
+                ? ahead / distance
+                : 0
+
+            let routeBlocked =
+                clearanceAhead < 1.0 ||
+                terrain.terrain == .hurdle ||
+                terrain.terrain == .raisedStep ||
+                (pathSteering?.isDetouring ?? false)
+
+            if distance.isFinite,
+               distance <= 1.0,
+               ahead > 0.05,
+               alignment > 0.7,
+               (routeBlocked || stuckSeconds > stuckThreshold) {
+
+                advisory[.pushObject, default: 0] += 7.0
+                advisory[.jump, default: 0] -= 1.0
+
+            } else {
+                advisory[.pushObject, default: 0] -= 1.0
+            }
+        }
+
+        // MARK: - Deliver CA advisory values
+
         perception.advisoryValues = advisory
+
+        // MARK: - State key
 
         perception.stateKey = [
             String(describing: terrain.terrain),
@@ -1246,7 +1479,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         ca.receivePerception(perception)
     }
-
     // MARK: - Advisory Values
 
     private func makeAdvisoryActionValues(
@@ -1277,21 +1509,116 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 0.20 * objectValue
         }
 
-        // Direct reflex override: when a pickupable block is right in front and hands are empty,
-        // strongly boost liftObject and penalize jumping over it.
+        // Direct reflex override: lift genuinely pickupable objects, but do
+        // not confuse a pushable crate/block with a hand-held object.
         if let detection = latestDetection,
            carriedNode == nil,
            detection.pickupable,
            objectClass(for: detection.name) != "movable",
            detection.distance <= pickupDistance {
-            
             merged[.liftObject, default: 0] += 5.0
             merged[.jump, default: 0] -= 5.0
+        }
+
+        // Strategic push bias is only applied when a movable object is ahead
+        // and the current route looks blocked/detoured. The policy still has
+        // to mark pushObject as allowed; this score does not bypass safety.
+        // If the block's top is a verified landing surface, keep jumping
+        // available and positively score it. Pushing only wins when the block
+        // is closely aligned and the route is genuinely obstructed/stuck.
+        if latestTerrainSample.objectMovable,
+           latestTerrainSample.canLandOnObject,
+           latestTerrainSample.obstacleHeight > 0.05,
+           latestTerrainSample.obstacleHeight <= 1.0 {
+            merged[.jump, default: 0] += 4.0
+        }
+
+        if let target = pushTargetNode,
+           target.parent != nil,
+           allowedActions.contains(.pushObject),
+           let character = characterNode {
+            let c = character.presentation.worldPosition
+            let n = target.presentation.worldPosition
+            let dx = Float(n.x - c.x)
+            let dz = Float(n.z - c.z)
+            let distance = sqrt(dx * dx + dz * dz)
+            let forward = forwardVector()
+            let ahead = dx * forward.x + dz * forward.z
+            let sideways = abs(dx * forward.z - dz * forward.x)
+            let alignment = distance > 0.001 ? ahead / distance : 0
+            let routeBlocked = clearanceAhead < 1.0 ||
+                latestTerrainSample.terrain == .hurdle ||
+                latestTerrainSample.terrain == .raisedStep ||
+                (pathSteering?.isDetouring ?? false)
+            if distance.isFinite, distance <= 1.0,
+               ahead > 0.05, alignment > 0.7,
+               (routeBlocked || stuckSeconds > stuckThreshold) {
+                merged[.pushObject, default: 0] += 7.0
+            } else {
+                merged[.pushObject, default: 0] -= 1.0
+            }
         }
 
         return merged
     }
  
+
+    // MARK: - Push Target Resolution
+
+    /// Finds the nearest named movable block in front of the character. This
+    /// supplements ray-hit detection, which can miss the block when another
+    /// surface occludes the narrow scan. Only concrete geometry nodes are
+    /// eligible, and the target must be in a reachable forward corridor.
+    private func findPushTargetNode(
+        character: SCNNode,
+        in scene: SCNScene,
+        detections: [DetailedObjectDetection]
+    ) -> SCNNode? {
+        let forward = forwardVector()
+        let c = character.presentation.worldPosition
+        var candidates: [(node: SCNNode, distance: Float, ahead: Float, side: Float)] = []
+        var visited = Set<ObjectIdentifier>()
+
+        func consider(_ node: SCNNode) {
+            guard visited.insert(ObjectIdentifier(node)).inserted,
+                  node !== character,
+                  !isCharacterPart(node),
+                  let name = node.name,
+                  isMovableName(name) else { return }
+
+            let lower = name.lowercased()
+            if lower.contains("floor") || lower.contains("wall") ||
+                lower.contains("platform") || lower.contains("stair") ||
+                lower.contains("step") || lower.contains("doorframe") {
+                return
+            }
+            guard node.geometry != nil || !node.childNodes.isEmpty else { return }
+
+            let n = node.presentation.worldPosition
+            let dx = Float(n.x - c.x)
+            let dz = Float(n.z - c.z)
+            let distance = sqrt(dx * dx + dz * dz)
+            let ahead = dx * forward.x + dz * forward.z
+            let side = abs(dx * forward.z - dz * forward.x)
+            guard distance.isFinite, ahead > 0.05, ahead <= 2.3,
+                  side < 1.0 else { return }
+            candidates.append((node, distance, ahead, side))
+        }
+
+        // Ray-detected nodes are tried first, then the scene graph provides
+        // the occlusion-resistant fallback.
+        for detection in detections { consider(detection.node) }
+        func visit(_ node: SCNNode) {
+            consider(node)
+            for child in node.childNodes { visit(child) }
+        }
+        visit(scene.rootNode)
+
+        return candidates.sorted {
+            if abs($0.ahead - $1.ahead) > 0.08 { return $0.ahead < $1.ahead }
+            return $0.distance < $1.distance
+        }.first?.node
+    }
 
     // MARK: - Wide Field of View Scan
 
@@ -1901,7 +2228,12 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             body: locomotion.body
         )
 
-        let actionNames = allowed.map { String(describing: $0) }
+        var actionNames = allowed.map { String(describing: $0) }
+        if detections.contains(where: {
+            isMovableName($0.info.name) && $0.info.distance <= 2.3
+        }), !actionNames.contains(String(describing: FrankensteinAction.pushObject)) {
+            actionNames.append(String(describing: FrankensteinAction.pushObject))
+        }
 
         for detection in detections {
             executive.learner.ensure(
@@ -2360,7 +2692,19 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
             // Calculate forward from the resolved heading.
             let forward = forwardVector()
-            let speed = max(0, output.speed) * output.moveDirection
+            // A push is a coupled body+object action. Some locomotion outputs
+            // intentionally give manipulation actions zero walking speed; in
+            // this case move gently toward the target so contact is maintained.
+            let baseSpeed: Float
+            if output.action == .pushObject {
+                baseSpeed = pushTargetNode == nil ? 0 : max(0.45, output.speed)
+            } else {
+                baseSpeed = max(0, output.speed)
+            }
+            let direction = (output.action == .pushObject && output.moveDirection == 0)
+                ? 1.0
+                : output.moveDirection
+            let speed = baseSpeed * direction
 
             if output.liftRequested,
                locomotion.policy.pendingAction == .liftObject {
@@ -3207,16 +3551,25 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         deltaTime dt: Float,
         character: SCNNode
     ) {
-        guard output.pushRequested,
-              let node = pushTargetNode,
-              node.parent != nil else {
+        let pushIsExecuting = output.pushRequested || output.action == .pushObject
+        guard pushIsExecuting else {
             pushLastNodePosition = nil
-
-            if !output.pushRequested {
-                pushAccumulatedMeters = 0
-            }
-
+            pushTrackedNodeID = nil
+            pushAccumulatedMeters = 0
             return
+        }
+        guard let node = pushTargetNode, node.parent != nil else {
+            pushLastNodePosition = nil
+            pushTrackedNodeID = nil
+            pushAccumulatedMeters = 0
+            return
+        }
+
+        let targetID = ObjectIdentifier(node)
+        if pushTrackedNodeID != targetID {
+            pushTrackedNodeID = targetID
+            pushLastNodePosition = nil
+            pushAccumulatedMeters = 0
         }
 
         let forward = forwardVector()
@@ -3231,7 +3584,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         let sideways = abs(dx * forward.z - dz * forward.x)
 
         // The block must be in front of the body and within reach.
-        guard ahead > 0, ahead < 1.4, sideways < 0.5 else {
+        guard ahead > 0.05, ahead < 1.8, sideways < 0.85 else {
+            pushLastNodePosition = nil
             return
         }
 

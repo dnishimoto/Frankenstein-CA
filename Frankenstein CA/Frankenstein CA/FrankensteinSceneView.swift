@@ -1,4 +1,3 @@
-
 import Foundation
 import SwiftUI
 import SceneKit
@@ -75,6 +74,37 @@ struct FrankensteinSceneView: UIViewRepresentable {
 
         // Build the course.
         FrankensteinTerrainScene.build(in: scene)
+
+        // MARK: - Add Additional Moveable Blocks
+        let blockMaterial = SCNMaterial()
+        blockMaterial.diffuse.contents = UIColor(
+            red: 0.55,
+            green: 0.35,
+            blue: 0.20,
+            alpha: 1.0
+        ) // Wood crate appearance
+
+        let blockPositions: [SCNVector3] = [
+            SCNVector3(3.5, 0.4, 4.0),
+            SCNVector3(1.5, 0.4, 1.0),
+            SCNVector3(-1.0, 0.4, -2.0),
+            SCNVector3(2.0, 0.4, -4.5)
+        ]
+
+        for (index, position) in blockPositions.enumerated() {
+            let boxGeometry = SCNBox(
+                width: 0.8,
+                height: 0.8,
+                length: 0.8,
+                chamferRadius: 0.04
+            )
+            boxGeometry.materials = [blockMaterial]
+
+            let movableBlock = SCNNode(geometry: boxGeometry)
+            movableBlock.name = "MovableBlock\(index + 1)"
+            movableBlock.position = position
+            scene.rootNode.addChildNode(movableBlock)
+        }
 
         // Build the actual character.
         let character = Self.makeFrankensteinCharacter()
@@ -476,7 +506,6 @@ final class VisibleObjectsThrottle {
     private let minimumInterval: TimeInterval = 0.2
 
     func shouldPublish(_ objects: [DetectedObjectInfo]) -> Bool {
-        // Name plus 0.1 m distance bucket: ignores sub-centimetre jitter.
         let signature = objects
             .map {
                 "\($0.name)@\(Int(($0.distance * 10).rounded()))" +

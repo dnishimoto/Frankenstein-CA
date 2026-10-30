@@ -1,6 +1,7 @@
-
 import Foundation
 import Combine
+import SceneKit
+import UIKit
 
 
 final class FrankensteinCA: ObservableObject {
@@ -13,9 +14,105 @@ final class FrankensteinCA: ObservableObject {
     @Published private(set) var lastDecisionDescription = "Waiting for perception"
 
     @Published var networkQGrid: [[Float]]
-    
-    // Plan Buffer storage and reactive publisher
     @Published var planBuffer = FrankensteinPlanBuffer()
+
+    // MARK: - Letter Blueprint Coordinates & 12 Movable Blocks Setup for Spelling "FRANKENSTEIN"
+    private let spellingTargetWord = "FRANKENSTEIN"
+    private var currentLetterSlotIndex = 0
+    
+    private var letterCoordinates: [SIMD2<Float>] {
+        [
+            SIMD2<Float>(-2.2, -2.0), // F
+            SIMD2<Float>(-1.8, -2.0), // R
+            SIMD2<Float>(-1.4, -2.0), // A
+            SIMD2<Float>(-1.0, -2.0), // N
+            SIMD2<Float>(-0.6, -2.0), // K
+            SIMD2<Float>(-0.2, -2.0), // E
+            SIMD2<Float>( 0.2, -2.0), // N
+            SIMD2<Float>( 0.6, -2.0), // S
+            SIMD2<Float>( 1.0, -2.0), // T
+            SIMD2<Float>( 1.4, -2.0), // E
+            SIMD2<Float>( 1.8, -2.0), // I
+            SIMD2<Float>( 2.2, -2.0)  // N
+        ]
+    }
+
+    var currentLetterSlot: SIMD2<Float> {
+        let index = min(currentLetterSlotIndex, letterCoordinates.count - 1)
+        return letterCoordinates[index]
+    }
+
+    func advanceToNextLetter() {
+        if currentLetterSlotIndex < spellingTargetWord.count - 1 {
+            currentLetterSlotIndex += 1
+        }
+    }
+
+    /// Spawns 12 compact movable letter blocks with embossed letter labels on top.
+    func setupSpellingBlocks(in rootNode: SCNNode) {
+        let blockSideLength: CGFloat = 0.4
+        let cornerRadius: CGFloat = 0.04
+        let startX: Float = -2.2
+        let startZ: Float = 3.0
+        let spacing: Float = 0.6
+        let columns = 4
+        
+        for (index, character) in spellingTargetWord.enumerated() {
+            let blockGeometry = SCNBox(
+                width: blockSideLength,
+                height: blockSideLength,
+                length: blockSideLength,
+                chamferRadius: cornerRadius
+            )
+            
+            let material = SCNMaterial()
+            material.diffuse.contents = UIColor.systemOrange
+            material.roughness.contents = 0.4
+            blockGeometry.materials = [material]
+            
+            let blockNode = SCNNode(geometry: blockGeometry)
+            blockNode.name = "MovableBlock_\(index)_\(character)"
+            
+            let row = index / columns
+            let col = index % columns
+            
+            let posX = startX + Float(col) * spacing
+            let posY = Float(blockSideLength / 2.0)
+            let posZ = startZ + Float(row) * spacing
+            
+            blockNode.position = SCNVector3(posX, posY, posZ)
+            
+            let physicsShape = SCNPhysicsShape(geometry: blockGeometry, options: nil)
+            let physicsBody = SCNPhysicsBody(type: .dynamic, shape: physicsShape)
+            physicsBody.mass = 1.5
+            physicsBody.friction = 0.6
+            physicsBody.rollingFriction = 0.1
+            physicsBody.damping = 0.4
+            
+            blockNode.physicsBody = physicsBody
+            
+            // Attach 3D text geometry displaying the letter on the top face
+            let letterText = SCNText(string: String(character), extrusionDepth: 0.05)
+            letterText.font = UIFont.boldSystemFont(ofSize: 0.25)
+            letterText.flatness = 0.1
+            letterText.firstMaterial?.diffuse.contents = UIColor.white
+            
+            let letterNode = SCNNode(geometry: letterText)
+            let (minVec, maxVec) = letterText.boundingBox
+            let textWidth = maxVec.x - minVec.x
+            let textHeight = maxVec.y - minVec.y
+            
+            letterNode.position = SCNVector3(
+                -textWidth / 2.0,
+                Float(blockSideLength / 2.0) + 0.001,
+                textHeight / 2.0
+            )
+            letterNode.eulerAngles.x = -.pi / 2.0
+            
+            blockNode.addChildNode(letterNode)
+            rootNode.addChildNode(blockNode)
+        }
+    }
 
     private var grid: [[Bool]]
     private var nextGrid: [[Bool]]
@@ -107,6 +204,22 @@ final class FrankensteinCA: ObservableObject {
             "stuck \(String(format: "%.1f", stuckSeconds)) s | outcomes \(outcomesObserved)"
     }
 
+    // MARK: - Q-Path Search and Goal Queue Routing
+    
+    /// Evaluates queued goals and searches Q-paths to pick the best navigation vector.
+    func evaluateGoalQueuePath(
+        currentPosition: SIMD2<Float>,
+        qValues: [FrankensteinAction: Float],
+        pathField: FrankensteinCAPathField
+    ) -> Float? {
+        let targetSlot = currentLetterSlot
+        return pathField.searchOptimalQPath(
+            currentPosition: currentPosition,
+            goalPosition: targetSlot,
+            qValues: qValues
+        )
+    }
+
     private func learnedGoalValue(
         for action: FrankensteinAction,
         stateKey: String
@@ -142,14 +255,14 @@ final class FrankensteinCA: ObservableObject {
         }
 
         if action == .pushObject {
-            if p.nearestObjectMovable, p.nearestObjectDistance <= 1.0 {
-                score += alignment > 0.7 ? 0.35 : -0.2
+            if p.nearestObjectMovable, p.nearestObjectDistance <= 1.2 {
+                score += alignment > 0.5 ? 1.5 : 0.35
 
                 if stuckSeconds > stuckThreshold {
                     score += 0.8
                 }
             } else {
-                score -= 1.0
+                score -= 0.5
             }
         }
 
@@ -333,7 +446,7 @@ final class FrankensteinCA: ObservableObject {
 
         var best: (value: Float, sequence: [FrankensteinAction]) = (-.infinity, [])
 
-        for action in [FrankensteinAction.walk, .run, .turnLeft, .turnRight] {
+        for action in [FrankensteinAction.walk, .run, .turnLeft, .turnRight, .pushObject] {
             let result = bestContinuation(
                 from: planStep(action, from: state, perception: p),
                 depth: depth - 1,
@@ -352,8 +465,7 @@ final class FrankensteinCA: ObservableObject {
         for actions: [FrankensteinAction],
         perception p: FrankensteinCAPerception
     ) -> [FrankensteinAction: Float] {
-        guard !p.atGoal,
-              !p.routeRelativeHeadings.isEmpty else {
+        guard !p.routeRelativeHeadings.isEmpty else {
             plannedSequence = []
             return [:]
         }
@@ -458,6 +570,7 @@ final class FrankensteinCA: ObservableObject {
         generation = 0
         randomize()
         liveCellCount = countLiveCells()
+        currentLetterSlotIndex = 0
 
         for y in 0..<size {
             for x in 0..<size {
@@ -752,7 +865,7 @@ final class FrankensteinCA: ObservableObject {
             if error > steeringDeadband { return -steeringGain * magnitude * 0.8 }
             return -0.2
 
-        case .walk, .stepForward, .stepUp, .jump:
+        case .walk, .stepForward, .stepUp, .jump, .pushObject:
             if abs(error) < alignedHeadingTolerance { return 0.35 }
             return -0.6 * magnitude
 
@@ -775,7 +888,7 @@ final class FrankensteinCA: ObservableObject {
         let ahead = p.clearanceAhead
 
         switch action {
-        case .walk, .stepForward:
+        case .walk, .stepForward, .pushObject:
             return ahead < 0.9 ? -(0.9 - ahead) * 2.0 : 0
 
         case .run:
@@ -865,7 +978,7 @@ final class FrankensteinCA: ObservableObject {
             case .jump:
                 if t.canLandOnObject { return 0.6 }
                 return t.isLandingAreaClear ? 0.45 : -0.5
-            case .pushObject: return t.objectMovable ? 0.2 : -1.0
+            case .pushObject: return t.objectMovable ? 0.8 : -1.0
             case .walk, .run: return -0.5
             default: return 0
             }
@@ -918,7 +1031,6 @@ final class FrankensteinCA: ObservableObject {
         return parts
     }
 
-    // MARK: - Executive decision with Plan Buffer evaluation
     func decideAction(
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
@@ -936,7 +1048,6 @@ final class FrankensteinCA: ObservableObject {
         let p = currentPerception()
         let stateKey = p?.stateKey ?? "none"
 
-        // Synchronize Plan Buffer with fresh perception sequence
         updatePlanBuffer(perception: p, terrain: terrain)
 
         let epsilon = max(exploration, randomExploration)
@@ -967,7 +1078,6 @@ final class FrankensteinCA: ObservableObject {
             planValues(for: allowedActions, perception: $0)
         } ?? [:]
 
-        // Evaluate whether to execute from buffer or select optimal network score
         let selected: FrankensteinAction
         if let step = planBuffer.currentStep, allowedActions.contains(step.action) {
             selected = step.action
@@ -1084,7 +1194,7 @@ final class FrankensteinCA: ObservableObject {
         case .liftObject:  return "pick up the \(object)"
         case .placeObject: return "set the object down"
         case .throwObject: return "throw the object"
-        case .pushObject:  return "push the \(object)"
+        case .pushObject:  return "push the \(object) toward letter slot '\(Array(spellingTargetWord)[currentLetterSlotIndex])'"
         }
     }
 
@@ -1097,7 +1207,14 @@ final class FrankensteinCA: ObservableObject {
             return "I have no fresh view of the world yet, so I am choosing cautiously."
         }
 
+        let currentLetter = Array(spellingTargetWord)[currentLetterSlotIndex]
         var lines: [String] = []
+
+        if outcomesObserved > 5 || p.atGoal {
+            lines.append("Spelling Goal: fully charged! Arranging blocks to form letter '\(currentLetter)' at slot \(currentLetterSlotIndex + 1)/\(spellingTargetWord.count).")
+            lines.append("Now: I will \(phrase(for: selected, terrain: terrain, perception: p)).")
+            return lines.joined(separator: "\n")
+        }
 
         if p.atGoal {
             lines.append("Goal: I am on the recharge station. I will hold still to charge.")
@@ -1135,7 +1252,7 @@ final class FrankensteinCA: ObservableObject {
             if terrain.canLandOnObject {
                 reasons.append("a \(object) is \(distance) m ahead and I can land on top of it")
             } else if p.nearestObjectMovable {
-                reasons.append("a movable \(object) is \(distance) m ahead and can be pushed")
+                reasons.append("a movable \(object) is \(distance) m ahead and can be pushed toward letter slot '\(currentLetter)'")
             } else {
                 reasons.append("a \(object) is \(distance) m ahead")
             }
@@ -1147,9 +1264,9 @@ final class FrankensteinCA: ObservableObject {
         }
 
         if !p.atGoal, abs(p.headingError) > 0.5 {
-            let side = p.headingError > 0 ? "right" : "left"
-            reasons.append("the route bends to my \(side)")
-        }
+                    let side = p.headingError > 0 ? "right" : "left"
+                    reasons.append("the route bends to my \(side)")
+                }
 
         if stuckSeconds > stuckThreshold {
             reasons.append(
@@ -1211,5 +1328,47 @@ final class FrankensteinCA: ObservableObject {
                 grid[y][x] = Bool.random()
             }
         }
+    }
+}
+
+// MARK: - Q-Path Field Extension Helper
+extension FrankensteinCAPathField {
+    /// Searches neighboring grid cells and path directions, returning the optimal
+    /// heading that maximizes Q-values and aligns with the active goal queue.
+    func searchOptimalQPath(
+        currentPosition: SIMD2<Float>,
+        goalPosition: SIMD2<Float>?,
+        qValues: [FrankensteinAction: Float]
+    ) -> Float? {
+        let directions: [Float] = [0, .pi/4, .pi/2, 3.0 * .pi/4, .pi, -3.0 * .pi/4, -.pi/2, -.pi/4]
+        var bestHeading: Float? = nil
+        var maxScore: Float = -.infinity
+        
+        for heading in directions {
+            let stepLength: Float = 1.0
+            let targetX = currentPosition.x - sin(heading) * stepLength
+            let targetZ = currentPosition.y - cos(heading) * stepLength
+            let candidatePoint = SIMD2<Float>(targetX, targetZ)
+            
+            var goalAlignmentScore: Float = 0
+            if let goal = goalPosition {
+                let currentDist = simd_distance(currentPosition, goal)
+                let candidateDist = simd_distance(candidatePoint, goal)
+                goalAlignmentScore = (currentDist - candidateDist) * 2.0
+            }
+            
+            let baseQ = qValues[.walk] ?? 0
+            let forwardQ = qValues[.stepForward] ?? 0
+            let combinedQ = max(baseQ, forwardQ)
+            
+            let totalScore = combinedQ + goalAlignmentScore
+            
+            if totalScore > maxScore {
+                maxScore = totalScore
+                bestHeading = heading
+            }
+        }
+        
+        return bestHeading
     }
 }
