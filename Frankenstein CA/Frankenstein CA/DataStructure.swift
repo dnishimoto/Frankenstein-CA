@@ -602,6 +602,7 @@ struct FrankensteinBodyState {
     var grounded = true
     var fallen = false
     var distanceTravelled: Float = 0
+    var isFallen = false
 
     /// Heading relative to the finish direction.
     /// `0` means facing the finish.

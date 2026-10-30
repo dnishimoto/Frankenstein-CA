@@ -1,4 +1,4 @@
-import Foundation
+
 import Combine
 import SceneKit
 import UIKit
@@ -15,50 +15,63 @@ final class FrankensteinCA: ObservableObject {
     @Published var networkQGrid: [[Float]]
     @Published var planBuffer = FrankensteinPlanBuffer()
 
-    // MARK: - Letter Blueprint Coordinates & 12 Movable Blocks Setup for Spelling "FRANKENSTEIN"
-    private let spellingTargetWord = "FRANKENSTEIN"
-    private var currentLetterSlotIndex = 0
+    // MARK: - Tapestry Pattern Coordinates & Movable Blocks Setup
+    @Published private(set) var currentTapestrySlotIndex = 0
     private weak var cachedRootNode: SCNNode?
     
-    private var letterCoordinates: [SIMD2<Float>] {
-        [
-            SIMD2<Float>(-2.2, -2.0), // F
-            SIMD2<Float>(-1.8, -2.0), // R
-            SIMD2<Float>(-1.4, -2.0), // A
-            SIMD2<Float>(-1.0, -2.0), // N
-            SIMD2<Float>(-0.6, -2.0), // K
-            SIMD2<Float>(-0.2, -2.0), // E
-            SIMD2<Float>( 0.2, -2.0), // N
-            SIMD2<Float>( 0.6, -2.0), // S
-            SIMD2<Float>( 1.0, -2.0), // T
-            SIMD2<Float>( 1.4, -2.0), // E
-            SIMD2<Float>( 1.8, -2.0), // I
-            SIMD2<Float>( 2.2, -2.0)  // N
-        ]
+    /// Converts active CA grid cells into 3D world targets for tapestry placement.
+    var tapestryTargetCoordinates: [SIMD2<Float>] {
+        var targets: [SIMD2<Float>] = []
+        let spacing: Float = 0.4
+        let originX: Float = -2.0
+        let originZ: Float = -2.0
+        
+        for y in 0..<size {
+            for x in 0..<size {
+                if grid[y][x] {
+                    let worldX = originX + Float(x) * spacing
+                    let worldZ = originZ + Float(y) * spacing
+                    targets.append(SIMD2<Float>(worldX, worldZ))
+                }
+            }
+        }
+        
+        if targets.isEmpty {
+            targets.append(SIMD2<Float>(0, -2.0))
+        }
+        return targets
     }
 
-    var currentLetterSlot: SIMD2<Float> {
-        let index = min(currentLetterSlotIndex, letterCoordinates.count - 1)
-        return letterCoordinates[index]
+    var currentTapestryTargetSlot: SIMD2<Float> {
+        let targets = tapestryTargetCoordinates
+        guard !targets.isEmpty else { return SIMD2<Float>(0, -2.0) }
+        let index = min(currentTapestrySlotIndex, targets.count - 1)
+        return targets[index]
     }
 
-    func advanceToNextLetter() {
-        if currentLetterSlotIndex < spellingTargetWord.count - 1 {
-            currentLetterSlotIndex += 1
+    func advanceToNextTapestrySlot() {
+        let total = tapestryTargetCoordinates.count
+        if currentTapestrySlotIndex < total - 1 {
+            currentTapestrySlotIndex += 1
+        } else {
+            // Completed pattern layer; reset index and evolve CA state for next pattern
+            currentTapestrySlotIndex = 0
+            update()
         }
     }
 
-    /// Spawns 12 compact movable letter blocks with embossed letter labels on top.
+    /// Spawns compact movable blocks for tapestry construction.
     func setupSpellingBlocks(in rootNode: SCNNode) {
         self.cachedRootNode = rootNode
-        let blockSideLength: CGFloat = 0.4
+        let blockSideLength: CGFloat = 0.35
         let cornerRadius: CGFloat = 0.04
         let startX: Float = -2.2
         let startZ: Float = 3.0
-        let spacing: Float = 0.6
+        let spacing: Float = 0.55
+        let totalBlocks = 16
         let columns = 4
         
-        for (index, character) in spellingTargetWord.enumerated() {
+        for index in 0..<totalBlocks {
             let blockGeometry = SCNBox(
                 width: blockSideLength,
                 height: blockSideLength,
@@ -72,7 +85,7 @@ final class FrankensteinCA: ObservableObject {
             blockGeometry.materials = [material]
             
             let blockNode = SCNNode(geometry: blockGeometry)
-            blockNode.name = "MovableBlock_\(index)_\(character)"
+            blockNode.name = "MovableBlock_\(index)"
             
             let row = index / columns
             let col = index % columns
@@ -91,55 +104,31 @@ final class FrankensteinCA: ObservableObject {
             physicsBody.damping = 0.4
             
             blockNode.physicsBody = physicsBody
-            
-            // Attach 3D text geometry displaying the letter on the top face
-            let letterText = SCNText(string: String(character), extrusionDepth: 0.05)
-            letterText.font = UIFont.boldSystemFont(ofSize: 0.25)
-            letterText.flatness = 0.1
-            letterText.firstMaterial?.diffuse.contents = UIColor.white
-            
-            let letterNode = SCNNode(geometry: letterText)
-            let (minVec, maxVec) = letterText.boundingBox
-            let textWidth = maxVec.x - minVec.x
-            let textHeight = maxVec.y - minVec.y
-            
-            letterNode.position = SCNVector3(
-                -textWidth / 2.0,
-                Float(blockSideLength / 2.0) + 0.001,
-                textHeight / 2.0
-            )
-            letterNode.eulerAngles.x = -.pi / 2.0
-            
-            blockNode.addChildNode(letterNode)
             rootNode.addChildNode(blockNode)
         }
     }
 
-    /// Scans the scene graph for movable blocks matching the current target letter.
-    func findNextTargetBlock(from robotPosition: SIMD2<Float>) -> (position: SIMD2<Float>, character: Character)? {
+    /// Scans the scene graph for available movable blocks to build the tapestry.
+    func findNextTargetBlock(from robotPosition: SIMD2<Float>) -> (position: SIMD2<Float>, name: String)? {
         guard let root = cachedRootNode else { return nil }
-        let targetChar = Array(spellingTargetWord)[currentLetterSlotIndex]
         
         var closestBlockPos: SIMD2<Float>? = nil
+        var closestName: String = ""
         var minDistance: Float = .infinity
         
         for child in root.childNodes {
             guard let name = child.name, name.hasPrefix("MovableBlock_") else { continue }
-            let components = name.split(separator: "_")
-            guard components.count >= 3, let char = components[2].first else { continue }
-            
-            if char == targetChar {
-                let pos = SIMD2<Float>(Float(child.position.x), Float(child.position.z))
-                let dist = simd_distance(robotPosition, pos)
-                if dist < minDistance {
-                    minDistance = dist
-                    closestBlockPos = pos
-                }
+            let pos = SIMD2<Float>(Float(child.position.x), Float(child.position.z))
+            let dist = simd_distance(robotPosition, pos)
+            if dist < minDistance {
+                minDistance = dist
+                closestBlockPos = pos
+                closestName = name
             }
         }
         
         if let pos = closestBlockPos {
-            return (pos, targetChar)
+            return (pos, closestName)
         }
         return nil
     }
@@ -236,7 +225,7 @@ final class FrankensteinCA: ObservableObject {
 
     // MARK: - Q-Path Search and Goal Queue Routing
     
-    /// Evaluates queued goals, tracks the specific letter block, and searches Q-paths to pick the best navigation vector.
+    /// Evaluates queued goals, tracks available blocks, and searches Q-paths to route toward tapestry slots.
     func evaluateGoalQueuePath(
         currentPosition: SIMD2<Float>,
         qValues: [FrankensteinAction: Float],
@@ -246,12 +235,12 @@ final class FrankensteinCA: ObservableObject {
         if let blockInfo = findNextTargetBlock(from: currentPosition) {
             targetGoalPosition = blockInfo.position
             
-            let slotPosition = currentLetterSlot
-            if simd_distance(blockInfo.position, slotPosition) < 0.3 {
-                advanceToNextLetter()
+            let slotPosition = currentTapestryTargetSlot
+            if simd_distance(blockInfo.position, slotPosition) < 0.35 {
+                advanceToNextTapestrySlot()
             }
         } else {
-            targetGoalPosition = currentLetterSlot
+            targetGoalPosition = currentTapestryTargetSlot
         }
         
         return pathField.searchOptimalQPath(
@@ -611,7 +600,7 @@ final class FrankensteinCA: ObservableObject {
         generation = 0
         randomize()
         liveCellCount = countLiveCells()
-        currentLetterSlotIndex = 0
+        currentTapestrySlotIndex = 0
 
         for y in 0..<size {
             for x in 0..<size {
@@ -1072,7 +1061,7 @@ final class FrankensteinCA: ObservableObject {
         return parts
     }
 
-    // MARK: - Extended Plan Buffer Logic with Stacking Support
+    // MARK: - Extended Plan Buffer Logic
     private func updatePlanBuffer(
         perception p: FrankensteinCAPerception?,
         terrain: FrankensteinTerrainSample
@@ -1093,87 +1082,187 @@ final class FrankensteinCA: ObservableObject {
         }
     }
 
+
     func decideAction(
-            terrain: FrankensteinTerrainSample,
-            body: FrankensteinBodyState,
-            allowedActions: [FrankensteinAction],
-            qValues: [FrankensteinAction: Float],
-            exploration: Float = 0
-        ) -> FrankensteinAction {
-            guard !allowedActions.isEmpty else {
-                lastDecisionDescription = "No permitted action"
-                return .walk
-            }
+        terrain: FrankensteinTerrainSample,
+        body: FrankensteinBodyState,
+        allowedActions: [FrankensteinAction],
+        qValues: [FrankensteinAction: Float],
+        exploration: Float = 0
+    ) -> FrankensteinAction {
 
-            setQValues(qValues)
+        // MARK: 1. Validate permitted actions
 
-            let p = currentPerception()
-            let stateKey = p?.stateKey ?? "none"
-
-            updatePlanBuffer(perception: p, terrain: terrain)
-
-            let epsilon = max(exploration, randomExploration)
-
-            if Float.random(in: 0..<1) < epsilon,
-               let random = allowedActions
-                .filter({ $0 != .recover })
-                .randomElement() {
-                recordVisit(action: random, stateKey: stateKey)
-                rememberDecision(random, stateKey: stateKey, perception: p)
-                planBuffer.insertImmediateStep(
-                    PlanStep(action: random, description: "Exploration step")
-                )
-                planBuffer.markCurrentStepCompleted()
-                
-                lastDecisionDescription = "Decided to explore \(random) (State: \(stateKey))"
-                return random
-            }
-
-            let plan: [FrankensteinAction: Float] = p.map {
-                planValues(for: allowedActions, perception: $0)
-            } ?? [:]
-
-            let selected: FrankensteinAction
-            if let step = planBuffer.currentStep, allowedActions.contains(step.action) {
-                selected = step.action
-                planBuffer.markCurrentStepCompleted()
-            } else {
-                var candidate = allowedActions[0]
-                var bestParts = scoreParts(
-                    for: candidate,
-                    perception: p,
-                    terrain: terrain,
-                    plan: plan
-                )
-
-                for action in allowedActions.dropFirst() {
-                    let parts = scoreParts(
-                        for: action,
-                        perception: p,
-                        terrain: terrain,
-                        plan: plan
-                    )
-
-                    if parts.total > bestParts.total {
-                        candidate = action
-                        bestParts = parts
-                    }
-                }
-                selected = candidate
-                planBuffer.insertImmediateStep(
-                    PlanStep(action: selected, description: "Action step")
-                )
-                planBuffer.markCurrentStepCompleted()
-            }
-
-            recordVisit(action: selected, stateKey: stateKey)
-            rememberDecision(selected, stateKey: stateKey, perception: p)
-            
-            // Updates the decision description for the UI panel
-            lastDecisionDescription = "Decided to execute \(selected) (State: \(stateKey))"
-            
-            return selected
+        let candidates = allowedActions.filter {
+            qValues[$0]?.isFinite != false
         }
+
+        guard !candidates.isEmpty else {
+            lastDecisionDescription = "No permitted action"
+            return .walk
+        }
+
+        setQValues(qValues)
+
+        let p = currentPerception()
+        let stateKey = p?.stateKey ?? "none"
+
+        // MARK: 2. Evaluate action sequences
+
+        let plan: [FrankensteinAction: Float]
+
+        if let perception = p {
+            plan = planValues(
+                for: candidates,
+                perception: perception
+            )
+        } else {
+            plannedSequence = []
+            plan = [:]
+        }
+
+        // Update the plan only after generating the new sequence.
+        updatePlanBuffer(
+            perception: p,
+            terrain: terrain
+        )
+
+        // MARK: 3. Score all permitted actions
+
+        var scores: [FrankensteinAction: ScoreParts] = [:]
+
+        for action in candidates {
+            var parts = scoreParts(
+                for: action,
+                perception: p,
+                terrain: terrain,
+                plan: plan
+            )
+
+            // Explicitly incorporate the Q-value supplied by locomotion.
+            parts.q = qValues[action] ?? 0
+
+            // Never favor pushing an object that cannot be moved.
+            if action == .pushObject {
+                let canPush =
+                    terrain.objectMovable &&
+                    terrain.distance.isFinite &&
+                    terrain.distance <= 1.0 &&
+                    (p?.nearestObjectMovable ?? false)
+
+                if !canPush {
+                    parts.goal -= 3.0
+                    parts.terrain -= 2.0
+                }
+            }
+
+            // Prefer manipulation only when it is relevant to the goal.
+            if action == .liftObject {
+                if !(p?.nearestObjectPickupable ?? false) {
+                    parts.goal -= 2.0
+                }
+            }
+
+            // Prevent unsafe running near obstacles.
+            if action == .run,
+               terrain.distance.isFinite,
+               terrain.distance < 1.0 {
+                parts.clearance -= 2.0
+            }
+
+            // Include actual body stability in action evaluation.
+            // These are conservative penalties, not physical validation.
+            if body.isFallen {
+                switch action {
+                case .recover:
+                    parts.goal += 4.0
+                case .run, .jump, .pushObject:
+                    parts.goal -= 2.0
+                default:
+                    break
+                }
+            }
+
+            scores[action] = parts
+        }
+
+        // MARK: 4. Select the best permitted action
+
+        guard let best = scores.max(by: {
+            $0.value.total < $1.value.total
+        }) else {
+            lastDecisionDescription = "Unable to score actions"
+            return .walk
+        }
+
+        var selected = best.key
+
+        // MARK: 5. Controlled exploration
+
+        let epsilon = max(
+            0,
+            min(0.25, max(exploration, randomExploration))
+        )
+
+        if Float.random(in: 0..<1) < epsilon {
+            let alternatives = candidates.filter {
+                $0 != selected &&
+                $0 != .recover &&
+                ($0 != .pushObject ||
+                 (terrain.objectMovable &&
+                  terrain.distance.isFinite &&
+                  terrain.distance <= 1.0))
+            }
+
+            if let alternative = alternatives.randomElement() {
+                let alternativeScore = scores[alternative]?.total ?? -.infinity
+
+                // Explore only when the alternative is reasonably competitive.
+                if alternativeScore >= best.value.total - 0.75 {
+                    selected = alternative
+                }
+            }
+        }
+
+        // MARK: 6. Record decision
+
+        recordVisit(
+            action: selected,
+            stateKey: stateKey
+        )
+
+        rememberDecision(
+            selected,
+            stateKey: stateKey,
+            perception: p
+        )
+
+        // MARK: 7. Preserve scoring diagnostics
+
+        lastScoreBreakdown = [:]
+
+        for (action, parts) in scores {
+            lastScoreBreakdown[action] = String(
+                format:
+                    "Total %.2f | Q %.2f | Goal %.2f | Plan %.2f | Terrain %.2f | Steering %.2f | Clearance %.2f | Futility %.2f",
+                parts.total,
+                parts.q,
+                parts.goal,
+                parts.plan,
+                parts.terrain,
+                parts.steering,
+                parts.clearance,
+                parts.futility
+            )
+        }
+
+        lastDecisionDescription =
+            "Selected \(selected) | State: \(stateKey) | " +
+            "Score: \(String(format: "%.2f", scores[selected]?.total ?? 0))"
+
+        return selected
+    }
+
     
     private func countLiveNeighbors(x: Int, y: Int) -> Int {
         var count = 0
