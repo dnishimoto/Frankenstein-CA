@@ -60,22 +60,34 @@ enum FrankensteinActionConstraints {
             }
 
         case .hurdle:
-            let canClearOver =
-                terrain.obstacleHeight > 0 &&
-                terrain.obstacleHeight <= 0.75 &&
-                terrain.isLandingAreaClear
+                    let canClearOver =
+                        terrain.obstacleHeight > 0 &&
+                        terrain.obstacleHeight <= 0.75 &&
+                        terrain.isLandingAreaClear
 
-            // A movable block can also be jumped ON, up to jump height.
-            let canJumpOnto =
-                terrain.canLandOnObject &&
-                terrain.obstacleHeight > 0 &&
-                terrain.obstacleHeight <= 1.0
+                    let canJumpOnto =
+                        terrain.canLandOnObject &&
+                        terrain.obstacleHeight > 0 &&
+                        terrain.obstacleHeight <= 1.5
 
-            if canClearOver || canJumpOnto {
-                actions = [.jump, .stepUp, .turnLeft, .turnRight, .backward]
-            } else {
-                actions = [.turnLeft, .turnRight, .backward]
-            }
+                    if canClearOver || canJumpOnto || terrain.objectName.lowercased().contains("recharge") {
+                        actions = [.jump, .stepUp, .turnLeft, .turnRight, .backward]
+                    } else {
+                        actions = [.turnLeft, .turnRight, .backward]
+                    }
+
+                case .raisedStep:
+                    if terrain.obstacleHeight > 0,
+                       terrain.obstacleHeight <= 0.45,
+                       terrain.isGroundAhead {
+                        actions = [.stepUp, .jump, .turnLeft, .turnRight, .backward]
+                    } else if terrain.obstacleHeight > 0,
+                              terrain.obstacleHeight <= 1.5,
+                              (terrain.isLandingAreaClear || terrain.canLandOnObject || terrain.objectName.lowercased().contains("recharge")) {
+                        actions = [.jump, .stepUp, .turnLeft, .turnRight, .backward]
+                    } else {
+                        actions = [.turnLeft, .turnRight, .backward]
+                    }
 
         case .lowCeiling:
             actions = [.crouch, .crawl, .roll, .turnLeft, .turnRight, .backward]

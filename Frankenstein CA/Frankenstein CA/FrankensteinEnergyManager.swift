@@ -8,6 +8,16 @@
 import Foundation
 import Combine
 
+//
+//  FrankensteinEnergyManager.swift
+//  Frankenstein CA
+//
+//  Created by David Nishimoto on 10/31/26.
+//
+
+import Foundation
+import Combine
+
 final class FrankensteinEnergyManager: ObservableObject {
     @Published var powerLevel: Float = 100.0
     @Published var maxPower: Float = 100.0
@@ -21,13 +31,13 @@ final class FrankensteinEnergyManager: ObservableObject {
         
         let costPerSecond: Float
         switch action {
-        case .run: costPerSecond = 6.0
-        case .jump, .pushObject, .liftObject, .throwObject: costPerSecond = 8.5
-        case .walk, .stepUp, .stepDown: costPerSecond = 2.5
-        case .crouch, .crawl, .roll: costPerSecond = 3.5
-        case .turnLeft, .turnRight, .stepForward, .backward: costPerSecond = 1.0
-        case .recover: costPerSecond = 0.5
-        case .placeObject: costPerSecond = 2.0
+        case .run: costPerSecond = 0.6
+        case .jump, .pushObject, .liftObject, .throwObject: costPerSecond = 0.85
+        case .walk, .stepUp, .stepDown: costPerSecond = 0.25
+        case .crouch, .crawl, .roll: costPerSecond = 0.35
+        case .turnLeft, .turnRight, .stepForward, .backward: costPerSecond = 0.1
+        case .recover: costPerSecond = 0.05
+        case .placeObject: costPerSecond = 0.2
         }
         
         powerLevel = max(0.0, powerLevel - (costPerSecond * dt))
@@ -44,5 +54,3 @@ final class FrankensteinEnergyManager: ObservableObject {
         placedLetters = Array(repeating: nil, count: 12)
     }
 }
-
-

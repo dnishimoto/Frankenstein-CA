@@ -368,16 +368,15 @@ final class FrankensteinCA: ObservableObject {
         case .stepForward:
             score += 0.25 * 0.5 * alignment
         case .jump:
-            // FIXED: Removed automatic blind preference when stuck.
-            // Jump is only rewarded if an obstacle requires it or clearance demands it.
-            if p.clearanceAhead < 0.8 {
-                score += 0.2
-            } else {
-                score -= 0.5 // Penalize unnecessary jumping
-            }
-            if consecutiveJumpCount > 2 {
-                score -= 2.0 // Heavy penalty for repeat hopping loops
-            }
+                    if p.clearanceAhead < 0.8 || p.nearestObjectClass == "rechargeStation" || p.nearestObjectName.lowercased().contains("recharge") {
+                        score += 0.6
+                    } else {
+                        score -= 0.3
+                    }
+                    if consecutiveJumpCount > 3 {
+                        score -= 2.0
+                    }
+         
         default:
             break
         }

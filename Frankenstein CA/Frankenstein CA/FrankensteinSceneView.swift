@@ -15,7 +15,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
     @Binding var qCells: [FrankensteinQDisplayCell]
 
     // Keep one CA instance for the lifetime of this view value.
-    // The coordinator and UI statistics must refer to this same instance.
     private let ca = FrankensteinCA()
 
     // MARK: - Coordinator
@@ -86,7 +85,7 @@ struct FrankensteinSceneView: UIViewRepresentable {
             green: 0.35,
             blue: 0.20,
             alpha: 1.0
-        ) // Wood crate appearance
+        )
 
         let blockPositions: [SCNVector3] = [
             SCNVector3(3.5, 0.4, 4.0),
@@ -110,6 +109,84 @@ struct FrankensteinSceneView: UIViewRepresentable {
             scene.rootNode.addChildNode(movableBlock)
         }
 
+        // MARK: - FRANKENSTEIN Letter Slots & Blocks
+        let targetWord = Array("FRANKENSTEIN")
+        let slotSize: CGFloat = 0.45
+
+        // 1. Target slot pedestals along the front wall area
+        for (index, letter) in targetWord.enumerated() {
+            let slotName = "LetterSlot_\(index)_\(letter)"
+            let box = SCNBox(width: slotSize, height: 0.06, length: slotSize, chamferRadius: 0.01)
+            let material = SCNMaterial()
+            material.diffuse.contents = UIColor.systemBlue.withAlphaComponent(0.85)
+            material.isDoubleSided = true
+            box.materials = [material]
+
+            let node = SCNNode(geometry: box)
+            node.name = slotName
+            let xOffset = Float(index) * 0.52 - 2.8
+            node.position = SCNVector3(xOffset, 0.03, -4.2)
+            node.physicsBody = SCNPhysicsBody(type: .static, shape: SCNPhysicsShape(geometry: box, options: nil))
+            scene.rootNode.addChildNode(node)
+
+            let textGeometry = SCNText(string: String(letter), extrusionDepth: 0.01)
+            textGeometry.font = UIFont.systemFont(ofSize: 0.32, weight: .bold)
+            let textMaterial = SCNMaterial()
+            textMaterial.diffuse.contents = UIColor.white
+            textGeometry.materials = [textMaterial]
+
+            let textNode = SCNNode(geometry: textGeometry)
+            textNode.scale = SCNVector3(0.32, 0.32, 0.32)
+            textNode.eulerAngles = SCNVector3(-Float.pi / 2, 0, 0)
+            textNode.position = SCNVector3(-0.12, 0.04, 0.15)
+            node.addChildNode(textNode)
+        }
+
+        // 2. Physical interactive letter blocks scattered across the course bays
+        let letterPlacements: [(letter: Character, x: Float, y: Float, z: Float)] = [
+            ("F", -3.5, 0.4, 4.0),
+            ("R", -4.2, 0.4, 3.2),
+            ("A", 3.8, 0.4, 4.2),
+            ("N", 4.5, 0.4, 3.5),
+            ("K", 3.9, 0.4, -2.5),
+            ("E", -4.0, 0.4, -3.0),
+            ("N", -4.8, 0.4, -3.8),
+            ("S", 4.2, 0.4, 0.5),
+            ("T", -3.9, 0.4, 0.5),
+            ("E", 0.0, 0.8, -3.8),
+            ("I", 1.2, 0.8, -3.5),
+            ("N", -1.2, 0.8, -3.5)
+        ]
+
+        for (idx, placement) in letterPlacements.enumerated() {
+            let blockName = "LetterBlock_\(placement.letter)_\(idx)"
+            let cubeSize: CGFloat = 0.42
+            let box = SCNBox(width: cubeSize, height: cubeSize, length: cubeSize, chamferRadius: 0.03)
+            let material = SCNMaterial()
+            material.diffuse.contents = UIColor.systemOrange
+            material.isDoubleSided = true
+            box.materials = [material]
+
+            let node = SCNNode(geometry: box)
+            node.name = blockName
+            node.position = SCNVector3(placement.x, placement.y, placement.z)
+            node.physicsBody = SCNPhysicsBody(type: .dynamic, shape: SCNPhysicsShape(geometry: box, options: nil))
+            node.physicsBody?.mass = 1.0
+            node.physicsBody?.friction = 0.8
+            scene.rootNode.addChildNode(node)
+
+            let textGeometry = SCNText(string: String(placement.letter), extrusionDepth: 0.02)
+            textGeometry.font = UIFont.systemFont(ofSize: 0.28, weight: .bold)
+            let textMaterial = SCNMaterial()
+            textMaterial.diffuse.contents = UIColor.black
+            textGeometry.materials = [textMaterial]
+
+            let textNode = SCNNode(geometry: textGeometry)
+            textNode.scale = SCNVector3(0.3, 0.3, 0.3)
+            textNode.position = SCNVector3(-0.1, -0.1, 0.22)
+            node.addChildNode(textNode)
+        }
+
         // Build the actual character.
         let character = Self.makeFrankensteinCharacter()
         character.name = "Frankenstein"
@@ -126,9 +203,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
         // Attach the same CA instance used for the displayed statistics.
         context.coordinator.attachCA(ca)
 
-        // Publish what the robot sees, as one sentence, to SwiftUI. The
-        // coordinator reports at scan rate; only changes are forwarded, and
-        // at most about five times per second.
         let throttle = VisibleObjectsThrottle()
 
         context.coordinator.onDetectedObjects = { objects in
@@ -137,27 +211,23 @@ struct FrankensteinSceneView: UIViewRepresentable {
             self.seenText = DetectedObjectInfo.summary(of: objects)
         }
 
-        // Publish what the CA is planning, in words.
         context.coordinator.onPlanText = { text in
             if self.planText != text {
                 self.planText = text
             }
         }
 
-        // Publish the Q network grid with its dirty flags.
         context.coordinator.onQGrid = { cells in
             if self.qCells != cells {
                 self.qCells = cells
             }
         }
 
-        // Publish CA generation and live-cell updates to SwiftUI.
         context.coordinator.onCAStats = { generation, liveCells in
             self.generation = generation
             self.liveCells = liveCells
         }
 
-        // Attach the hand if the character builder created one.
         if let hand = character.childNode(
             withName: "FrankensteinRightHand",
             recursively: true
@@ -218,11 +288,9 @@ struct FrankensteinSceneView: UIViewRepresentable {
             alpha: 1.0
         )
 
-        // Initialize the displayed counters immediately.
         generation = ca.generation
         liveCells = ca.liveCellCount
 
-        // Start the coordinator's sensing and locomotion loop.
         context.coordinator.start()
 
         return view
@@ -238,7 +306,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
             return
         }
 
-        // Reset the character's position and orientation.
         if let character = uiView.scene?.rootNode.childNode(
             withName: "Frankenstein",
             recursively: true
@@ -246,7 +313,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
             character.position = SCNVector3(5.5, 0, 7.0)
             character.eulerAngles = SCNVector3Zero
 
-            // Reset limb animation.
             let limbNames = [
                 "FrankensteinLeftLeg",
                 "FrankensteinRightLeg",
@@ -263,13 +329,11 @@ struct FrankensteinSceneView: UIViewRepresentable {
             }
         }
 
-        // Reset the CA and update the displayed counters.
         ca.reset()
 
         generation = ca.generation
         liveCells = ca.liveCellCount
 
-        // Clear the request so the reset happens only once.
         DispatchQueue.main.async {
             self.resetRequested = false
         }
@@ -292,7 +356,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
         let root = SCNNode()
         root.name = "Frankenstein"
 
-        // Materials
         let skinMaterial = SCNMaterial()
         skinMaterial.diffuse.contents = UIColor(
             red: 0.35,
@@ -326,7 +389,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
         let pupilMaterial = SCNMaterial()
         pupilMaterial.diffuse.contents = UIColor.black
 
-        // Helper to create a named box body part.
         func makeBox(
             name: String,
             width: CGFloat,
@@ -349,8 +411,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
             return node
         }
 
-        // MARK: Torso
-
         let torso = makeBox(
             name: "FrankensteinTorso",
             width: 0.72,
@@ -360,8 +420,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
             material: clothingMaterial
         )
         root.addChildNode(torso)
-
-        // MARK: Neck
 
         let neckGeometry = SCNCylinder(
             radius: 0.13,
@@ -374,8 +432,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
         neck.position = SCNVector3(0, 1.72, 0)
         root.addChildNode(neck)
 
-        // MARK: Head
-
         let head = makeBox(
             name: "FrankensteinHead",
             width: 0.48,
@@ -386,7 +442,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
         )
         root.addChildNode(head)
 
-        // Eyes on the front of the head.
         for x: Float in [-0.12, 0.12] {
             let eyeGeometry = SCNSphere(radius: 0.055)
             eyeGeometry.materials = [eyeMaterial]
@@ -409,7 +464,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
             root.addChildNode(pupil)
         }
 
-        // Mouth.
         let mouth = makeBox(
             name: "FrankensteinMouth",
             width: 0.17,
@@ -419,8 +473,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
             material: pupilMaterial
         )
         root.addChildNode(mouth)
-
-        // MARK: Legs
 
         let leftLeg = makeBox(
             name: "FrankensteinLeftLeg",
@@ -442,7 +494,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
         )
         root.addChildNode(rightLeg)
 
-        // Boots.
         let leftBoot = makeBox(
             name: "FrankensteinLeftBoot",
             width: 0.29,
@@ -462,8 +513,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
             material: bootMaterial
         )
         root.addChildNode(rightBoot)
-
-        // MARK: Arms
 
         let leftArm = makeBox(
             name: "FrankensteinLeftArm",
@@ -485,7 +534,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
         )
         root.addChildNode(rightArm)
 
-        // Right hand is separately named for pickup interactions.
         let handGeometry = SCNSphere(radius: 0.12)
         handGeometry.materials = [skinMaterial]
 
@@ -494,7 +542,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
         hand.position = SCNVector3(0.49, 0.86, -0.01)
         root.addChildNode(hand)
 
-        // Left hand.
         let leftHandGeometry = SCNSphere(radius: 0.12)
         leftHandGeometry.materials = [skinMaterial]
 
@@ -507,9 +554,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
     }
 }
 
-// MARK: - Visible-object publishing
-
-/// Keeps the SwiftUI object list from re-rendering at sensor rate.
 final class VisibleObjectsThrottle {
     private var lastSignature = ""
     private var lastTime: TimeInterval = 0
