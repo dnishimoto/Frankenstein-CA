@@ -35,6 +35,34 @@ final class FrankensteinCA: ObservableObject {
     /// before the CA's own scoring vetoes the plan.
     private let planCommitmentMargin: Float = 0.35
 
+    // MARK: - Stagnation Detection
+    @Published private(set) var isStagnant: Bool = false
+    @Published var stagnationStatus = "Moving normally"
+    
+    private var lastKnownPosition: SIMD3<Float> = .zero
+    private var stagnationTimeAccumulator: TimeInterval = 0
+    private let stagnationTimeLimit: TimeInterval = 1.5
+
+    func checkStagnation(currentPosition: SIMD3<Float>, deltaTime: TimeInterval) {
+        let dx = currentPosition.x - lastKnownPosition.x
+        let dz = currentPosition.z - lastKnownPosition.z
+        let movedDistance = sqrt(dx * dx + dz * dz)
+
+        if movedDistance < 0.01 {
+            stagnationTimeAccumulator += deltaTime
+            if stagnationTimeAccumulator >= stagnationTimeLimit {
+                isStagnant = true
+                futilityCount += 1
+                stagnationStatus = "Stagnation detected: Frankenstein has not moved for \(String(format: "%.1f", stagnationTimeAccumulator))s"
+            }
+        } else {
+            stagnationTimeAccumulator = 0
+            isStagnant = false
+            lastKnownPosition = currentPosition
+            stagnationStatus = "Moving normally"
+        }
+    }
+
     // MARK: - Tapestry Blueprint Coordinates & Movable Blocks Setup
     private var currentTapestrySlotIndex = 0
     private weak var cachedRootNode: SCNNode?
@@ -155,31 +183,25 @@ final class FrankensteinCA: ObservableObject {
             "stuck \(String(format: "%.1f", stuckSeconds)) s | outcomes \(outcomesObserved)"
     }
     /// Advances the cellular automaton state and updates live cell counts.
-        func step() {
-            // Run one generation/step of the cellular automaton
-            for y in 0..<size {
-                for x in 0..<size {
-                    let liveNeighbors = countLiveNeighbors(x: x, y: y)
-                    let isAlive = grid[y][x]
-                    
-                    // Conway-style or custom CA rule application
-                    if isAlive {
-                        nextGrid[y][x] = liveNeighbors == 2 || liveNeighbors == 3
-                    } else {
-                        nextGrid[y][x] = liveNeighbors == 3
-                    }
+    func step() {
+        for y in 0..<size {
+            for x in 0..<size {
+                let liveNeighbors = countLiveNeighbors(x: x, y: y)
+                let isAlive = grid[y][x]
+                
+                if isAlive {
+                    nextGrid[y][x] = liveNeighbors == 2 || liveNeighbors == 3
+                } else {
+                    nextGrid[y][x] = liveNeighbors == 3
                 }
             }
-            
-            // Swap grids
-            cells = nextGrid
-            generation += 1
-            liveCellCount = countLiveCells()
         }
+        
+        cells = nextGrid
+        generation += 1
+        liveCellCount = countLiveCells()
+    }
 
-    /// Observes movement to detect futile loops: he keeps returning to
-    /// (nearly) the same place for at least `loopMinimumAge` seconds. The
-    /// actions he used since are penalized.
     func observeMovementForFutility(
         action: FrankensteinAction,
         x: Float,
@@ -244,7 +266,6 @@ final class FrankensteinCA: ObservableObject {
         futilityStatus = "Loop detected #\(futilityCount); reconsidering actions"
     }
 
-    /// Reduces the futility penalty for an action when steady progress is made.
     func forgiveFutility(for action: FrankensteinAction, amount: Float = 0.5) {
         guard let penalty = futilityPenalties[action] else { return }
 
@@ -252,67 +273,58 @@ final class FrankensteinCA: ObservableObject {
         futilityPenalties[action] = reduced > 0.05 ? reduced : nil
     }
 
-    /// Evaluates whether a given cell or entity is currently active within the grid bounds.
-        /// - Parameters:
-        ///   - x: The x-coordinate index.
-        ///   - y: The y-coordinate index.
-        /// - Returns: A boolean indicating if the cell is active (alive) and within valid bounds.
-        func isActive(x: Int, y: Int) -> Bool {
-            guard x >= 0, x < size, y >= 0, y < size else {
-                return false
-            }
-            return grid[y][x]
+    func isActive(x: Int, y: Int) -> Bool {
+        guard x >= 0, x < size, y >= 0, y < size else {
+            return false
         }
-    /// Resets the cellular automaton state, generation counter, Q-grids, and planning buffers.
-        func reset() {
-            generation = 0
-            isRunning = false
-            totalDecisions = 0
-            stuckSeconds = 0
-            outcomesObserved = 0
-            consecutiveJumpCount = 0
-            lastDecisionDescription = "Simulation reset"
-            goalSeekingStatus = "No goal outcome yet"
-            
-            // Reset planning and memory structures
-            planBuffer = FrankensteinPlanBuffer()
-            goalContext = FrankensteinGoalContext()
-            pendingGoalChange = nil
-            plannedSequence.removeAll()
-            visitCounts.removeAll()
-            effectModel.removeAll()
-            futilityPenalties.removeAll()
-            recentPositions.removeAll()
-            lastPositionSampleTime = 0
-            lastLoopPenaltyTime = 0
-            lastFutilityDecayTime = 0
-            futilityCount = 0
-            futilityStatus = "No loop detected"
-            
-            // Reset network Q-grid and field-of-vision dirty flags
-            networkQGrid = Array(repeating: Array(repeating: 0.0, count: size), count: size)
-            dirtyQCells = Array(repeating: Array(repeating: true, count: size), count: size)
-            
-            // Re-randomize CA grid and update live cell count
-            randomize()
-            liveCellCount = countLiveCells()
-        }
-    // MARK: - Dirty Q-Values Field of Vision Logic
+        return grid[y][x]
+    }
+
+    func reset() {
+        generation = 0
+        isRunning = false
+        totalDecisions = 0
+        stuckSeconds = 0
+        outcomesObserved = 0
+        consecutiveJumpCount = 0
+        isStagnant = false
+        stagnationTimeAccumulator = 0
+        lastDecisionDescription = "Simulation reset"
+        goalSeekingStatus = "No goal outcome yet"
+        
+        planBuffer = FrankensteinPlanBuffer()
+        goalContext = FrankensteinGoalContext()
+        pendingGoalChange = nil
+        plannedSequence.removeAll()
+        visitCounts.removeAll()
+        effectModel.removeAll()
+        futilityPenalties.removeAll()
+        recentPositions.removeAll()
+        lastPositionSampleTime = 0
+        lastLoopPenaltyTime = 0
+        lastFutilityDecayTime = 0
+        futilityCount = 0
+        futilityStatus = "No loop detected"
+        
+        networkQGrid = Array(repeating: Array(repeating: 0.0, count: size), count: size)
+        dirtyQCells = Array(repeating: Array(repeating: true, count: size), count: size)
+        
+        randomize()
+        liveCellCount = countLiveCells()
+    }
+
     private func markVisionQValuesDirty(perception p: FrankensteinCAPerception) {
-        // Clear dirty flags
         for y in 0..<size {
             for x in 0..<size {
                 dirtyQCells[y][x] = false
             }
         }
 
-        // Mark action neurons visible/relevant in field of vision as dirty
         let visibleActions: [FrankensteinAction] = p.nearestObjectMovable ? [.pushObject, .liftObject, .walk] : [.walk, .run, .turnLeft, .turnRight, .jump]
         
         for action in visibleActions {
             if let pos = actionNeuronPosition(for: action) {
                 dirtyQCells[pos.y][pos.x] = true
-                // Mark local neighborhood in CA grid as dirty for spatial propagation
                 for dy in -1...1 {
                     for dx in -1...1 {
                         let ny = max(0, min(size - 1, pos.y + dy))
@@ -329,14 +341,12 @@ final class FrankensteinCA: ObservableObject {
         return networkQGrid[y][x]
     }
 
-    /// The Q-value the CA currently holds for an action.
     func qValue(for action: FrankensteinAction) -> Float {
         guard let position = actionNeuronPosition(for: action) else { return 0 }
         return networkQGrid[position.y][position.x]
     }
 
     func setQValues(_ qValues: [FrankensteinAction: Float]) {
-        // Only update Q-values where the corresponding cells are marked dirty in Frankenstein's field of vision
         for (action, value) in qValues {
             guard let position = actionNeuronPosition(for: action) else {
                 continue
@@ -348,7 +358,6 @@ final class FrankensteinCA: ObservableObject {
         }
     }
 
-    // MARK: - Predicted Goal Score (Fixed: Removed blind jump preference)
     private func predictedGoalScore(
         for action: FrankensteinAction,
         perception p: FrankensteinCAPerception
@@ -368,14 +377,14 @@ final class FrankensteinCA: ObservableObject {
         case .stepForward:
             score += 0.25 * 0.5 * alignment
         case .jump:
-                    if p.clearanceAhead < 0.8 || p.nearestObjectClass == "rechargeStation" || p.nearestObjectName.lowercased().contains("recharge") {
-                        score += 0.6
-                    } else {
-                        score -= 0.3
-                    }
-                    if consecutiveJumpCount > 3 {
-                        score -= 2.0
-                    }
+            if p.clearanceAhead < 0.8 || p.nearestObjectClass == "rechargeStation" || p.nearestObjectName.lowercased().contains("recharge") {
+                score += 0.6
+            } else {
+                score -= 0.3
+            }
+            if consecutiveJumpCount > 3 {
+                score -= 2.0
+            }
          
         default:
             break
@@ -408,23 +417,16 @@ final class FrankensteinCA: ObservableObject {
         var progress: Float = 0
         var used: Float = 0
         var wasted: Int = 0
-
-        /// Discounted sum of the learned goal-conditioned Q-values of the
-        /// actions taken so far: sum of gamma^t * alpha * Q(s, a, g).
         var qSum: Float = 0
         var discount: Float = 1
     }
 
-    // Goal-conditioned Q-guided planning.
-    private let planQWeight: Float = 0.5      // alpha
-    private let planQScale: Float = 2.0       // tanh scale for Q-values
-    private let planDiscount: Float = 0.9     // gamma
-    private let planGoalBonus: Float = 1.0    // beta: sequence reaches the sub-goal
+    private let planQWeight: Float = 0.5
+    private let planQScale: Float = 2.0
+    private let planDiscount: Float = 0.9
+    private let planGoalBonus: Float = 1.0
     private let planGoalTolerance: Float = 0.3
 
-    /// Q(s0, a, g) for the state he is in, as supplied by the policy this
-    /// decision. The policy's state is coarse (terrain/object bands), so the
-    /// same values are used for every step of the rollout.
     private var planQValues: [FrankensteinAction: Float] = [:]
 
     private func goalQTerm(_ action: FrankensteinAction) -> Float {
@@ -475,8 +477,6 @@ final class FrankensteinCA: ObservableObject {
         return p.clearanceAhead
     }
 
-    /// One simulated step: geometry (progress, risk, waste) plus the learned
-    /// goal-conditioned value of the action, discounted by its depth.
     private func planStep(
         _ action: FrankensteinAction,
         from state: Rollout,
@@ -554,10 +554,8 @@ final class FrankensteinCA: ObservableObject {
         let alignment = cosf(wrapped(routeNow - state.heading))
         var value = state.progress + 0.4 * alignment - 0.5 * Float(state.wasted)
 
-        // Learned, goal-conditioned value of the actions in the sequence.
         value += state.qSum
 
-        // The sequence actually reaches the current sub-goal's position.
         if p.pathDistance.isFinite,
            state.progress >= p.pathDistance - planGoalTolerance {
             value += planGoalBonus
@@ -818,7 +816,6 @@ final class FrankensteinCA: ObservableObject {
         return goalProgressGain * tanhf(stat.mean / 0.6)
     }
 
-    /// Brings the buffered plan in line with the sequence just searched.
     private func updatePlanBuffer(
         plan: [FrankensteinAction: Float],
         allowed: [FrankensteinAction]
@@ -845,18 +842,6 @@ final class FrankensteinCA: ObservableObject {
         )
     }
 
-    // MARK: - Decision pipeline
-    //
-    //   1. Take the goal context and the policy's Q(s, a, g) for this state.
-    //   2. Search action sequences: geometry + discounted learned Q-values
-    //      + a bonus when the sequence reaches the sub-goal (planValues).
-    //   3. Reconcile the buffered plan with that search.
-    //   4. Score every permitted action with the full CA scoring.
-    //   5. Follow the buffered head unless the scoring vetoes it.
-    //   6. Exploration may replace the choice.
-    //
-    // The buffer advances only in reportActionOutcome, when the action has
-    // really been executed.
     func decideAction(
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
@@ -875,7 +860,6 @@ final class FrankensteinCA: ObservableObject {
         let p = currentPerception()
         let stateKey = p?.stateKey ?? "none"
 
-        // 2. Search first, so the buffer is built from the current search.
         let plan: [FrankensteinAction: Float]
         if let p {
             plan = planValues(for: allowedActions, perception: p)
@@ -884,10 +868,8 @@ final class FrankensteinCA: ObservableObject {
             plan = [:]
         }
 
-        // 3. Reconcile the buffered plan with the search.
         updatePlanBuffer(plan: plan, allowed: allowedActions)
 
-        // 4. Score every permitted action.
         var best = allowedActions[0]
         var bestParts = scoreParts(for: best, perception: p, terrain: terrain, plan: plan)
         var allParts: [FrankensteinAction: ScoreParts] = [best: bestParts]
@@ -902,7 +884,6 @@ final class FrankensteinCA: ObservableObject {
             }
         }
 
-        // 5. Follow the buffered head unless the scoring vetoes it.
         var selected = best
 
         if let head = planBuffer.currentStep,
@@ -922,11 +903,6 @@ final class FrankensteinCA: ObservableObject {
             )
         }
 
-        // 6. Exploration.
-        // exploration >= 1: always explore. exploration <= 0: strictly greedy
-        // (the caller asked for no exploration). Otherwise the chance is the
-        // larger of the requested rate and the CA's own decaying baseline,
-        // capped at 25%.
         let epsilon: Float
         if exploration >= 1 {
             epsilon = 1
