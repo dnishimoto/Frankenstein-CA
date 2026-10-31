@@ -9,6 +9,7 @@ import SceneKit
 import UIKit
 
 struct ContentView: View {
+    @StateObject private var energyManager = FrankensteinEnergyManager() // Add this definition
     @State private var generation = 0
     @State private var liveCells = 0
     @State private var resetRequested = false
@@ -51,7 +52,8 @@ struct ContentView: View {
                 planText: $planText,
                 qCells: $qCells
             )
-
+            LetterCubesPlacementPanel(placedLetters: energyManager.placedLetters)
+            
             QNetworkGridPanel(cells: qCells)
 
             RobotMindPanel(seen: seenText, plan: planText)
@@ -158,6 +160,55 @@ struct QNetworkGridPanel: View {
     }
 }
 
+struct LetterCubesPlacementPanel: View {
+    let targetWord = Array("FRANKENSTEIN")
+    let placedLetters: [Character?]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label("Letter Cubes Placement", systemImage: "cube.box")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(placedLetters.compactMap { $0 }.count) / \(targetWord.count) Placed")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 6) {
+                ForEach(0..<targetWord.count, id: \.self) { index in
+                    let expectedLetter = targetWord[index]
+                    let placedLetter = placedLetters[index]
+                    let isCorrect = placedLetter == expectedLetter
+
+                    VStack(spacing: 2) {
+                        Text(String(expectedLetter))
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.secondary)
+
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(isCorrect ? Color.green.opacity(0.3) : Color.secondary.opacity(0.15))
+                                .frame(height: 36)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .stroke(isCorrect ? Color.green : Color.clear, lineWidth: 1.5)
+                                )
+
+                            Text(placedLetter.map { String($0) } ?? "_")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(isCorrect ? .green : .primary)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 6)
+        .background(.thinMaterial)
+    }
+}
 
 // MARK: - What Frankenstein sees and is planning
 
