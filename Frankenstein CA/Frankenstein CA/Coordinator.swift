@@ -1328,6 +1328,11 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         var perception = FrankensteinCAPerception()
 
+        // The overall goal is recharging. A mission planner can replace the
+        // goal and supply a sub-goal here.
+        perception.goal = .recharge
+        perception.subGoal = ""
+
         let routedHeading = pathSteering?.heading ?? heading
         perception.headingError = pathSteering == nil
             ? 0
@@ -1663,6 +1668,9 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private func markFieldOfViewDirty(character: SCNNode, time: TimeInterval) {
         let policy = locomotion.policy
         policy.visionTime = time
+
+        // Q-values are conditioned on the goal: Q(s, a, g).
+        policy.currentGoalCategory = ca?.goalContext.goal.category ?? "recharge"
 
         // The state straight ahead (terrain + nearest object).
         policy.markVisibleDirty(

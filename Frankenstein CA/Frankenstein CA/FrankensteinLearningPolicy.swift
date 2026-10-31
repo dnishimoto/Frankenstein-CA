@@ -40,7 +40,15 @@ final class FrankensteinLearningPolicy {
         let objectHeightBand: Int
         let objectDepthBand: Int
         let objectPickupable: Bool
+
+        /// The goal category g in Q(s, a, g).
+        let goal: String
     }
+
+    /// The goal the CA is pursuing now (see FrankensteinGoal.category). Part
+    /// of every state, so learned values are conditioned on the goal. Set by
+    /// the Coordinator each frame from the CA's goal context.
+    var currentGoalCategory = "recharge"
 
     // State -> action ID -> Q-value
     private var values: [State: [Int: Float]] = [:]
@@ -173,7 +181,7 @@ final class FrankensteinLearningPolicy {
 
     private let minimumExploration: Float = 0.03
     private let explorationDecay: Float = 0.999
-    private let persistenceKey = "FrankensteinLearningPolicy.QTable.v2"
+    private let persistenceKey = "FrankensteinLearningPolicy.QTable.v3.goal"
 
     // MARK: - Diagnostics
 
@@ -258,7 +266,8 @@ final class FrankensteinLearningPolicy {
             objectDistanceBand: objectDistanceBand,
             objectHeightBand: objectHeightBand,
             objectDepthBand: objectDepthBand,
-            objectPickupable: objectObservation?.pickupable ?? false
+            objectPickupable: objectObservation?.pickupable ?? false,
+            goal: currentGoalCategory
         )
     }
     func updatePerceivedActionValues(

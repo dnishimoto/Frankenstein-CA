@@ -20,7 +20,20 @@ final class FrankensteinCA: ObservableObject {
     @Published private(set) var lastDecisionDescription = "Waiting for perception"
 
     @Published var networkQGrid: [[Float]]
-    @Published var planBuffer = FrankensteinPlanBuffer()
+    /// Actions queued for the current sub-goal (plain state, see
+    /// FrankensteinPlanBuffer).
+    var planBuffer = FrankensteinPlanBuffer()
+
+    /// The overall goal and where he is within it. Survives replanning.
+    private(set) var goalContext = FrankensteinGoalContext()
+
+    /// Set when the goal or sub-goal changed; the next decision drops the old
+    /// plan and searches again for the new sub-goal.
+    private var pendingGoalChange: String?
+
+    /// How much worse than the best-scoring action the buffered head may be
+    /// before the CA's own scoring vetoes the plan.
+    private let planCommitmentMargin: Float = 0.35
 
     // MARK: - Tapestry Blueprint Coordinates & Movable Blocks Setup
     private var currentTapestrySlotIndex = 0
@@ -54,6 +67,15 @@ final class FrankensteinCA: ObservableObject {
     func receivePerception(_ newPerception: FrankensteinCAPerception) {
         perception = newPerception
         lastTimestamp = max(lastTimestamp, newPerception.timestamp)
+
+        let sub = newPerception.subGoal.isEmpty ? nil : newPerception.subGoal
+        if let change = goalContext.observe(
+            goal: newPerception.goal,
+            subGoal: sub,
+            goalReached: newPerception.atGoal
+        ) {
+            pendingGoalChange = change
+        }
         decayFutility(to: newPerception.timestamp)
         
         // Mark Q-values dirty within Frankenstein's field of vision based on perception
@@ -95,8 +117,10 @@ final class FrankensteinCA: ObservableObject {
         var measured = goalProgressRate + 0.8 * alignmentGain
         if blocked {
             measured -= 0.3
-            planBuffer.markCurrentStepFailed()
         }
+
+        // The plan advances only when the action has really run.
+        planBuffer.recordExecuted(action: action, blocked: blocked)
         
         // Anti-hop penalty: if jumping produced no forward progress, penalize heavily
         if action == .jump && measured < 0.05 {
@@ -196,6 +220,8 @@ final class FrankensteinCA: ObservableObject {
             
             // Reset planning and memory structures
             planBuffer = FrankensteinPlanBuffer()
+            goalContext = FrankensteinGoalContext()
+            pendingGoalChange = nil
             plannedSequence.removeAll()
             visitCounts.removeAll()
             effectModel.removeAll()
@@ -310,6 +336,29 @@ final class FrankensteinCA: ObservableObject {
         var progress: Float = 0
         var used: Float = 0
         var wasted: Int = 0
+
+        /// Discounted sum of the learned goal-conditioned Q-values of the
+        /// actions taken so far: sum of gamma^t * alpha * Q(s, a, g).
+        var qSum: Float = 0
+        var discount: Float = 1
+    }
+
+    // Goal-conditioned Q-guided planning.
+    private let planQWeight: Float = 0.5      // alpha
+    private let planQScale: Float = 2.0       // tanh scale for Q-values
+    private let planDiscount: Float = 0.9     // gamma
+    private let planGoalBonus: Float = 1.0    // beta: sequence reaches the sub-goal
+    private let planGoalTolerance: Float = 0.3
+
+    /// Q(s0, a, g) for the state he is in, as supplied by the policy this
+    /// decision. The policy's state is coarse (terrain/object bands), so the
+    /// same values are used for every step of the rollout.
+    private var planQValues: [FrankensteinAction: Float] = [:]
+
+    private func goalQTerm(_ action: FrankensteinAction) -> Float {
+        let q = planQValues[action, default: 0]
+        guard q.isFinite else { return 0 }
+        return planQWeight * tanhf(q / planQScale)
     }
 
     private func wrapped(_ angle: Float) -> Float {
@@ -354,7 +403,20 @@ final class FrankensteinCA: ObservableObject {
         return p.clearanceAhead
     }
 
+    /// One simulated step: geometry (progress, risk, waste) plus the learned
+    /// goal-conditioned value of the action, discounted by its depth.
     private func planStep(
+        _ action: FrankensteinAction,
+        from state: Rollout,
+        perception p: FrankensteinCAPerception
+    ) -> Rollout {
+        var next = physicalStep(action, from: state, perception: p)
+        next.qSum = state.qSum + state.discount * goalQTerm(action)
+        next.discount = state.discount * planDiscount
+        return next
+    }
+
+    private func physicalStep(
         _ action: FrankensteinAction,
         from state: Rollout,
         perception p: FrankensteinCAPerception
@@ -418,7 +480,18 @@ final class FrankensteinCA: ObservableObject {
     ) -> Float {
         let routeNow = routeHeading(atProgress: state.progress, perception: p)
         let alignment = cosf(wrapped(routeNow - state.heading))
-        return state.progress + 0.4 * alignment - 0.5 * Float(state.wasted)
+        var value = state.progress + 0.4 * alignment - 0.5 * Float(state.wasted)
+
+        // Learned, goal-conditioned value of the actions in the sequence.
+        value += state.qSum
+
+        // The sequence actually reaches the current sub-goal's position.
+        if p.pathDistance.isFinite,
+           state.progress >= p.pathDistance - planGoalTolerance {
+            value += planGoalBonus
+        }
+
+        return value
     }
 
     private func bestContinuation(
@@ -652,16 +725,45 @@ final class FrankensteinCA: ObservableObject {
         return goalProgressGain * tanhf(stat.mean / 0.6)
     }
 
-    private func updatePlanBuffer(perception p: FrankensteinCAPerception?, terrain: FrankensteinTerrainSample) {
-        guard let p else { return }
-        let newSteps = plannedSequence.map { PlanStep(action: $0, description: "Execute action \($0)") }
-        if planBuffer.isEmpty {
-            planBuffer.setPlan(newSteps)
-        } else {
-            planBuffer.adaptPlan(with: newSteps)
+    /// Brings the buffered plan in line with the sequence just searched.
+    private func updatePlanBuffer(
+        plan: [FrankensteinAction: Float],
+        allowed: [FrankensteinAction]
+    ) {
+        if let change = pendingGoalChange {
+            planBuffer.invalidate(reason: change)
+            pendingGoalChange = nil
         }
+
+        let fresh = plannedSequence.map { PlanStep(action: $0, description: "\($0)") }
+
+        var headRegret: Float = 0
+        if let head = planBuffer.currentStep,
+           let bestValue = plan.values.max(),
+           let headValue = plan[head.action] {
+            headRegret = max(0, bestValue - headValue)
+        }
+
+        planBuffer.reconcile(
+            fresh: fresh,
+            headRegret: headRegret,
+            allowed: allowed,
+            regretMargin: planCommitmentMargin
+        )
     }
 
+    // MARK: - Decision pipeline
+    //
+    //   1. Take the goal context and the policy's Q(s, a, g) for this state.
+    //   2. Search action sequences: geometry + discounted learned Q-values
+    //      + a bonus when the sequence reaches the sub-goal (planValues).
+    //   3. Reconcile the buffered plan with that search.
+    //   4. Score every permitted action with the full CA scoring.
+    //   5. Follow the buffered head unless the scoring vetoes it.
+    //   6. Exploration may replace the choice.
+    //
+    // The buffer advances only in reportActionOutcome, when the action has
+    // really been executed.
     func decideAction(
         terrain: FrankensteinTerrainSample,
         body: FrankensteinBodyState,
@@ -675,49 +777,87 @@ final class FrankensteinCA: ObservableObject {
         }
 
         setQValues(qValues)
+        planQValues = qValues
 
         let p = currentPerception()
         let stateKey = p?.stateKey ?? "none"
 
-        updatePlanBuffer(perception: p, terrain: terrain)
-
-        let epsilon = max(exploration, randomExploration)
-
-        if Float.random(in: 0..<1) < epsilon,
-           let random = allowedActions.filter({ $0 != .recover }).randomElement() {
-            recordVisit(action: random, stateKey: stateKey)
-            rememberDecision(random, stateKey: stateKey, perception: p)
-            planBuffer.insertImmediateStep(PlanStep(action: random, description: "Exploration step"))
-            planBuffer.markCurrentStepCompleted()
-            lastDecisionDescription = "Decided to explore \(random) (State: \(stateKey))"
-            return random
+        // 2. Search first, so the buffer is built from the current search.
+        let plan: [FrankensteinAction: Float]
+        if let p {
+            plan = planValues(for: allowedActions, perception: p)
+        } else {
+            plannedSequence = []
+            plan = [:]
         }
 
-        let plan: [FrankensteinAction: Float] = p.map { planValues(for: allowedActions, perception: $0) } ?? [:]
+        // 3. Reconcile the buffered plan with the search.
+        updatePlanBuffer(plan: plan, allowed: allowedActions)
 
-        let selected: FrankensteinAction
-        if let step = planBuffer.currentStep, allowedActions.contains(step.action) {
-            selected = step.action
-            planBuffer.markCurrentStepCompleted()
-        } else {
-            var candidate = allowedActions[0]
-            var bestParts = scoreParts(for: candidate, perception: p, terrain: terrain, plan: plan)
+        // 4. Score every permitted action.
+        var best = allowedActions[0]
+        var bestParts = scoreParts(for: best, perception: p, terrain: terrain, plan: plan)
+        var allParts: [FrankensteinAction: ScoreParts] = [best: bestParts]
 
-            for action in allowedActions.dropFirst() {
-                let parts = scoreParts(for: action, perception: p, terrain: terrain, plan: plan)
-                if parts.total > bestParts.total {
-                    candidate = action
-                    bestParts = parts
-                }
+        for action in allowedActions.dropFirst() {
+            let parts = scoreParts(for: action, perception: p, terrain: terrain, plan: plan)
+            allParts[action] = parts
+
+            if parts.total > bestParts.total {
+                best = action
+                bestParts = parts
             }
-            selected = candidate
-            planBuffer.insertImmediateStep(PlanStep(action: selected, description: "Action step"))
-            planBuffer.markCurrentStepCompleted()
+        }
+
+        // 5. Follow the buffered head unless the scoring vetoes it.
+        var selected = best
+
+        if let head = planBuffer.currentStep,
+           let headParts = allParts[head.action] {
+            if head.action == best || bestParts.total - headParts.total <= planCommitmentMargin {
+                selected = head.action
+            } else {
+                planBuffer.overrideHead(
+                    with: PlanStep(action: best, description: "\(best)"),
+                    reason: "scoring overrode \(head.action) with \(best)"
+                )
+            }
+        } else {
+            planBuffer.overrideHead(
+                with: PlanStep(action: best, description: "\(best)"),
+                reason: "no plan; chose \(best)"
+            )
+        }
+
+        // 6. Exploration.
+        let epsilon: Float = exploration >= 1
+            ? 1
+            : max(0, min(0.25, max(exploration, randomExploration)))
+
+        var explored = false
+
+        if Float.random(in: 0..<1) < epsilon,
+           let random = allowedActions.filter({ $0 != .recover && $0 != selected }).randomElement() {
+            selected = random
+            explored = true
+            planBuffer.overrideHead(
+                with: PlanStep(action: random, description: "\(random) (exploring)"),
+                reason: "exploring \(random)"
+            )
         }
 
         recordVisit(action: selected, stateKey: stateKey)
         rememberDecision(selected, stateKey: stateKey, perception: p)
-        lastDecisionDescription = "Decided to execute \(selected) (State: \(stateKey))"
+
+        let queue = planBuffer.pendingActions.prefix(4)
+            .map { String(describing: $0) }
+            .joined(separator: " > ")
+
+        lastDecisionDescription =
+            "\(explored ? "Exploring" : "Executing") \(selected) | " +
+            "\(goalContext.summary) | Queue: \(queue.isEmpty ? "empty" : queue) | " +
+            "Plan: \(planBuffer.lastReplanReason) (\(planBuffer.replanCount)) | State: \(stateKey)"
+
         return selected
     }
 

@@ -9,6 +9,47 @@ import Foundation
 import SwiftUI
 import SceneKit
 
+enum FrankensteinGoal: Hashable {
+    case reachPosition
+    case reachObject(String)
+    case moveObject(String)
+    case crossGap
+    case reachPlatform(String)
+    case recharge(String)
+    case completeInteraction(String)
+
+    /// Recharge at the station. This is the goal the Coordinator pursues
+    /// today, so it is the default.
+    static let recharge = FrankensteinGoal.recharge("RechargeStation")
+
+    /// The goal's category. This (not the object's name) is part of the
+    /// policy's state key, so Q-values are shared between objects of the
+    /// same kind of task and the table does not explode.
+    var category: String {
+        switch self {
+        case .reachPosition:        return "reachPosition"
+        case .reachObject:          return "reachObject"
+        case .moveObject:           return "moveObject"
+        case .crossGap:             return "crossGap"
+        case .reachPlatform:        return "reachPlatform"
+        case .recharge:             return "recharge"
+        case .completeInteraction:  return "completeInteraction"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .reachPosition:                 return "reach a position"
+        case .reachObject(let name):         return "reach \(name)"
+        case .moveObject(let name):          return "move \(name)"
+        case .crossGap:                      return "cross the gap"
+        case .reachPlatform(let name):       return "reach \(name)"
+        case .recharge(let name):            return "recharge at \(name)"
+        case .completeInteraction(let name): return "complete \(name)"
+        }
+    }
+}
+
 struct FrankensteinQDisplayCell: Identifiable, Equatable {
     let objectName: String
     let value: Float
@@ -48,6 +89,10 @@ struct FrankensteinCAPerception {
     var advisoryValues: [FrankensteinAction: Float] = [:]
     var stateKey = "none"
     var timestamp: TimeInterval = 0
+
+    /// The overall goal and current sub-goal the CA is planning for.
+    var goal: FrankensteinGoal = .recharge
+    var subGoal = ""
 
     /// The mission planner's current sub-goal, for the CA's narrative.
     var subgoalIntent = "none"
