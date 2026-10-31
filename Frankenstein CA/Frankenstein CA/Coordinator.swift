@@ -1070,6 +1070,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             lastQGridPublishTime = time
 
             let cells = locomotion.policy.qDisplaySnapshot(
+                objectsInView: visibleObservations(),
                 terrain: latestTerrainSample,
                 body: locomotion.body
             )
@@ -1644,6 +1645,20 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     // MARK: - Wide Field of View Scan
 
+    /// The objects in the wide field of vision, as policy observations.
+    private func visibleObservations() -> [FrankensteinObjectObservation] {
+        visibleObjects.prefix(12).map { item in
+            FrankensteinObjectObservation(
+                name: item.name,
+                width: item.dimensions.x,
+                height: item.dimensions.y,
+                depth: item.dimensions.z,
+                distance: item.distance,
+                pickupable: item.pickupable
+            )
+        }
+    }
+
     /// Marks the Q-values in Frankenstein's field of vision as dirty.
     private func markFieldOfViewDirty(character: SCNNode, time: TimeInterval) {
         let policy = locomotion.policy
@@ -1656,19 +1671,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         )
 
         // Every object seen in the wide field of vision.
-        let seen = visibleObjects.prefix(12).map { item in
-            FrankensteinObjectObservation(
-                name: item.name,
-                width: item.dimensions.x,
-                height: item.dimensions.y,
-                depth: item.dimensions.z,
-                distance: item.distance,
-                pickupable: item.pickupable
-            )
-        }
-
         policy.markVisibleDirty(
-            objects: Array(seen),
+            objects: visibleObservations(),
             terrain: latestTerrainSample,
             body: locomotion.body
         )
@@ -3969,4 +3973,3 @@ extension Coordinator {
         print("[Coordinator] CA path field generation=\(executive.field.generation), path distance=\(pathGoalDistance)")
     }
 }
-

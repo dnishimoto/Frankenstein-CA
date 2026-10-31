@@ -101,7 +101,7 @@ final class FrankensteinLearningPolicy {
 
         // Dictionary to track highest Q-value per unique object name with unique ID
         // (assuming object name and unique id concatenated forms unique id)
-        var bestQValuesByObjectID: [String: (name: String, value: Float)] = [:]
+        var bestQValuesByObjectID: [String: (name: String, value: Float, dirty: Bool)] = [:]
 
         for object in objectsInView {
             let state = makeState(
@@ -110,8 +110,12 @@ final class FrankensteinLearningPolicy {
                 objectObservation: object
             )
             // Find highest Q-value over all actions in that state
-            let qVals = values[state]?.values ?? []
-            let bestValue = qVals.max() ?? 0
+            let bestValue = values[state]?.values.max() ?? 0
+
+            // Dirty when any Q-value of this state is in his field of vision.
+            let isDirty = FrankensteinAction.allCases.contains {
+                dirtyKeys[QKey(state: state, action: $0.rawValue)] != nil
+            }
 
             // Use object's unique identifier as id; if none available use name
             // Since FrankensteinObjectObservation has name, but no explicit id,
@@ -122,10 +126,10 @@ final class FrankensteinLearningPolicy {
 
             if let currentBest = bestQValuesByObjectID[objectID] {
                 if bestValue > currentBest.value {
-                    bestQValuesByObjectID[objectID] = (object.name, bestValue)
+                    bestQValuesByObjectID[objectID] = (object.name, bestValue, isDirty || currentBest.dirty)
                 }
             } else {
-                bestQValuesByObjectID[objectID] = (object.name, bestValue)
+                bestQValuesByObjectID[objectID] = (object.name, bestValue, isDirty)
             }
         }
 
@@ -134,7 +138,8 @@ final class FrankensteinLearningPolicy {
             FrankensteinQDisplayCell(
                 objectName: info.name,
                 value: info.value,
-                id: id
+                id: id,
+                isDirty: info.dirty
             )
         }
     }
@@ -1019,15 +1024,4 @@ extension FrankensteinLearningPolicy: FrankensteinStage1PolicyAdapter {
             terminal: terminal
         )
     }
-}
-
-
-// MARK: - FrankensteinQDisplayCell
-
-/// Updated cell struct to represent object-based Q-value display.
-/// Reports object name, learned Q-value, and a unique id.
-struct FrankensteinQDisplayCell {
-    let objectName: String
-    let value: Float
-    let id: String
 }

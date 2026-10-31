@@ -1,6 +1,9 @@
 /*
  Frankenstein’s learning policy should teach him to select the most appropriate movement skill based on the terrain, obstacles, and his previous experiences. On clear, level ground, he should learn when to walk or run, with success measured by actual progress without collisions. When encountering an obstacle that can be bypassed, he should evaluate turning and walking around it, learning that the maneuver is successful when he avoids the obstacle and decreases his distance to the goal. When facing a raised step, he should evaluate stepping up or jumping, receiving a positive reward when he successfully reaches the upper surface. When approaching a gap, he should learn to jump across it when the distance and landing conditions permit, or choose a safer alternate route when jumping is too risky; success means landing safely or reaching the other side by another route. When encountering a low barrier, he should evaluate rolling or crouching, learning that the action succeeds when he passes underneath without colliding. If movement fails because he is blocked, stuck, or unable to proceed, he should evaluate turning or recovering until movement resumes and progress continues. In every situation, the policy should learn from measured outcomes rather than intended movements, rewarding successful navigation and penalizing collisions, failed maneuvers, and confirmed falls. Over repeated attempts, this feedback should help Frankenstein choose and combine walking, running, turning, stepping, jumping, rolling, and recovery to navigate the course more effectively.
  */
+/*
+ Frankenstein’s learning policy should teach him to select the most appropriate movement skill based on the terrain, obstacles, and his previous experiences. On clear, level ground, he should learn when to walk or run, with success measured by actual progress without collisions. When encountering an obstacle that can be bypassed, he should evaluate turning and walking around it, learning that the maneuver is successful when he avoids the obstacle and decreases his distance to the goal. When facing a raised step, he should evaluate stepping up or jumping, receiving a positive reward when he successfully reaches the upper surface. When approaching a gap, he should learn to jump across it when the distance and landing conditions permit, or choose a safer alternate route when jumping is too risky; success means landing safely or reaching the other side by another route. When encountering a low barrier, he should evaluate rolling or crouching, learning that the action succeeds when he passes underneath without colliding. If movement fails because he is blocked, stuck, or unable to proceed, he should evaluate turning or recovering until movement resumes and progress continues. In every situation, the policy should learn from measured outcomes rather than intended movements, rewarding successful navigation and penalizing collisions, failed maneuvers, and confirmed falls. Over repeated attempts, this feedback should help Frankenstein choose and combine walking, running, turning, stepping, jumping, rolling, and recovery to navigate the course more effectively.
+ */
 import SwiftUI
 import SceneKit
 import UIKit
@@ -111,6 +114,10 @@ struct QNetworkGridPanel: View {
                     .foregroundStyle(.secondary)
 
                 Spacer()
+
+                Text("red border = dirty")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
             }
 
             LazyVGrid(columns: columns, spacing: 4) {
@@ -127,6 +134,13 @@ struct QNetworkGridPanel: View {
                     .frame(maxWidth: .infinity, minHeight: 32)
                     .background(color(for: cell.value))
                     .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(
+                                cell.isDirty ? Color.red : Color.clear,
+                                lineWidth: 2
+                            )
+                    )
                 }
             }
         }

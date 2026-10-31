@@ -12,7 +12,18 @@ import SceneKit
 struct FrankensteinQDisplayCell: Identifiable, Equatable {
     let objectName: String
     let value: Float
-    var id: String { "\(objectName)_\(value)" }
+    let id: String
+
+    /// True when this Q-value is in his field of vision and waiting to be
+    /// updated (shown with a red border).
+    var isDirty: Bool
+
+    init(objectName: String, value: Float, id: String? = nil, isDirty: Bool = false) {
+        self.objectName = objectName
+        self.value = value
+        self.id = id ?? "\(objectName)_\(value)"
+        self.isDirty = isDirty
+    }
 }
 struct FrankensteinCAPerception {
     var position: SIMD3<Float> = .zero
@@ -37,6 +48,11 @@ struct FrankensteinCAPerception {
     var advisoryValues: [FrankensteinAction: Float] = [:]
     var stateKey = "none"
     var timestamp: TimeInterval = 0
+
+    /// The mission planner's current sub-goal, for the CA's narrative.
+    var subgoalIntent = "none"
+    var subgoalSummary = ""
+    var atSubgoal = false
 }
 
 
@@ -895,4 +911,3 @@ extension DetectedObjectInfo {
         return "I see " + text + "."
     }
 }
-
