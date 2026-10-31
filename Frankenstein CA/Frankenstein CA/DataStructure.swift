@@ -9,6 +9,93 @@ import Foundation
 import SwiftUI
 import SceneKit
 
+enum FrankensteinAction: Int, CaseIterable {
+    case walk
+    case run
+    case turnLeft
+    case turnRight
+    case jump
+    case crouch
+    case stepUp
+    case stepDown
+    case roll
+    case crawl
+    case recover
+    case backward
+    case stepForward
+    case liftObject
+    case placeObject
+    case throwObject
+    case pushObject
+}
+
+enum FrankensteinPosture: Equatable {
+    case standing, walking, running, jumping, crouching, crawling, rolling
+}
+
+enum FrankensteinTerrain: String, Codable, CaseIterable {
+    case flat, hurdle, gap, lowCeiling, raisedStep, slope, uneven, unknown
+}
+
+
+
+struct FrankensteinBodyState {
+    var speed: Float = 0
+    var tilt: Float = 0
+    var verticalVelocity: Float = 0
+    var height: Float = 1.8
+    var grounded = true
+    var fallen = false
+    var distanceTravelled: Float = 0
+    var isFallen = false
+    var headingError: Float = 0
+}
+
+struct FrankensteinObjectObservation: Hashable {
+    let name: String
+    let width: Float
+    let height: Float
+    let depth: Float
+    let distance: Float
+    let pickupable: Bool
+
+    var categoryIndex: Int {
+        let value = name.lowercased()
+        if value.contains("table") { return 1 }
+        if value.contains("door") { return 2 }
+        if value.contains("stair") || value.contains("step") { return 3 }
+        if value.contains("platform") { return 4 }
+        if value.contains("ceiling") { return 5 }
+        if value.contains("crate") || value.contains("box") || value.contains("block") { return 6 }
+        return 7
+    }
+}
+
+struct DetectedObjectInfo {
+    let name: String
+    let dimensions: SCNVector3
+    let distance: Float
+    let worldPosition: SCNVector3
+    let pickupable: Bool
+    var topY: Float = 0
+    var bearing: Float = 0
+}
+
+struct FrankensteinQDisplayCell: Identifiable, Equatable {
+    let objectName: String
+    let value: Float
+    let id: String
+    var isDirty: Bool
+
+    init(objectName: String, value: Float, id: String? = nil, isDirty: Bool = false) {
+        self.objectName = objectName
+        self.value = value
+        self.id = id ?? "\(objectName)_\(value)"
+        self.isDirty = isDirty
+    }
+}
+
+
 enum PlanStepStatus: String, Codable {
     case completed = "Completed"
     case current = "Current"
@@ -16,6 +103,46 @@ enum PlanStepStatus: String, Codable {
     case failed = "Failed"
     case replanning = "Replanning"
 }
+
+enum FrankensteinGoal: Hashable {
+    case reachPosition
+    case reachObject(String)
+    case moveObject(String)
+    case crossGap
+    case reachPlatform(String)
+    case recharge(String)
+    case placeLetterBlock(letter: Character, targetIndex: Int)
+    case completeInteraction(String)
+
+    static let recharge = FrankensteinGoal.recharge("RechargeStation")
+
+    var category: String {
+        switch self {
+        case .reachPosition:        return "reachPosition"
+        case .reachObject:          return "reachObject"
+        case .moveObject:           return "moveObject"
+        case .crossGap:             return "crossGap"
+        case .reachPlatform:        return "reachPlatform"
+        case .recharge:             return "recharge"
+        case .placeLetterBlock:     return "placeLetterBlock"
+        case .completeInteraction:  return "completeInteraction"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .reachPosition:                 return "reach a position"
+        case .reachObject(let name):         return "reach \(name)"
+        case .moveObject(let name):          return "move \(name)"
+        case .crossGap:                      return "cross the gap"
+        case .reachPlatform(let name):       return "reach \(name)"
+        case .recharge(let name):            return "recharge at \(name)"
+        case .placeLetterBlock(let l, let i):return "place '\(l)' block in slot \(i + 1)"
+        case .completeInteraction(let name): return "complete \(name)"
+        }
+    }
+}
+
 
 extension SCNVector3: Equatable {
     public static func == (lhs: SCNVector3, rhs: SCNVector3) -> Bool {
@@ -32,63 +159,8 @@ struct PlanStepItem: Identifiable, Equatable {
     var targetLocation: SCNVector3?
 }
 
-enum FrankensteinGoal: Hashable {
-    case reachPosition
-    case reachObject(String)
-    case moveObject(String)
-    case crossGap
-    case reachPlatform(String)
-    case recharge(String)
-    case completeInteraction(String)
 
-    /// Recharge at the station. This is the goal the Coordinator pursues
-    /// today, so it is the default.
-    static let recharge = FrankensteinGoal.recharge("RechargeStation")
 
-    /// The goal's category. This (not the object's name) is part of the
-    /// policy's state key, so Q-values are shared between objects of the
-    /// same kind of task and the table does not explode.
-    var category: String {
-        switch self {
-        case .reachPosition:        return "reachPosition"
-        case .reachObject:          return "reachObject"
-        case .moveObject:           return "moveObject"
-        case .crossGap:             return "crossGap"
-        case .reachPlatform:        return "reachPlatform"
-        case .recharge:             return "recharge"
-        case .completeInteraction:  return "completeInteraction"
-        }
-    }
-
-    var summary: String {
-        switch self {
-        case .reachPosition:                 return "reach a position"
-        case .reachObject(let name):         return "reach \(name)"
-        case .moveObject(let name):          return "move \(name)"
-        case .crossGap:                      return "cross the gap"
-        case .reachPlatform(let name):       return "reach \(name)"
-        case .recharge(let name):            return "recharge at \(name)"
-        case .completeInteraction(let name): return "complete \(name)"
-        }
-    }
-}
-
-struct FrankensteinQDisplayCell: Identifiable, Equatable {
-    let objectName: String
-    let value: Float
-    let id: String
-
-    /// True when this Q-value is in his field of vision and waiting to be
-    /// updated (shown with a red border).
-    var isDirty: Bool
-
-    init(objectName: String, value: Float, id: String? = nil, isDirty: Bool = false) {
-        self.objectName = objectName
-        self.value = value
-        self.id = id ?? "\(objectName)_\(value)"
-        self.isDirty = isDirty
-    }
-}
 struct FrankensteinCAPerception {
     var position: SIMD3<Float> = .zero
     var headingError: Float = 0
@@ -185,26 +257,6 @@ struct FrankensteinPredictedOutcome {
 struct FrankensteinQUpdateRecord {
     let action: FrankensteinAction
     let newValue: Float
-}
-struct FrankensteinObjectObservation: Hashable {
-    let name: String
-    let width: Float
-    let height: Float
-    let depth: Float
-    let distance: Float
-    let pickupable: Bool
-
-    var categoryIndex: Int {
-        let value = name.lowercased()
-        if value.contains("table") { return 1 }
-        if value.contains("door") { return 2 }
-        if value.contains("stair") || value.contains("step") { return 3 }
-        if value.contains("platform") { return 4 }
-        if value.contains("ceiling") { return 5 }
-        if value.contains("crate") || value.contains("box") { return 6 }
-        if value.contains("dog") { return 7 }
-        return 8 // Other measurable object
-    }
 }
 
 enum AlleyaRechargeGoal: String {
@@ -360,16 +412,6 @@ final class AlleyaFrankensteinPipeline {
 }
 
 
-enum FrankensteinPosture: Equatable {
-    case standing
-    case walking
-    case running
-    case jumping
-    case crouching
-    case crawling
-    case rolling
-}
-
 
 struct FrankensteinLocomotionOutput {
 
@@ -444,33 +486,6 @@ enum FrankensteinEpisodeEnd {
     case recharged
 }
 
-struct DetectedObjectInfo {
-    let name: String
-    let dimensions: SCNVector3
-    let distance: Float
-    let worldPosition: SCNVector3
-    let pickupable: Bool
-
-    /// World height of the top of the object.
-    var topY: Float = 0
-
-    /// Direction of the object relative to where the robot faces, in
-    /// radians. Positive is to the robot's right (the side .turnRight turns to).
-    var bearing: Float = 0
-
-    var dimensionsText: String {
-        String(
-            format: "%.2f × %.2f × %.2f",
-            Double(dimensions.x),
-            Double(dimensions.y),
-            Double(dimensions.z)
-        )
-    }
-
-    var distanceText: String {
-        String(format: "%.2f m", Double(distance))
-    }
-}
 
 
 enum FrankensteinFallReason: Equatable {
@@ -644,87 +659,8 @@ struct FrankensteinWorldPose {
     var grounded: Bool
 }
 
-enum FrankensteinTerrain: String, Codable, CaseIterable {
-    case flat
-    case hurdle
-    case gap
-    case lowCeiling
-    case raisedStep
-    case slope
-    case uneven
-    case unknown
 
-    var suggestedActions: [FrankensteinLearningAction] {
-        switch self {
-        case .flat:
-            return [.walk, .run, .explore]
 
-        case .hurdle:
-            return [.jump, .stepUp, .stop, .explore]
-
-        case .gap:
-            return [.stop, .jump, .explore]
-
-        case .lowCeiling:
-            return [.crawl, .roll, .stop, .explore]
-
-        case .raisedStep:
-            return [.stepUp, .jump, .explore]
-
-        case .slope:
-            return [.walk, .stop, .explore]
-
-        case .uneven:
-            return [.walk, .stop, .explore]
-
-        case .unknown:
-            return [.stop, .explore]
-        }
-    }
-}
-
-struct FrankensteinBodyState {
-    var speed: Float = 0
-    var tilt: Float = 0
-    var verticalVelocity: Float = 0
-    var height: Float = 1.8
-    var grounded = true
-    var fallen = false
-    var distanceTravelled: Float = 0
-    var isFallen = false
-
-    /// Heading relative to the finish direction.
-    /// `0` means facing the finish.
-    /// Positive means turned to his left.
-    var headingError: Float = 0
-}
-
-// MARK: - Posture and Actions
-
-/// How his body is held. Each posture has a physical height that is
-/// checked against real geometry overhead.
-
-enum FrankensteinAction: Int, CaseIterable {
-    case walk
-    case run
-    case turnLeft
-    case turnRight
-    case jump
-    case crouch
-    case stepUp
-    case stepDown
-    case roll
-    case crawl
-    case recover
-    case backward
-    case stepForward
-    case liftObject
-    case placeObject
-    case throwObject
-    /// Shove a movable block forward along the ground. Appended last so the
-    /// raw values already stored in learned Q-tables stay valid.
-    case pushObject
-}
 
 enum FrankensteinStage1Skill: String, Codable, CaseIterable {
     case walk

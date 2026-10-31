@@ -10,7 +10,6 @@ struct FrankensteinSceneObservation {
     let length: Float
     let terrain: FrankensteinTerrain
     let isSolid: Bool
-    let suggestedActions: [FrankensteinLearningAction]
 
     // MARK: - Observe a Ray Hit
 
@@ -53,8 +52,7 @@ struct FrankensteinSceneObservation {
             height: dimensions.height,
             length: dimensions.length,
             terrain: terrain,
-            isSolid: isSolid,
-            suggestedActions: terrain.suggestedActions
+            isSolid: isSolid
         )
     }
 

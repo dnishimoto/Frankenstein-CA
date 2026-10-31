@@ -40,13 +40,16 @@ struct FrankensteinSceneView: UIViewRepresentable {
         }
 
         coordinator.onDetectedObject = { object in
-            if let object {
+            if let object = object {
+                let dimensions = object.dimensions
+                let distance = object.distance
+
                 print(
                     """
                     [Detected Object]
                     Name: \(object.name)
-                    Dimensions: \(object.dimensionsText)
-                    Distance: \(object.distanceText)
+                    Dimensions: \(dimensions)
+                    Distance: \(distance)
                     Pickupable: \(object.pickupable)
                     """
                 )
