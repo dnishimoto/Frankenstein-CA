@@ -9,6 +9,29 @@ import Foundation
 import SwiftUI
 import SceneKit
 
+enum PlanStepStatus: String, Codable {
+    case completed = "Completed"
+    case current = "Current"
+    case planned = "Planned"
+    case failed = "Failed"
+    case replanning = "Replanning"
+}
+
+extension SCNVector3: Equatable {
+    public static func == (lhs: SCNVector3, rhs: SCNVector3) -> Bool {
+        return lhs.x == rhs.x && lhs.y == rhs.y && lhs.z == rhs.z
+    }
+}
+
+// 2. Your struct will now successfully conform to Equatable automatically
+struct PlanStepItem: Identifiable, Equatable {
+    let id = UUID()
+    var action: FrankensteinAction
+    var description: String
+    var status: PlanStepStatus = .planned
+    var targetLocation: SCNVector3?
+}
+
 enum FrankensteinGoal: Hashable {
     case reachPosition
     case reachObject(String)

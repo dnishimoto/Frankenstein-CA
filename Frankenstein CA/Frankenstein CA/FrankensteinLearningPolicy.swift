@@ -50,6 +50,10 @@ final class FrankensteinLearningPolicy {
     /// the Coordinator each frame from the CA's goal context.
     var currentGoalCategory = "recharge"
 
+    /// When false, learning is not written to UserDefaults after each update
+    /// (used by tests so they never overwrite the app's saved Q-table).
+    var autosaveLearning = true
+
     // State -> action ID -> Q-value
     private var values: [State: [Int: Float]] = [:]
 
@@ -718,7 +722,10 @@ final class FrankensteinLearningPolicy {
         print("[Q-Learning] Completed actions: \(completedActionCount)")
 
         clearPendingAction()
-        saveLearning()
+
+        if autosaveLearning {
+            saveLearning()
+        }
 
         print("[Q-Learning] Awaiting outcome: false")
 

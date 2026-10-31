@@ -25,7 +25,7 @@ final class FrankensteinCA: ObservableObject {
     var planBuffer = FrankensteinPlanBuffer()
 
     /// The overall goal and where he is within it. Survives replanning.
-    private(set) var goalContext = FrankensteinGoalContext()
+    @Published var goalContext = FrankensteinGoalContext()
 
     /// Set when the goal or sub-goal changed; the next decision drops the old
     /// plan and searches again for the new sub-goal.
@@ -177,25 +177,81 @@ final class FrankensteinCA: ObservableObject {
             liveCellCount = countLiveCells()
         }
 
-        /// Observes movement to track and penalize repetitive futile loops.
-        func observeMovementForFutility(
-            action: FrankensteinAction,
-            x: Float,
-            z: Float,
-            timestamp: TimeInterval
-        ) {
-            // Track action position/futility to discourage getting stuck in loops
-            let currentPenalty = futilityPenalties[action, default: 0]
-            if currentPenalty < maximumFutilityPenalty {
-                futilityPenalties[action] = currentPenalty + (futilityPenaltyIncrement * 0.1)
+    /// Observes movement to detect futile loops: he keeps returning to
+    /// (nearly) the same place for at least `loopMinimumAge` seconds. The
+    /// actions he used since are penalized.
+    func observeMovementForFutility(
+        action: FrankensteinAction,
+        x: Float,
+        z: Float,
+        timestamp: TimeInterval = Date.timeIntervalSinceReferenceDate
+    ) {
+        lastTimestamp = max(lastTimestamp, timestamp)
+        decayFutility(to: timestamp)
+
+        guard timestamp - lastPositionSampleTime >= positionSampleInterval else {
+            return
+        }
+
+        lastPositionSampleTime = timestamp
+
+        let current = PositionSample(x: x, z: z, time: timestamp, action: action)
+
+        var matchingSample: PositionSample?
+
+        if recentPositions.count >= 8 {
+            for old in recentPositions.dropLast(4) {
+                let dx = current.x - old.x
+                let dz = current.z - old.z
+                let distance = sqrt(dx * dx + dz * dz)
+                let age = timestamp - old.time
+
+                if distance < loopDistanceThreshold, age >= loopMinimumAge {
+                    matchingSample = old
+                    break
+                }
             }
         }
 
-        /// Forgives or reduces the futility penalty for an action when steady progress is made.
-        func forgiveFutility(for action: FrankensteinAction, amount: Float) {
-            let currentPenalty = futilityPenalties[action, default: 0]
-            futilityPenalties[action] = max(0, currentPenalty - amount)
+        recentPositions.append(current)
+
+        if recentPositions.count > maximumPositionSamples {
+            recentPositions.removeFirst(recentPositions.count - maximumPositionSamples)
         }
+
+        guard let match = matchingSample else { return }
+
+        guard timestamp - lastLoopPenaltyTime >= loopMinimumAge else { return }
+
+        lastLoopPenaltyTime = timestamp
+        futilityCount += 1
+
+        var actionsToPenalize: Set<FrankensteinAction> = [action]
+
+        for sample in recentPositions where sample.time >= match.time {
+            actionsToPenalize.insert(sample.action)
+        }
+
+        for failedAction in actionsToPenalize {
+            let oldPenalty = futilityPenalties[failedAction, default: 0]
+
+            futilityPenalties[failedAction] = min(
+                oldPenalty + futilityPenaltyIncrement,
+                maximumFutilityPenalty
+            )
+        }
+
+        futilityStatus = "Loop detected #\(futilityCount); reconsidering actions"
+    }
+
+    /// Reduces the futility penalty for an action when steady progress is made.
+    func forgiveFutility(for action: FrankensteinAction, amount: Float = 0.5) {
+        guard let penalty = futilityPenalties[action] else { return }
+
+        let reduced = penalty - amount
+        futilityPenalties[action] = reduced > 0.05 ? reduced : nil
+    }
+
     /// Evaluates whether a given cell or entity is currently active within the grid bounds.
         /// - Parameters:
         ///   - x: The x-coordinate index.
@@ -226,6 +282,12 @@ final class FrankensteinCA: ObservableObject {
             visitCounts.removeAll()
             effectModel.removeAll()
             futilityPenalties.removeAll()
+            recentPositions.removeAll()
+            lastPositionSampleTime = 0
+            lastLoopPenaltyTime = 0
+            lastFutilityDecayTime = 0
+            futilityCount = 0
+            futilityStatus = "No loop detected"
             
             // Reset network Q-grid and field-of-vision dirty flags
             networkQGrid = Array(repeating: Array(repeating: 0.0, count: size), count: size)
@@ -260,6 +322,17 @@ final class FrankensteinCA: ObservableObject {
                 }
             }
         }
+    }
+
+    func qValue(atX x: Int, y: Int) -> Float {
+        guard (0..<size).contains(x), (0..<size).contains(y) else { return 0 }
+        return networkQGrid[y][x]
+    }
+
+    /// The Q-value the CA currently holds for an action.
+    func qValue(for action: FrankensteinAction) -> Float {
+        guard let position = actionNeuronPosition(for: action) else { return 0 }
+        return networkQGrid[position.y][position.x]
     }
 
     func setQValues(_ qValues: [FrankensteinAction: Float]) {
@@ -553,6 +626,27 @@ final class FrankensteinCA: ObservableObject {
         return values
     }
 
+    @Published private(set) var futilityCount: Int = 0
+    @Published private(set) var futilityStatus = "No loop detected"
+
+    private struct PositionSample {
+        let x: Float
+        let z: Float
+        let time: TimeInterval
+        let action: FrankensteinAction
+    }
+
+    private var recentPositions: [PositionSample] = []
+    private var lastPositionSampleTime: TimeInterval = 0
+    private var lastLoopPenaltyTime: TimeInterval = 0
+    private var lastFutilityDecayTime: TimeInterval = 0
+
+    private let positionSampleInterval: TimeInterval = 0.25
+    private let loopMinimumAge: TimeInterval = 2.0
+    private let loopDistanceThreshold: Float = 0.45
+    private let maximumPositionSamples = 40
+    private let futilityHalfLife: TimeInterval = 15
+
     private var futilityPenalties: [FrankensteinAction: Float] = [:]
     private let maximumFutilityPenalty: Float = 8.0
     private let futilityPenaltyIncrement: Float = 1.5
@@ -830,9 +924,18 @@ final class FrankensteinCA: ObservableObject {
         }
 
         // 6. Exploration.
-        let epsilon: Float = exploration >= 1
-            ? 1
-            : max(0, min(0.25, max(exploration, randomExploration)))
+        // exploration >= 1: always explore. exploration <= 0: strictly greedy
+        // (the caller asked for no exploration). Otherwise the chance is the
+        // larger of the requested rate and the CA's own decaying baseline,
+        // capped at 25%.
+        let epsilon: Float
+        if exploration >= 1 {
+            epsilon = 1
+        } else if exploration <= 0 {
+            epsilon = 0
+        } else {
+            epsilon = min(0.25, max(exploration, randomExploration))
+        }
 
         var explored = false
 
@@ -918,5 +1021,21 @@ final class FrankensteinCA: ObservableObject {
         }
     }
     
-    private func decayFutility(to timestamp: TimeInterval) {}
+    private func decayFutility(to timestamp: TimeInterval) {
+        defer { lastFutilityDecayTime = timestamp }
+
+        guard lastFutilityDecayTime > 0,
+              timestamp > lastFutilityDecayTime,
+              !futilityPenalties.isEmpty else {
+            return
+        }
+
+        let elapsed = Float(timestamp - lastFutilityDecayTime)
+        let factor = powf(0.5, elapsed / Float(futilityHalfLife))
+
+        for (action, penalty) in futilityPenalties {
+            let decayed = penalty * factor
+            futilityPenalties[action] = decayed < 0.05 ? nil : decayed
+        }
+    }
 }

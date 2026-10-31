@@ -4,8 +4,11 @@ import Testing
 
 struct FrankensteinPolicyTests {
 
+    /// A fresh policy that neither loads nor overwrites the app's saved Q-table.
     private func makePolicy() -> FrankensteinLearningPolicy {
-        FrankensteinLearningPolicy()
+        let policy = FrankensteinLearningPolicy(loadSavedLearning: false)
+        policy.autosaveLearning = false
+        return policy
     }
 
     private func hurdle(

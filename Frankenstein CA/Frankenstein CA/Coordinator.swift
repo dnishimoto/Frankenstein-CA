@@ -121,6 +121,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     // MARK: - Pushing Movable Blocks
 
     private weak var pushTargetNode: SCNNode?
+    private let planSpline = FrankensteinPlanSpline()
     private var lastStuckSamplePosition: SCNVector3?
     private var stuckSeconds: Float = 0
     private let stuckThreshold: Float = 0.8
@@ -363,6 +364,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         )
 
         qFloorGrid.attach(to: scene)
+        planSpline.attach(to: scene)
 
         publishDebug("Coordinator attached to displayed scene.")
     }
@@ -1080,6 +1082,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             }
         }
 
+        updatePlanSpline(character: character, time: time)
+
         qFloorGrid.update(
             position: character.presentation.worldPosition,
             policy: locomotion.policy,
@@ -1649,6 +1653,44 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     // MARK: - Wide Field of View Scan
+
+    /// Draws the plan as a spline: Frankenstein -> the object the plan wants
+    /// to move -> where it wants it to go.
+    private func updatePlanSpline(character: SCNNode, time: TimeInterval) {
+        guard let station = rechargeStationNode else {
+            planSpline.update(
+                time: time,
+                character: character.presentation.worldPosition,
+                object: nil,
+                destination: nil
+            )
+            return
+        }
+
+        let queue = ca?.planBuffer.pendingActions ?? []
+        let planMovesObject = queue.contains(.pushObject) ||
+            queue.contains(.liftObject) ||
+            queue.contains(.placeObject)
+
+        var objectPosition: SCNVector3?
+
+        if let target = pushTargetNode, target.parent != nil {
+            objectPosition = target.presentation.worldPosition
+        } else if planMovesObject {
+            // The nearest movable object in view.
+            objectPosition = visibleObjects
+                .filter { isMovableName($0.name) }
+                .min(by: { $0.distance < $1.distance })?
+                .worldPosition
+        }
+
+        planSpline.update(
+            time: time,
+            character: character.presentation.worldPosition,
+            object: objectPosition,
+            destination: station.presentation.worldPosition
+        )
+    }
 
     /// The objects in the wide field of vision, as policy observations.
     private func visibleObservations() -> [FrankensteinObjectObservation] {
@@ -3257,6 +3299,10 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
                 locomotion.completeEpisode(.recharged)
                 executive.learner.clearTraces()
+
+                // Advance the CA's goal context to the next objective and regenerate plan
+                ca?.goalContext.advanceToNextGoal()
+                ca?.planBuffer.invalidate(reason: "Recharge complete; transitioning to new objective")
             }
         } else {
             rechargePlatformContactTime = 0

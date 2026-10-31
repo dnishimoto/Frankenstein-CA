@@ -1,5 +1,3 @@
-
-
 import Foundation
 import XCTest
 @testable import Frankenstein_CA
@@ -14,7 +12,8 @@ final class FrankensteinQIntegrationTests: XCTestCase {
     override func setUp() {
         super.setUp()
 
-        policy = FrankensteinLearningPolicy()
+        policy = FrankensteinLearningPolicy(loadSavedLearning: false)
+        policy.autosaveLearning = false
         ca = FrankensteinCA()
 
         terrain = FrankensteinTerrainSample()
@@ -208,11 +207,26 @@ final class FrankensteinQIntegrationTests: XCTestCase {
             """
         )
 
+        // The CA holds the supplied Q-values in its network grid.
+        XCTAssertEqual(
+            ca.qValue(for: .run),
+            10.0,
+            accuracy: 0.0001,
+            "THE CA DID NOT STORE THE SUPPLIED RUN Q-VALUE."
+        )
+
+        XCTAssertEqual(
+            ca.qValue(for: .walk),
+            0.0,
+            accuracy: 0.0001,
+            "THE CA DID NOT STORE THE SUPPLIED WALK Q-VALUE."
+        )
+
+        // The decision text names the action the CA chose.
         XCTAssertTrue(
-            ca.lastDecisionDescription.contains("Q=10.0"),
+            ca.lastDecisionDescription.contains("run"),
             """
-            CA DIAGNOSTIC DOES NOT SHOW THE EXPECTED Q-VALUE.
-            Expected Q=10.0
+            CA DIAGNOSTIC DOES NOT NAME THE SELECTED ACTION.
             Actual description: \(ca.lastDecisionDescription)
             """
         )
@@ -308,12 +322,24 @@ final class FrankensteinQIntegrationTests: XCTestCase {
         )
 
         if let selectedValue {
-            XCTAssertTrue(
-                description.contains("Q=\(selectedValue)"),
+            // The value the CA holds for the chosen action is the policy's.
+            XCTAssertEqual(
+                ca.qValue(for: selected),
+                selectedValue,
+                accuracy: 0.0001,
                 """
-                CA DIAGNOSTIC DOES NOT MATCH THE SELECTED ACTION'S Q-VALUE.
+                CA HOLDS A DIFFERENT Q-VALUE THAN THE POLICY SUPPLIED.
                 Selected action: \(selected)
-                Selected Q-value: \(selectedValue)
+                Policy Q-value: \(selectedValue)
+                CA description: \(description)
+                """
+            )
+
+            XCTAssertTrue(
+                description.contains(String(describing: selected)),
+                """
+                CA DIAGNOSTIC DOES NOT NAME THE SELECTED ACTION.
+                Selected action: \(selected)
                 CA description: \(description)
                 """
             )
