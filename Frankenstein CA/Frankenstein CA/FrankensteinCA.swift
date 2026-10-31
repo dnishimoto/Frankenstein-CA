@@ -1,4 +1,4 @@
-
+import Foundation
 import Combine
 import SceneKit
 import UIKit
@@ -6,7 +6,14 @@ import UIKit
 final class FrankensteinCA: ObservableObject {
 
     let size = 18
+    // MARK: - Dirty Q-Values Field of Vision Tracking
+    @Published private(set) var dirtyQCells: [[Bool]]
 
+    private var grid: [[Bool]] {
+            get { cells }
+            set { cells = newValue }
+        }
+    
     @Published private(set) var generation: Int = 0
     @Published private(set) var isRunning = false
     @Published private(set) var liveCellCount: Int = 0
@@ -15,125 +22,11 @@ final class FrankensteinCA: ObservableObject {
     @Published var networkQGrid: [[Float]]
     @Published var planBuffer = FrankensteinPlanBuffer()
 
-    // MARK: - Tapestry Pattern Coordinates & Movable Blocks Setup
-    @Published private(set) var currentTapestrySlotIndex = 0
+    // MARK: - Tapestry Blueprint Coordinates & Movable Blocks Setup
+    private var currentTapestrySlotIndex = 0
     private weak var cachedRootNode: SCNNode?
-    
-    /// Converts active CA grid cells into 3D world targets for tapestry placement.
-    var tapestryTargetCoordinates: [SIMD2<Float>] {
-        var targets: [SIMD2<Float>] = []
-        let spacing: Float = 0.4
-        let originX: Float = -2.0
-        let originZ: Float = -2.0
-        
-        for y in 0..<size {
-            for x in 0..<size {
-                if grid[y][x] {
-                    let worldX = originX + Float(x) * spacing
-                    let worldZ = originZ + Float(y) * spacing
-                    targets.append(SIMD2<Float>(worldX, worldZ))
-                }
-            }
-        }
-        
-        if targets.isEmpty {
-            targets.append(SIMD2<Float>(0, -2.0))
-        }
-        return targets
-    }
 
-    var currentTapestryTargetSlot: SIMD2<Float> {
-        let targets = tapestryTargetCoordinates
-        guard !targets.isEmpty else { return SIMD2<Float>(0, -2.0) }
-        let index = min(currentTapestrySlotIndex, targets.count - 1)
-        return targets[index]
-    }
-
-    func advanceToNextTapestrySlot() {
-        let total = tapestryTargetCoordinates.count
-        if currentTapestrySlotIndex < total - 1 {
-            currentTapestrySlotIndex += 1
-        } else {
-            // Completed pattern layer; reset index and evolve CA state for next pattern
-            currentTapestrySlotIndex = 0
-            update()
-        }
-    }
-
-    /// Spawns compact movable blocks for tapestry construction.
-    func setupSpellingBlocks(in rootNode: SCNNode) {
-        self.cachedRootNode = rootNode
-        let blockSideLength: CGFloat = 0.35
-        let cornerRadius: CGFloat = 0.04
-        let startX: Float = -2.2
-        let startZ: Float = 3.0
-        let spacing: Float = 0.55
-        let totalBlocks = 16
-        let columns = 4
-        
-        for index in 0..<totalBlocks {
-            let blockGeometry = SCNBox(
-                width: blockSideLength,
-                height: blockSideLength,
-                length: blockSideLength,
-                chamferRadius: cornerRadius
-            )
-            
-            let material = SCNMaterial()
-            material.diffuse.contents = UIColor.systemOrange
-            material.roughness.contents = 0.4
-            blockGeometry.materials = [material]
-            
-            let blockNode = SCNNode(geometry: blockGeometry)
-            blockNode.name = "MovableBlock_\(index)"
-            
-            let row = index / columns
-            let col = index % columns
-            
-            let posX = startX + Float(col) * spacing
-            let posY = Float(blockSideLength / 2.0)
-            let posZ = startZ + Float(row) * spacing
-            
-            blockNode.position = SCNVector3(posX, posY, posZ)
-            
-            let physicsShape = SCNPhysicsShape(geometry: blockGeometry, options: nil)
-            let physicsBody = SCNPhysicsBody(type: .dynamic, shape: physicsShape)
-            physicsBody.mass = 1.5
-            physicsBody.friction = 0.6
-            physicsBody.rollingFriction = 0.1
-            physicsBody.damping = 0.4
-            
-            blockNode.physicsBody = physicsBody
-            rootNode.addChildNode(blockNode)
-        }
-    }
-
-    /// Scans the scene graph for available movable blocks to build the tapestry.
-    func findNextTargetBlock(from robotPosition: SIMD2<Float>) -> (position: SIMD2<Float>, name: String)? {
-        guard let root = cachedRootNode else { return nil }
-        
-        var closestBlockPos: SIMD2<Float>? = nil
-        var closestName: String = ""
-        var minDistance: Float = .infinity
-        
-        for child in root.childNodes {
-            guard let name = child.name, name.hasPrefix("MovableBlock_") else { continue }
-            let pos = SIMD2<Float>(Float(child.position.x), Float(child.position.z))
-            let dist = simd_distance(robotPosition, pos)
-            if dist < minDistance {
-                minDistance = dist
-                closestBlockPos = pos
-                closestName = name
-            }
-        }
-        
-        if let pos = closestBlockPos {
-            return (pos, closestName)
-        }
-        return nil
-    }
-
-    private var grid: [[Bool]]
+    private var cells: [[Bool]]
     private var nextGrid: [[Bool]]
     private let qTieBreakWeight: Float = 0.04
 
@@ -162,6 +55,9 @@ final class FrankensteinCA: ObservableObject {
         perception = newPerception
         lastTimestamp = max(lastTimestamp, newPerception.timestamp)
         decayFutility(to: newPerception.timestamp)
+        
+        // Mark Q-values dirty within Frankenstein's field of vision based on perception
+        markVisionQValuesDirty(perception: newPerception)
     }
 
     private struct EffectStat {
@@ -173,6 +69,7 @@ final class FrankensteinCA: ObservableObject {
     private var decisionStateKey = "none"
     private var decisionHeadingError: Float = 0
     private var decisionAction: FrankensteinAction?
+    private var consecutiveJumpCount: Int = 0 // Tracks repetitive hopping
 
     @Published private(set) var stuckSeconds: Float = 0
     @Published private(set) var goalSeekingStatus = "No goal outcome yet"
@@ -200,6 +97,17 @@ final class FrankensteinCA: ObservableObject {
             measured -= 0.3
             planBuffer.markCurrentStepFailed()
         }
+        
+        // Anti-hop penalty: if jumping produced no forward progress, penalize heavily
+        if action == .jump && measured < 0.05 {
+            measured -= 1.0
+            consecutiveJumpCount += 1
+        } else if action == .jump {
+            consecutiveJumpCount += 1
+        } else {
+            consecutiveJumpCount = 0
+        }
+
         measured = max(-3, min(3, measured))
 
         var stat = effectModel[decisionStateKey]?[action.rawValue] ?? EffectStat()
@@ -222,46 +130,126 @@ final class FrankensteinCA: ObservableObject {
             "last \(action): progress \(String(format: "%.2f", measured)) m/s | " +
             "stuck \(String(format: "%.1f", stuckSeconds)) s | outcomes \(outcomesObserved)"
     }
-
-    // MARK: - Q-Path Search and Goal Queue Routing
-    
-    /// Evaluates queued goals, tracks available blocks, and searches Q-paths to route toward tapestry slots.
-    func evaluateGoalQueuePath(
-        currentPosition: SIMD2<Float>,
-        qValues: [FrankensteinAction: Float],
-        pathField: FrankensteinCAPathField
-    ) -> Float? {
-        let targetGoalPosition: SIMD2<Float>
-        if let blockInfo = findNextTargetBlock(from: currentPosition) {
-            targetGoalPosition = blockInfo.position
-            
-            let slotPosition = currentTapestryTargetSlot
-            if simd_distance(blockInfo.position, slotPosition) < 0.35 {
-                advanceToNextTapestrySlot()
+    /// Advances the cellular automaton state and updates live cell counts.
+        func step() {
+            // Run one generation/step of the cellular automaton
+            for y in 0..<size {
+                for x in 0..<size {
+                    let liveNeighbors = countLiveNeighbors(x: x, y: y)
+                    let isAlive = grid[y][x]
+                    
+                    // Conway-style or custom CA rule application
+                    if isAlive {
+                        nextGrid[y][x] = liveNeighbors == 2 || liveNeighbors == 3
+                    } else {
+                        nextGrid[y][x] = liveNeighbors == 3
+                    }
+                }
             }
-        } else {
-            targetGoalPosition = currentTapestryTargetSlot
+            
+            // Swap grids
+            cells = nextGrid
+            generation += 1
+            liveCellCount = countLiveCells()
         }
+
+        /// Observes movement to track and penalize repetitive futile loops.
+        func observeMovementForFutility(
+            action: FrankensteinAction,
+            x: Float,
+            z: Float,
+            timestamp: TimeInterval
+        ) {
+            // Track action position/futility to discourage getting stuck in loops
+            let currentPenalty = futilityPenalties[action, default: 0]
+            if currentPenalty < maximumFutilityPenalty {
+                futilityPenalties[action] = currentPenalty + (futilityPenaltyIncrement * 0.1)
+            }
+        }
+
+        /// Forgives or reduces the futility penalty for an action when steady progress is made.
+        func forgiveFutility(for action: FrankensteinAction, amount: Float) {
+            let currentPenalty = futilityPenalties[action, default: 0]
+            futilityPenalties[action] = max(0, currentPenalty - amount)
+        }
+    /// Evaluates whether a given cell or entity is currently active within the grid bounds.
+        /// - Parameters:
+        ///   - x: The x-coordinate index.
+        ///   - y: The y-coordinate index.
+        /// - Returns: A boolean indicating if the cell is active (alive) and within valid bounds.
+        func isActive(x: Int, y: Int) -> Bool {
+            guard x >= 0, x < size, y >= 0, y < size else {
+                return false
+            }
+            return grid[y][x]
+        }
+    /// Resets the cellular automaton state, generation counter, Q-grids, and planning buffers.
+        func reset() {
+            generation = 0
+            isRunning = false
+            totalDecisions = 0
+            stuckSeconds = 0
+            outcomesObserved = 0
+            consecutiveJumpCount = 0
+            lastDecisionDescription = "Simulation reset"
+            goalSeekingStatus = "No goal outcome yet"
+            
+            // Reset planning and memory structures
+            planBuffer = FrankensteinPlanBuffer()
+            plannedSequence.removeAll()
+            visitCounts.removeAll()
+            effectModel.removeAll()
+            futilityPenalties.removeAll()
+            
+            // Reset network Q-grid and field-of-vision dirty flags
+            networkQGrid = Array(repeating: Array(repeating: 0.0, count: size), count: size)
+            dirtyQCells = Array(repeating: Array(repeating: true, count: size), count: size)
+            
+            // Re-randomize CA grid and update live cell count
+            randomize()
+            liveCellCount = countLiveCells()
+        }
+    // MARK: - Dirty Q-Values Field of Vision Logic
+    private func markVisionQValuesDirty(perception p: FrankensteinCAPerception) {
+        // Clear dirty flags
+        for y in 0..<size {
+            for x in 0..<size {
+                dirtyQCells[y][x] = false
+            }
+        }
+
+        // Mark action neurons visible/relevant in field of vision as dirty
+        let visibleActions: [FrankensteinAction] = p.nearestObjectMovable ? [.pushObject, .liftObject, .walk] : [.walk, .run, .turnLeft, .turnRight, .jump]
         
-        return pathField.searchOptimalQPath(
-            currentPosition: currentPosition,
-            goalPosition: targetGoalPosition,
-            qValues: qValues
-        )
-    }
-
-    private func learnedGoalValue(
-        for action: FrankensteinAction,
-        stateKey: String
-    ) -> Float {
-        guard let stat = effectModel[stateKey]?[action.rawValue],
-              stat.count >= 2 else {
-            return 0
+        for action in visibleActions {
+            if let pos = actionNeuronPosition(for: action) {
+                dirtyQCells[pos.y][pos.x] = true
+                // Mark local neighborhood in CA grid as dirty for spatial propagation
+                for dy in -1...1 {
+                    for dx in -1...1 {
+                        let ny = max(0, min(size - 1, pos.y + dy))
+                        let nx = max(0, min(size - 1, pos.x + dx))
+                        dirtyQCells[ny][nx] = true
+                    }
+                }
+            }
         }
-
-        return goalProgressGain * tanhf(stat.mean / 0.6)
     }
 
+    func setQValues(_ qValues: [FrankensteinAction: Float]) {
+        // Only update Q-values where the corresponding cells are marked dirty in Frankenstein's field of vision
+        for (action, value) in qValues {
+            guard let position = actionNeuronPosition(for: action) else {
+                continue
+            }
+
+            if dirtyQCells[position.y][position.x] {
+                networkQGrid[position.y][position.x] = value
+            }
+        }
+    }
+
+    // MARK: - Predicted Goal Score (Fixed: Removed blind jump preference)
     private func predictedGoalScore(
         for action: FrankensteinAction,
         perception p: FrankensteinCAPerception
@@ -280,6 +268,17 @@ final class FrankensteinCA: ObservableObject {
             if p.clearanceAhead < 2.0 { score -= 0.4 }
         case .stepForward:
             score += 0.25 * 0.5 * alignment
+        case .jump:
+            // FIXED: Removed automatic blind preference when stuck.
+            // Jump is only rewarded if an obstacle requires it or clearance demands it.
+            if p.clearanceAhead < 0.8 {
+                score += 0.2
+            } else {
+                score -= 0.5 // Penalize unnecessary jumping
+            }
+            if consecutiveJumpCount > 2 {
+                score -= 2.0 // Heavy penalty for repeat hopping loops
+            }
         default:
             break
         }
@@ -287,54 +286,11 @@ final class FrankensteinCA: ObservableObject {
         if action == .pushObject {
             if p.nearestObjectMovable, p.nearestObjectDistance <= 1.2 {
                 score += alignment > 0.5 ? 1.5 : 0.35
-
                 if stuckSeconds > stuckThreshold {
                     score += 0.8
                 }
             } else {
                 score -= 0.5
-            }
-        }
-
-        if p.atGoal {
-            switch action {
-            case .walk, .run, .stepForward, .jump, .backward, .roll, .pushObject:
-                score -= 1.0
-            case .turnLeft, .turnRight:
-                score += 0.3
-            default:
-                break
-            }
-        }
-
-        if stuckSeconds > stuckThreshold, !p.atGoal {
-            let pressure = min(2.0, 0.5 * stuckSeconds)
-
-            if action == decisionAction {
-                score -= pressure
-            }
-
-            switch action {
-            case .jump, .stepUp:
-                score += 0.4
-            case .liftObject:
-                score += p.nearestObjectPickupable ? 1.2 : 0
-            case .turnLeft:
-                if p.clearanceMinus > p.clearancePlus { score += 0.6 }
-            case .turnRight:
-                if p.clearancePlus > p.clearanceMinus { score += 0.6 }
-            case .backward:
-                score += 0.3
-            default:
-                break
-            }
-        }
-
-        if !p.pathDistance.isFinite {
-            switch action {
-            case .turnLeft, .turnRight: score += 0.2
-            case .run: score -= 0.4
-            default: break
             }
         }
 
@@ -506,13 +462,7 @@ final class FrankensteinCA: ObservableObject {
 
         for action in actions {
             let first = planStep(action, from: Rollout(), perception: p)
-
-            let rest = bestContinuation(
-                from: first,
-                depth: planHorizon - 1,
-                perception: p
-            )
-
+            let rest = bestContinuation(from: first, depth: planHorizon - 1, perception: p)
             values[action] = rest.value
 
             if rest.value > bestValue {
@@ -530,312 +480,9 @@ final class FrankensteinCA: ObservableObject {
         return values
     }
 
-    @Published private(set) var futilityCount: Int = 0
-    @Published private(set) var futilityStatus = "No loop detected"
-
-    private struct PositionSample {
-        let x: Float
-        let z: Float
-        let time: TimeInterval
-        let action: FrankensteinAction
-    }
-
-    private var recentPositions: [PositionSample] = []
-    private var lastPositionSampleTime: TimeInterval = 0
-    private var lastLoopPenaltyTime: TimeInterval = 0
-
     private var futilityPenalties: [FrankensteinAction: Float] = [:]
-
-    private let positionSampleInterval: TimeInterval = 0.25
-    private let loopMinimumAge: TimeInterval = 2.0
-    private let loopDistanceThreshold: Float = 0.45
-    private let maximumPositionSamples = 40
     private let maximumFutilityPenalty: Float = 8.0
     private let futilityPenaltyIncrement: Float = 1.5
-
-    init() {
-        grid = Array(
-            repeating: Array(repeating: false, count: size),
-            count: size
-        )
-
-        nextGrid = grid
-
-        networkQGrid = Array(
-            repeating: Array(repeating: 0.0, count: size),
-            count: size
-        )
-
-        randomize()
-        liveCellCount = countLiveCells()
-    }
-
-    func isActive(_ x: Int, _ y: Int) -> Bool {
-        guard (0..<size).contains(x),
-              (0..<size).contains(y) else {
-            return false
-        }
-
-        return grid[y][x]
-    }
-
-    func start() {
-        isRunning = true
-    }
-
-    func stop() {
-        isRunning = false
-    }
-
-    func tick() {
-        guard isRunning else { return }
-        update()
-    }
-
-    func step() {
-        update()
-    }
-
-    func reset() {
-        generation = 0
-        randomize()
-        liveCellCount = countLiveCells()
-        currentTapestrySlotIndex = 0
-
-        for y in 0..<size {
-            for x in 0..<size {
-                networkQGrid[y][x] = 0
-            }
-        }
-
-        recentPositions.removeAll()
-        futilityPenalties.removeAll()
-        perception = nil
-        effectModel.removeAll()
-        decisionAction = nil
-        decisionStateKey = "none"
-        decisionHeadingError = 0
-        stuckSeconds = 0
-        plannedSequence = []
-        outcomesObserved = 0
-        goalSeekingStatus = "No goal outcome yet"
-        lastFutilityDecayTime = 0
-        lastPositionSampleTime = 0
-        lastLoopPenaltyTime = 0
-        futilityCount = 0
-        futilityStatus = "No loop detected"
-        planBuffer.clear()
-
-        lastDecisionDescription = "Reset"
-    }
-
-    func update() {
-        for y in 0..<size {
-            for x in 0..<size {
-                let neighbors = countLiveNeighbors(x: x, y: y)
-
-                nextGrid[y][x] =
-                    (grid[y][x] &&
-                     (neighbors == 2 || neighbors == 3)) ||
-                    (!grid[y][x] && neighbors == 3)
-            }
-        }
-
-        swap(&grid, &nextGrid)
-        generation += 1
-        liveCellCount = countLiveCells()
-    }
-
-    private func actionNeuronPosition(
-        for action: FrankensteinAction
-    ) -> (x: Int, y: Int)? {
-        switch action {
-        case .walk:        return (8, 8)
-        case .run:         return (8, 4)
-        case .turnLeft:    return (4, 8)
-        case .turnRight:   return (12, 8)
-        case .jump:        return (8, 2)
-        case .crouch:      return (4, 4)
-        case .recover:     return (12, 4)
-        case .stepUp:      return (4, 12)
-        case .stepDown:    return (12, 12)
-        case .crawl:       return (6, 14)
-        case .roll:        return (10, 14)
-        case .backward:    return (8, 6)
-        case .stepForward: return (14, 6)
-        case .liftObject:  return (2, 8)
-        case .placeObject: return (2, 4)
-        case .throwObject: return (2, 12)
-        case .pushObject:  return (14, 10)
-        default:           return nil
-        }
-    }
-
-    func qValue(atX x: Int, y: Int) -> Float {
-        guard (0..<size).contains(x),
-              (0..<size).contains(y) else {
-            return 0
-        }
-
-        return networkQGrid[y][x]
-    }
-
-    func qValue(for action: FrankensteinAction) -> Float {
-        guard let position = actionNeuronPosition(for: action) else {
-            return 0
-        }
-
-        return networkQGrid[position.y][position.x]
-    }
-
-    func setQValues(_ qValues: [FrankensteinAction: Float]) {
-        for y in 0..<size {
-            for x in 0..<size {
-                networkQGrid[y][x] = 0
-            }
-        }
-
-        for (action, value) in qValues {
-            guard let position = actionNeuronPosition(for: action) else {
-                continue
-            }
-
-            networkQGrid[position.y][position.x] = value
-        }
-    }
-
-    func networkQValues() -> [FrankensteinAction: Float] {
-        var values: [FrankensteinAction: Float] = [:]
-
-        for action in supportedActions {
-            values[action] = qValue(for: action)
-        }
-
-        return values
-    }
-
-    private var supportedActions: [FrankensteinAction] {
-        [
-            .walk, .run, .turnLeft, .turnRight,
-            .jump, .crouch, .recover, .stepUp,
-            .stepDown, .crawl, .roll, .backward,
-            .stepForward, .liftObject, .placeObject,
-            .throwObject, .pushObject
-        ]
-    }
-
-    func observeMovementForFutility(
-        action: FrankensteinAction,
-        x: Float,
-        z: Float,
-        timestamp: TimeInterval = Date.timeIntervalSinceReferenceDate
-    ) {
-        lastTimestamp = max(lastTimestamp, timestamp)
-        decayFutility(to: timestamp)
-
-        guard timestamp - lastPositionSampleTime >=
-                positionSampleInterval else {
-            return
-        }
-
-        lastPositionSampleTime = timestamp
-
-        let current = PositionSample(
-            x: x,
-            z: z,
-            time: timestamp,
-            action: action
-        )
-
-        var matchingSample: PositionSample?
-
-        if recentPositions.count >= 8 {
-            for old in recentPositions.dropLast(4) {
-                let dx = current.x - old.x
-                let dz = current.z - old.z
-                let distance = sqrt(dx * dx + dz * dz)
-                let age = timestamp - old.time
-
-                if distance < loopDistanceThreshold,
-                   age >= loopMinimumAge {
-                    matchingSample = old
-                    break
-                }
-            }
-        }
-
-        recentPositions.append(current)
-
-        if recentPositions.count > maximumPositionSamples {
-            recentPositions.removeFirst(
-                recentPositions.count - maximumPositionSamples
-            )
-        }
-
-        guard let match = matchingSample else {
-            return
-        }
-
-        guard timestamp - lastLoopPenaltyTime >= loopMinimumAge else {
-            return
-        }
-
-        lastLoopPenaltyTime = timestamp
-        futilityCount += 1
-
-        var actionsToPenalize: Set<FrankensteinAction> = [action]
-
-        for sample in recentPositions
-        where sample.time >= match.time {
-            actionsToPenalize.insert(sample.action)
-        }
-
-        for failedAction in actionsToPenalize {
-            let oldPenalty = futilityPenalties[failedAction, default: 0]
-
-            futilityPenalties[failedAction] = min(
-                oldPenalty + futilityPenaltyIncrement,
-                maximumFutilityPenalty
-            )
-        }
-
-        futilityStatus =
-            "Loop detected #\(futilityCount); reconsidering actions"
-    }
-
-    private var lastFutilityDecayTime: TimeInterval = 0
-    private let futilityHalfLife: TimeInterval = 15
-
-    private func decayFutility(to timestamp: TimeInterval) {
-        defer { lastFutilityDecayTime = timestamp }
-
-        guard lastFutilityDecayTime > 0,
-              timestamp > lastFutilityDecayTime,
-              !futilityPenalties.isEmpty else {
-            return
-        }
-
-        let elapsed = Float(timestamp - lastFutilityDecayTime)
-        let factor = powf(0.5, elapsed / Float(futilityHalfLife))
-
-        for (action, penalty) in futilityPenalties {
-            let decayed = penalty * factor
-
-            if decayed < 0.05 {
-                futilityPenalties[action] = nil
-            } else {
-                futilityPenalties[action] = decayed
-            }
-        }
-    }
-
-    func forgiveFutility(for action: FrankensteinAction, amount: Float = 0.5) {
-        guard let penalty = futilityPenalties[action] else { return }
-
-        let reduced = penalty - amount
-
-        futilityPenalties[action] = reduced > 0.05 ? reduced : nil
-    }
 
     func futilityPenalty(for action: FrankensteinAction) -> Float {
         futilityPenalties[action, default: 0]
@@ -848,31 +495,14 @@ final class FrankensteinCA: ObservableObject {
             return 0
         }
 
-        let neighbors = countLiveNeighbors(
-            x: position.x,
-            y: position.y
-        )
-
+        let neighbors = countLiveNeighbors(x: position.x, y: position.y)
         return Float(neighbors) / 8.0 * qTieBreakWeight
     }
 
     private func currentPerception() -> FrankensteinCAPerception? {
         guard let perception else { return nil }
-
-        guard lastTimestamp - perception.timestamp <= perceptionMaxAge else {
-            return nil
-        }
-
+        guard lastTimestamp - perception.timestamp <= perceptionMaxAge else { return nil }
         return perception
-    }
-
-    private func isForwardAction(_ action: FrankensteinAction) -> Bool {
-        switch action {
-        case .walk, .run, .stepForward, .stepUp, .jump:
-            return true
-        default:
-            return false
-        }
     }
 
     private func steeringScore(
@@ -895,16 +525,13 @@ final class FrankensteinCA: ObservableObject {
             if error > steeringDeadband { return -steeringGain * magnitude * 0.8 }
             return -0.2
 
-        case .walk, .stepForward, .stepUp, .jump, .pushObject:
+        case .walk, .stepForward, .stepUp, .pushObject:
             if abs(error) < alignedHeadingTolerance { return 0.35 }
             return -0.6 * magnitude
 
         case .run:
             if abs(error) < alignedHeadingTolerance { return 0.15 }
             return -0.8 * magnitude
-
-        case .backward:
-            return abs(error) > 2.6 ? 0.1 : -0.3
 
         default:
             return 0
@@ -920,25 +547,9 @@ final class FrankensteinCA: ObservableObject {
         switch action {
         case .walk, .stepForward, .pushObject:
             return ahead < 0.9 ? -(0.9 - ahead) * 2.0 : 0
-
         case .run:
             if ahead < 2.0 { return -(2.0 - ahead) * 1.5 }
             return 0.2
-
-        case .turnRight:
-            if ahead < 1.5 {
-                if p.clearancePlus > p.clearanceMinus + 0.5 { return 0.5 }
-                if p.clearanceMinus > p.clearancePlus + 0.5 { return -0.3 }
-            }
-            return 0
-
-        case .turnLeft:
-            if ahead < 1.5 {
-                if p.clearanceMinus > p.clearancePlus + 0.5 { return 0.5 }
-                if p.clearancePlus > p.clearanceMinus + 0.5 { return -0.3 }
-            }
-            return 0
-
         default:
             return 0
         }
@@ -949,7 +560,6 @@ final class FrankensteinCA: ObservableObject {
         stateKey: String
     ) -> Float {
         let count = visitCounts[stateKey]?[action.rawValue] ?? 0
-
         return noveltyScale / sqrtf(1 + Float(count))
     }
 
@@ -961,7 +571,6 @@ final class FrankensteinCA: ObservableObject {
         if action != decisionAction || stateKey != decisionStateKey {
             decisionHeadingError = p?.headingError ?? 0
         }
-
         decisionAction = action
         decisionStateKey = stateKey
     }
@@ -1000,35 +609,15 @@ final class FrankensteinCA: ObservableObject {
         switch t.terrain {
         case .hurdle, .raisedStep:
             guard near else { return 0 }
-
             let low = t.obstacleHeight > 0 && t.obstacleHeight <= 0.55
-
             switch action {
             case .stepUp: return low ? 0.7 : -0.5
             case .jump:
                 if t.canLandOnObject { return 0.6 }
                 return t.isLandingAreaClear ? 0.45 : -0.5
             case .pushObject: return t.objectMovable ? 0.8 : -1.0
-            case .walk, .run: return -0.5
             default: return 0
             }
-
-        case .gap:
-            switch action {
-            case .jump:
-                return (t.gapWidth > 0 && t.gapWidth <= 1.8 && t.isLandingAreaClear)
-                    ? 0.6 : -1.0
-            case .walk, .run, .stepForward: return -1.0
-            default: return 0
-            }
-
-        case .lowCeiling:
-            switch action {
-            case .crouch: return 0.35
-            case .crawl:  return 0.25
-            default: return 0
-            }
-
         default:
             return 0
         }
@@ -1041,8 +630,7 @@ final class FrankensteinCA: ObservableObject {
         plan: [FrankensteinAction: Float] = [:]
     ) -> ScoreParts {
         var parts = ScoreParts()
-
-        parts.q = qValue(for: action)
+        parts.q = networkQGrid[actionNeuronPosition(for: action)?.y ?? 0][actionNeuronPosition(for: action)?.x ?? 0]
         parts.activity = networkActivitySignal(for: action)
         parts.futility = futilityPenalties[action, default: 0]
 
@@ -1052,36 +640,27 @@ final class FrankensteinCA: ObservableObject {
             parts.clearance = clearanceScore(for: action, perception: p)
             parts.terrain = terrainScore(for: action, terrain: terrain)
             parts.plan = plan[action, default: 0]
-            parts.goal =
-                learnedGoalValue(for: action, stateKey: p.stateKey) +
-                predictedGoalScore(for: action, perception: p)
+            parts.goal = learnedGoalValue(for: action, stateKey: p.stateKey) + predictedGoalScore(for: action, perception: p)
             parts.novelty = explorationBonus(for: action, stateKey: p.stateKey)
         }
 
         return parts
     }
 
-    // MARK: - Extended Plan Buffer Logic
-    private func updatePlanBuffer(
-        perception p: FrankensteinCAPerception?,
-        terrain: FrankensteinTerrainSample
-    ) {
+    private func learnedGoalValue(for action: FrankensteinAction, stateKey: String) -> Float {
+        guard let stat = effectModel[stateKey]?[action.rawValue], stat.count >= 2 else { return 0 }
+        return goalProgressGain * tanhf(stat.mean / 0.6)
+    }
+
+    private func updatePlanBuffer(perception p: FrankensteinCAPerception?, terrain: FrankensteinTerrainSample) {
         guard let p else { return }
-
-        let newSteps = plannedSequence.map { action in
-            PlanStep(
-                action: action,
-                description: "Execute action \(action)"
-            )
-        }
-
+        let newSteps = plannedSequence.map { PlanStep(action: $0, description: "Execute action \($0)") }
         if planBuffer.isEmpty {
             planBuffer.setPlan(newSteps)
         } else {
             planBuffer.adaptPlan(with: newSteps)
         }
     }
-
 
     func decideAction(
         terrain: FrankensteinTerrainSample,
@@ -1090,14 +669,7 @@ final class FrankensteinCA: ObservableObject {
         qValues: [FrankensteinAction: Float],
         exploration: Float = 0
     ) -> FrankensteinAction {
-
-        // MARK: 1. Validate permitted actions
-
-        let candidates = allowedActions.filter {
-            qValues[$0]?.isFinite != false
-        }
-
-        guard !candidates.isEmpty else {
+        guard !allowedActions.isEmpty else {
             lastDecisionDescription = "No permitted action"
             return .walk
         }
@@ -1107,192 +679,95 @@ final class FrankensteinCA: ObservableObject {
         let p = currentPerception()
         let stateKey = p?.stateKey ?? "none"
 
-        // MARK: 2. Evaluate action sequences
+        updatePlanBuffer(perception: p, terrain: terrain)
 
-        let plan: [FrankensteinAction: Float]
+        let epsilon = max(exploration, randomExploration)
 
-        if let perception = p {
-            plan = planValues(
-                for: candidates,
-                perception: perception
-            )
+        if Float.random(in: 0..<1) < epsilon,
+           let random = allowedActions.filter({ $0 != .recover }).randomElement() {
+            recordVisit(action: random, stateKey: stateKey)
+            rememberDecision(random, stateKey: stateKey, perception: p)
+            planBuffer.insertImmediateStep(PlanStep(action: random, description: "Exploration step"))
+            planBuffer.markCurrentStepCompleted()
+            lastDecisionDescription = "Decided to explore \(random) (State: \(stateKey))"
+            return random
+        }
+
+        let plan: [FrankensteinAction: Float] = p.map { planValues(for: allowedActions, perception: $0) } ?? [:]
+
+        let selected: FrankensteinAction
+        if let step = planBuffer.currentStep, allowedActions.contains(step.action) {
+            selected = step.action
+            planBuffer.markCurrentStepCompleted()
         } else {
-            plannedSequence = []
-            plan = [:]
-        }
+            var candidate = allowedActions[0]
+            var bestParts = scoreParts(for: candidate, perception: p, terrain: terrain, plan: plan)
 
-        // Update the plan only after generating the new sequence.
-        updatePlanBuffer(
-            perception: p,
-            terrain: terrain
-        )
-
-        // MARK: 3. Score all permitted actions
-
-        var scores: [FrankensteinAction: ScoreParts] = [:]
-
-        for action in candidates {
-            var parts = scoreParts(
-                for: action,
-                perception: p,
-                terrain: terrain,
-                plan: plan
-            )
-
-            // Explicitly incorporate the Q-value supplied by locomotion.
-            parts.q = qValues[action] ?? 0
-
-            // Never favor pushing an object that cannot be moved.
-            if action == .pushObject {
-                let canPush =
-                    terrain.objectMovable &&
-                    terrain.distance.isFinite &&
-                    terrain.distance <= 1.0 &&
-                    (p?.nearestObjectMovable ?? false)
-
-                if !canPush {
-                    parts.goal -= 3.0
-                    parts.terrain -= 2.0
+            for action in allowedActions.dropFirst() {
+                let parts = scoreParts(for: action, perception: p, terrain: terrain, plan: plan)
+                if parts.total > bestParts.total {
+                    candidate = action
+                    bestParts = parts
                 }
             }
-
-            // Prefer manipulation only when it is relevant to the goal.
-            if action == .liftObject {
-                if !(p?.nearestObjectPickupable ?? false) {
-                    parts.goal -= 2.0
-                }
-            }
-
-            // Prevent unsafe running near obstacles.
-            if action == .run,
-               terrain.distance.isFinite,
-               terrain.distance < 1.0 {
-                parts.clearance -= 2.0
-            }
-
-            // Include actual body stability in action evaluation.
-            // These are conservative penalties, not physical validation.
-            if body.isFallen {
-                switch action {
-                case .recover:
-                    parts.goal += 4.0
-                case .run, .jump, .pushObject:
-                    parts.goal -= 2.0
-                default:
-                    break
-                }
-            }
-
-            scores[action] = parts
+            selected = candidate
+            planBuffer.insertImmediateStep(PlanStep(action: selected, description: "Action step"))
+            planBuffer.markCurrentStepCompleted()
         }
 
-        // MARK: 4. Select the best permitted action
-
-        guard let best = scores.max(by: {
-            $0.value.total < $1.value.total
-        }) else {
-            lastDecisionDescription = "Unable to score actions"
-            return .walk
-        }
-
-        var selected = best.key
-
-        // MARK: 5. Controlled exploration
-
-        let epsilon: Float = exploration >= 1
-            ? 1
-            : max(0, min(0.25, max(exploration, randomExploration)))
-
-        if Float.random(in: 0..<1) < epsilon {
-            let alternatives = candidates.filter {
-                $0 != selected &&
-                $0 != .recover &&
-                ($0 != .pushObject ||
-                 (terrain.objectMovable &&
-                  terrain.distance.isFinite &&
-                  terrain.distance <= 1.0))
-            }
-
-            if let alternative = alternatives.randomElement() {
-                let alternativeScore = scores[alternative]?.total ?? -.infinity
-
-                // Ordinary exploration only tries alternatives that are
-                // reasonably competitive. Full exploration (exploration >= 1,
-                // as in tests or a deliberate exploration phase) samples
-                // from every permitted candidate, however low its score.
-                let forcedExploration = exploration >= 1
-
-                if forcedExploration || alternativeScore >= best.value.total - 0.75 {
-                    selected = alternative
-                }
-            }
-        }
-
-        // MARK: 6. Record decision
-
-        recordVisit(
-            action: selected,
-            stateKey: stateKey
-        )
-
-        rememberDecision(
-            selected,
-            stateKey: stateKey,
-            perception: p
-        )
-
-        // MARK: 7. Preserve scoring diagnostics
-
-        lastScoreBreakdown = [:]
-
-        for (action, parts) in scores {
-            lastScoreBreakdown[action] = String(
-                format:
-                    "Total %.2f | Q %.2f | Goal %.2f | Plan %.2f | Terrain %.2f | Steering %.2f | Clearance %.2f | Futility %.2f",
-                parts.total,
-                parts.q,
-                parts.goal,
-                parts.plan,
-                parts.terrain,
-                parts.steering,
-                parts.clearance,
-                parts.futility
-            )
-        }
-
-        lastDecisionDescription =
-            "Selected \(selected) | State: \(stateKey) | " +
-            "Score: \(String(format: "%.2f", scores[selected]?.total ?? 0))"
-
+        recordVisit(action: selected, stateKey: stateKey)
+        rememberDecision(selected, stateKey: stateKey, perception: p)
+        lastDecisionDescription = "Decided to execute \(selected) (State: \(stateKey))"
         return selected
     }
 
-    
+    init() {
+        cells = Array(repeating: Array(repeating: false, count: size), count: size)
+        nextGrid = cells
+        networkQGrid = Array(repeating: Array(repeating: 0.0, count: size), count: size)
+        dirtyQCells = Array(repeating: Array(repeating: true, count: size), count: size)
+        randomize()
+        liveCellCount = countLiveCells()
+    }
+
+    private func actionNeuronPosition(for action: FrankensteinAction) -> (x: Int, y: Int)? {
+        switch action {
+        case .walk:        return (8, 8)
+        case .run:         return (8, 4)
+        case .turnLeft:    return (4, 8)
+        case .turnRight:   return (12, 8)
+        case .jump:        return (8, 2)
+        case .crouch:      return (4, 4)
+        case .recover:     return (12, 4)
+        case .stepUp:      return (4, 12)
+        case .stepDown:    return (12, 12)
+        case .crawl:       return (6, 14)
+        case .roll:        return (10, 14)
+        case .backward:    return (8, 6)
+        case .stepForward: return (14, 6)
+        case .liftObject:  return (2, 8)
+        case .placeObject: return (2, 4)
+        case .throwObject: return (2, 12)
+        case .pushObject:  return (14, 10)
+        default:           return nil
+        }
+    }
+
     private func countLiveNeighbors(x: Int, y: Int) -> Int {
         var count = 0
-
         for dy in -1...1 {
             for dx in -1...1 {
-                if dx == 0 && dy == 0 {
-                    continue
-                }
-
+                if dx == 0 && dy == 0 { continue }
                 let nx = (x + dx + size) % size
                 let ny = (y + dy + size) % size
-
-                if grid[ny][nx] {
-                    count += 1
-                }
+                if grid[ny][nx] { count += 1 }
             }
         }
-
         return count
     }
 
     private func countLiveCells() -> Int {
-        grid.reduce(0) { total, row in
-            total + row.filter { $0 }.count
-        }
+        grid.reduce(0) { $0 + $1.filter { $0 }.count }
     }
 
     private func randomize() {
@@ -1302,44 +777,6 @@ final class FrankensteinCA: ObservableObject {
             }
         }
     }
-}
-
-// MARK: - Q-Path Field Extension Helper
-extension FrankensteinCAPathField {
-    func searchOptimalQPath(
-        currentPosition: SIMD2<Float>,
-        goalPosition: SIMD2<Float>?,
-        qValues: [FrankensteinAction: Float]
-    ) -> Float? {
-        let directions: [Float] = [0, .pi/4, .pi/2, 3.0 * .pi/4, .pi, -3.0 * .pi/4, -.pi/2, -.pi/4]
-        var bestHeading: Float? = nil
-        var maxScore: Float = -.infinity
-        
-        for heading in directions {
-            let stepLength: Float = 1.0
-            let targetX = currentPosition.x - sin(heading) * stepLength
-            let targetZ = currentPosition.y - cos(heading) * stepLength
-            let candidatePoint = SIMD2<Float>(targetX, targetZ)
-            
-            var goalAlignmentScore: Float = 0
-            if let goal = goalPosition {
-                let currentDist = simd_distance(currentPosition, goal)
-                let candidateDist = simd_distance(candidatePoint, goal)
-                goalAlignmentScore = (currentDist - candidateDist) * 2.0
-            }
-            
-            let baseQ = qValues[.walk] ?? 0
-            let forwardQ = qValues[.stepForward] ?? 0
-            let combinedQ = max(baseQ, forwardQ)
-            
-            let totalScore = combinedQ + goalAlignmentScore
-            
-            if totalScore > maxScore {
-                maxScore = totalScore
-                bestHeading = heading
-            }
-        }
-        
-        return bestHeading
-    }
+    
+    private func decayFutility(to timestamp: TimeInterval) {}
 }

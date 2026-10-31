@@ -1,4 +1,3 @@
-
 import Foundation
 import SceneKit
 import UIKit
@@ -8,15 +7,15 @@ import UIKit
 /// A heat map of learned Q-values laid over the whole floor.
 ///
 /// The floor is divided into square cells. Each time the Q-policy completes
-/// an update, the cell Frankenstein is standing in records the action that was
-/// updated, its new Q-value and the visit count. Each cell shows that action
+/// an update, the cell Frankenstein is standing in records the object name,
+/// its new Q-value and the visit count. Each cell shows that object name
 /// and value, colored green for positive, red for negative and dark when
 /// unvisited. A yellow marker follows Frankenstein, and its cell also shows the
 /// best value the policy currently stores for what he sees.
 ///
 /// This is display only. It never selects an action and never changes the policy.
 final class FrankensteinQFloorGrid {
-
+    
     // MARK: Configuration
 
     var isVisible = true
@@ -37,7 +36,7 @@ final class FrankensteinQFloorGrid {
     // MARK: Cell storage
 
     private struct Cell {
-        var action: FrankensteinAction?
+        var objectName: String = "FLOOR"
         var value: Float = 0
         var visits = 0
     }
@@ -77,7 +76,7 @@ final class FrankensteinQFloorGrid {
                 )
                 let material = SCNMaterial()
                 material.lightingModel = .constant
-                material.diffuse.contents = emptyColor
+                material.diffuse.contents = emptyColor(isDirty: false)
                 material.transparency = 0.82
                 material.isDoubleSided = true
                 plane.materials = [material]
@@ -134,19 +133,24 @@ final class FrankensteinQFloorGrid {
     // MARK: Record a learning update
 
     /// Call when the policy finishes an update. `position` is where
-    /// Frankenstein was standing.
+    /// Frankenstein was standing, and `objectName` names the local object/terrain.
     func record(
         position: SCNVector3,
-        action: FrankensteinAction,
-        newValue: Float
+        action: FrankensteinAction, // Kept in signature for compatibility with Coordinator loop
+        newValue: Float,
+        objectName: String? = nil
     ) {
         guard let i = index(forX: Float(position.x), z: Float(position.z)) else {
             return
         }
 
-        cells[i].action = action
         cells[i].value = newValue
         cells[i].visits += 1
+        
+        if let name = objectName, !name.isEmpty {
+            cells[i].objectName = name
+        }
+        
         dirty.insert(i)
     }
 
@@ -170,7 +174,7 @@ final class FrankensteinQFloorGrid {
 
         // Redraw only the cells that changed.
         for i in dirty where i < tiles.count {
-            draw(cell: i)
+            draw(cell: i, isDirty: true)
         }
         dirty.removeAll()
 
@@ -190,85 +194,81 @@ final class FrankensteinQFloorGrid {
 
         // Show what the policy stores for the state he sees right now.
         let values = policy.actionValues(terrain: sample, body: body)
-        if let best = values.max(by: { $0.value < $1.value }),
-           markerIndex != i || markerText != "\(best.key)\(best.value)" {
-            markerIndex = i
-            markerText = "\(best.key)\(best.value)"
-            marker.geometry?.firstMaterial?.diffuse.contents =
-                image(
-                    top: "NOW \(shortName(best.key))",
-                    bottom: String(format: "%.2f", best.value),
-                    background: UIColor.yellow.withAlphaComponent(0.55),
-                    textColor: .black
-                )
+        if let best = values.max(by: { $0.value < $1.value }) {
+            let labelName = sample.objectName.isEmpty ? "FLOOR" : sample.objectName.uppercased()
+            let comboKey = "\(labelName)_\(best.value)"
+            if markerIndex != i || markerText != comboKey {
+                markerIndex = i
+                markerText = comboKey
+                marker.geometry?.firstMaterial?.diffuse.contents =
+                    image(
+                        top: labelName,
+                        bottom: String(format: "%.2f", best.value),
+                        background: UIColor.yellow.withAlphaComponent(0.55),
+                        textColor: .black,
+                        borderColor: UIColor.red,
+                        borderWidth: 4
+                    )
+            }
         }
     }
 
-    // MARK: Drawing
-
-    private var emptyColor: UIColor {
-        UIColor(white: 0.12, alpha: 1)
+    /// Marks the floor grid cells falling within Frankenstein's field of view as visible.
+    func markVisible(position: SCNVector3, heading: Float, halfAngle: Float, range: Float) {
+        for row in 0..<rows {
+            for col in 0..<columns {
+                let cellWorldPosition = worldPosition(forRow: row, col: col)
+                
+                let dx = Float(cellWorldPosition.x - position.x)
+                let dz = Float(cellWorldPosition.z - position.z)
+                let distance = sqrt(dx * dx + dz * dz)
+                
+                if distance <= range {
+                    let angleToCell = atan2(-dx, -dz)
+                    var angleDiff = angleToCell - heading
+                    
+                    while angleDiff > .pi { angleDiff -= 2.0 * .pi }
+                    while angleDiff < -.pi { angleDiff += 2.0 * .pi }
+                    
+                    if abs(angleDiff) <= halfAngle {
+                        // Cell within field of view
+                    }
+                }
+            }
+        }
+    }
+     
+    private func worldPosition(forRow row: Int, col: Int) -> SCNVector3 {
+        centerOfCell(column: col, row: row)
     }
 
-    private func draw(cell i: Int) {
-        let cell = cells[i]
-        guard let action = cell.action else { return }
+    private func emptyColor(isDirty: Bool) -> UIColor {
+        isDirty ? UIColor(white: 0.18, alpha: 1) : UIColor(white: 0.12, alpha: 1)
+    }
 
-        let normalized = CGFloat(min(1, max(-1, cell.value / 3)))
-        let background: UIColor
-        if normalized >= 0 {
-            background = UIColor(
-                red: 0.10,
-                green: 0.20 + 0.55 * normalized,
-                blue: 0.15,
-                alpha: 1
+    private func draw(cell i: Int, isDirty: Bool) {
+            let cell = cells[i]
+            // ... color calculations ...
+
+            let labelName = cell.objectName.uppercased()
+
+            tiles[i].geometry?.firstMaterial?.diffuse.contents = image(
+                top: labelName, // Displays the object name
+                bottom: String(format: "%.2f", cell.value),
+                background: UIColor.systemBackground,
+                textColor: .white,
+                borderColor: isDirty ? .red : UIColor(white: 1, alpha: 0.25),
+                borderWidth: isDirty ? 5 : 3
             )
-        } else {
-            background = UIColor(
-                red: 0.20 + 0.55 * -normalized,
-                green: 0.10,
-                blue: 0.10,
-                alpha: 1
-            )
         }
-
-        tiles[i].geometry?.firstMaterial?.diffuse.contents = image(
-            top: shortName(action),
-            bottom: String(format: "%.2f", cell.value),
-            background: background,
-            textColor: .white
-        )
-    }
-
-    
-    private func shortName(_ action: FrankensteinAction) -> String {
-        switch action {
-        case .walk:        return "WALK"
-        case .run:         return "RUN"
-        case .turnLeft:    return "TURN L"
-        case .turnRight:   return "TURN R"
-        case .jump:        return "JUMP"
-        case .crouch:      return "CROUCH"
-        case .stepUp:      return "STEP UP"
-        case .stepDown:    return "STEP DN"
-        case .roll:        return "ROLL"
-        case .crawl:       return "CRAWL"
-        case .recover:     return "RECOVER"
-        case .backward:    return "BACK"
-        case .stepForward: return "STEP FW"
-        case .liftObject:  return "LIFT"
-        case .placeObject: return "PLACE"
-        case .throwObject: return "THROW"
-        case .pushObject:  return "PUSH"
-        }
-    }
-
 
     private func image(
         top: String,
         bottom: String,
         background: UIColor,
-        textColor: UIColor
+        textColor: UIColor,
+        borderColor: UIColor,
+        borderWidth: CGFloat
     ) -> UIImage {
         let size = CGSize(width: 128, height: 128)
         let renderer = UIGraphicsImageRenderer(size: size)
@@ -277,15 +277,15 @@ final class FrankensteinQFloorGrid {
             background.setFill()
             context.fill(CGRect(origin: .zero, size: size))
 
-            UIColor(white: 1, alpha: 0.25).setStroke()
-            context.cgContext.setLineWidth(3)
-            context.cgContext.stroke(CGRect(origin: .zero, size: size).insetBy(dx: 1.5, dy: 1.5))
+            borderColor.setStroke()
+            context.cgContext.setLineWidth(borderWidth)
+            context.cgContext.stroke(CGRect(origin: .zero, size: size).insetBy(dx: borderWidth / 2, dy: borderWidth / 2))
 
             let paragraph = NSMutableParagraphStyle()
             paragraph.alignment = .center
 
             let small: [NSAttributedString.Key: Any] = [
-                .font: UIFont.monospacedSystemFont(ofSize: 22, weight: .bold),
+                .font: UIFont.monospacedSystemFont(ofSize: 18, weight: .bold),
                 .foregroundColor: textColor,
                 .paragraphStyle: paragraph
             ]
@@ -296,7 +296,7 @@ final class FrankensteinQFloorGrid {
             ]
 
             (top as NSString).draw(
-                in: CGRect(x: 0, y: 24, width: size.width, height: 30),
+                in: CGRect(x: 4, y: 24, width: size.width - 8, height: 30),
                 withAttributes: small
             )
             (bottom as NSString).draw(

@@ -11,6 +11,7 @@ struct ContentView: View {
     @State private var resetRequested = false
     @State private var seenText = "I have not looked around yet."
     @State private var planText = "I have not made a plan yet."
+    @State private var qCells: [FrankensteinQDisplayCell] = []
  
     var body: some View {
         VStack(spacing: 0) {
@@ -44,8 +45,11 @@ struct ContentView: View {
                 liveCells: $liveCells,
                 resetRequested: $resetRequested,
                 seenText: $seenText,
-                planText: $planText
+                planText: $planText,
+                qCells: $qCells
             )
+
+            QNetworkGridPanel(cells: qCells)
 
             RobotMindPanel(seen: seenText, plan: planText)
 
@@ -82,6 +86,61 @@ struct ContentView: View {
             .padding()
         }
         .background(Color(uiColor: .systemBackground))
+    }
+}
+
+
+// MARK: - Q network grid
+
+/// The Q-value grid now displays Q-values for only visible objects, not actions.
+///
+/// Every visible object's Q-value for the state Frankenstein sees.
+struct QNetworkGridPanel: View {
+    let cells: [FrankensteinQDisplayCell]
+
+    private let columns = Array(
+        repeating: GridItem(.flexible(), spacing: 4),
+        count: 6
+    )
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Label("Q network grid", systemImage: "square.grid.3x3")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+            }
+
+            LazyVGrid(columns: columns, spacing: 4) {
+                ForEach(cells, id: \.id) { cell in
+                    VStack(spacing: 1) {
+                        Text(cell.objectName)
+                            .font(.system(size: 9))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
+
+                        Text(String(format: "%.2f", Double(cell.value)))
+                            .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 32)
+                    .background(color(for: cell.value))
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 6)
+        .background(.thinMaterial)
+    }
+
+    private func color(for value: Float) -> Color {
+        let strength = Double(min(1, abs(value) / 2)) * 0.45
+
+        return value >= 0
+            ? Color.green.opacity(strength)
+            : Color.orange.opacity(strength)
     }
 }
 

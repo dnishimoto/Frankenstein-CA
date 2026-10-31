@@ -45,7 +45,7 @@ final class FrankensteinLocomotion {
 
         for y in 0..<ca.size {
             for x in 0..<ca.size {
-                guard ca.isActive(x, y) else { continue }
+                guard ca.isActive(x:x, y:y) else { continue }
 
                 if x < ca.size / 3 {
                     left += 1

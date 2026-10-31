@@ -1,5 +1,5 @@
-
 import Foundation
+
 
 
 
@@ -45,6 +45,111 @@ final class FrankensteinLearningPolicy {
     // State -> action ID -> Q-value
     private var values: [State: [Int: Float]] = [:]
 
+    // MARK: - Dirty Q-values (field of vision)
+    //
+    // Whatever Frankenstein can see in his field of vision (the terrain and
+    // object state ahead of him, and every object seen) has its Q-values
+    // marked dirty. A learning update may only change a dirty Q-value; the
+    // update for a Q-value that is not dirty is skipped, so the table the CA
+    // reads only changes where he has actually been looking. A mark expires
+    // after `dirtyLifetime` seconds if it is not seen again, and is cleared
+    // once its value has been updated.
+
+    private struct QKey: Hashable {
+        let state: State
+        let action: Int
+    }
+
+    private var dirtyKeys: [QKey: TimeInterval] = [:]
+
+    /// Simulation time, set by the Coordinator every frame.
+    var visionTime: TimeInterval = 0
+
+    /// How long a dirty mark survives without being seen again.
+    var dirtyLifetime: TimeInterval = 0.5
+
+    /// Learning updates skipped because their Q-value was not dirty.
+    private(set) var skippedCleanCount = 0
+
+    var dirtyCount: Int { dirtyKeys.count }
+
+
+    /// Marks the Q-values for every object in his field of vision as dirty
+    /// (the terrain ahead is shared; each object gives its own state).
+    func markVisibleDirty(
+        objects: [FrankensteinObjectObservation],
+        terrain: FrankensteinTerrainSample,
+        body: FrankensteinBodyState
+    ) {
+        for object in objects {
+            markVisibleDirty(
+                terrain: terrain,
+                body: body,
+                objectObservation: object
+            )
+        }
+    }
+
+    /// Updated to produce a FrankensteinQDisplayCell per visible object,
+    /// reporting the object's name and the highest learned Q-value over all actions for its state.
+    /// Reading this does not mark anything dirty.
+    func qDisplaySnapshot(
+        objectsInView: [FrankensteinObjectObservation],
+        terrain: FrankensteinTerrainSample,
+        body: FrankensteinBodyState
+    ) -> [FrankensteinQDisplayCell] {
+
+        // Dictionary to track highest Q-value per unique object name with unique ID
+        // (assuming object name and unique id concatenated forms unique id)
+        var bestQValuesByObjectID: [String: (name: String, value: Float)] = [:]
+
+        for object in objectsInView {
+            let state = makeState(
+                terrain: terrain,
+                body: body,
+                objectObservation: object
+            )
+            // Find highest Q-value over all actions in that state
+            let qVals = values[state]?.values ?? []
+            let bestValue = qVals.max() ?? 0
+
+            // Use object's unique identifier as id; if none available use name
+            // Since FrankensteinObjectObservation has name, but no explicit id,
+            // we use name plus distance plus height plus depth as compound id to distinguish objects
+
+            // Compose a unique id string for object
+            let objectID = "\(object.name)-d\(object.distance)-h\(object.height)-dep\(object.depth)"
+
+            if let currentBest = bestQValuesByObjectID[objectID] {
+                if bestValue > currentBest.value {
+                    bestQValuesByObjectID[objectID] = (object.name, bestValue)
+                }
+            } else {
+                bestQValuesByObjectID[objectID] = (object.name, bestValue)
+            }
+        }
+
+        // Map best Q-values to FrankensteinQDisplayCell array
+        return bestQValuesByObjectID.map { id, info in
+            FrankensteinQDisplayCell(
+                objectName: info.name,
+                value: info.value,
+                id: id
+            )
+        }
+    }
+
+    private func expireDirtyKeys() {
+        let cutoff = visionTime - dirtyLifetime
+        let pending: QKey? = actionPendingLearning
+            ? lastState.flatMap { state in
+                lastAction.map { QKey(state: state, action: $0.rawValue) }
+            }
+            : nil
+
+        dirtyKeys = dirtyKeys.filter { $0.value >= cutoff || $0.key == pending }
+    }
+
     // Pending decision; at most one action may await an outcome.
     private var lastState: State?
     private var lastAction: FrankensteinAction?
@@ -86,7 +191,7 @@ final class FrankensteinLearningPolicy {
 
     /// A compact status string for the Coordinator UI/debug panel.
     var updateLog: String {
-        "Q updates: \(updateCount) | states: \(learnedStateCount) | completed: \(completedActionCount) | ε: \(String(format: "%.3f", exploration)) | pending: \(pendingAction.map(String.init(describing:)) ?? "none")"
+        "Q updates: \(updateCount) | dirty: \(dirtyCount) | skipped clean: \(skippedCleanCount) | states: \(learnedStateCount) | completed: \(completedActionCount) | ε: \(String(format: "%.3f", exploration)) | pending: \(pendingAction.map(String.init(describing:)) ?? "none")"
     }
 
     // MARK: - State encoding
@@ -191,8 +296,26 @@ final class FrankensteinLearningPolicy {
         }
     }
 
-    // MARK: - Q-table access
+    /// Marks the Q-values of the state he sees right now as dirty.
+    func markVisibleDirty(
+        terrain: FrankensteinTerrainSample,
+        body: FrankensteinBodyState,
+        objectObservation: FrankensteinObjectObservation? = nil
+    ) {
+        let state = makeState(
+            terrain: terrain,
+            body: body,
+            objectObservation: objectObservation
+        )
 
+        // Every action's Q-value for a state he sees is marked dirty, not
+        // only the permitted ones, so the grid shows exactly what is in view.
+        for action in FrankensteinAction.allCases {
+            dirtyKeys[QKey(state: state, action: action.rawValue)] = visionTime
+        }
+
+        expireDirtyKeys()
+    }
     private func qValue(
         for action: FrankensteinAction,
         in state: State
@@ -216,7 +339,14 @@ final class FrankensteinLearningPolicy {
         body: FrankensteinBodyState,
         objectObservation: FrankensteinObjectObservation? = nil
     ) -> [FrankensteinAction: Float] {
-        actionValues(
+        // Reading the values for what he sees marks them dirty.
+        markVisibleDirty(
+            terrain: terrain,
+            body: body,
+            objectObservation: objectObservation
+        )
+
+        return actionValues(
             terrain: terrain,
             body: body,
             objectObservation: objectObservation
@@ -249,6 +379,7 @@ final class FrankensteinLearningPolicy {
             return false
         }
         _ = values[state, default: [:]]
+        dirtyKeys[QKey(state: state, action: action.rawValue)] = visionTime
         lastState = state
         lastAction = action
         pendingAllowedActions = Set(allowed)
@@ -533,6 +664,18 @@ final class FrankensteinLearningPolicy {
 
         let updatedValue =
             oldValue + learningRate * (target - oldValue)
+
+        // Only a dirty Q-value (seen in his field of vision) may change.
+        let key = QKey(state: state, action: action.rawValue)
+
+        guard dirtyKeys[key] != nil else {
+            skippedCleanCount += 1
+            print("[Q-Learning] Skipped update: Q-value for \(action) is not dirty (not in view).")
+            clearPendingAction()
+            return true
+        }
+
+        dirtyKeys[key] = nil
 
         setQValue(
             updatedValue,
@@ -876,4 +1019,15 @@ extension FrankensteinLearningPolicy: FrankensteinStage1PolicyAdapter {
             terminal: terminal
         )
     }
+}
+
+
+// MARK: - FrankensteinQDisplayCell
+
+/// Updated cell struct to represent object-based Q-value display.
+/// Reports object name, learned Q-value, and a unique id.
+struct FrankensteinQDisplayCell {
+    let objectName: String
+    let value: Float
+    let id: String
 }

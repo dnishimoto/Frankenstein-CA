@@ -12,6 +12,7 @@ struct FrankensteinSceneView: UIViewRepresentable {
     @Binding var resetRequested: Bool
     @Binding var seenText: String
     @Binding var planText: String
+    @Binding var qCells: [FrankensteinQDisplayCell]
 
     // Keep one CA instance for the lifetime of this view value.
     // The coordinator and UI statistics must refer to this same instance.
@@ -137,6 +138,13 @@ struct FrankensteinSceneView: UIViewRepresentable {
         context.coordinator.onPlanText = { text in
             if self.planText != text {
                 self.planText = text
+            }
+        }
+
+        // Publish the Q network grid with its dirty flags.
+        context.coordinator.onQGrid = { cells in
+            if self.qCells != cells {
+                self.qCells = cells
             }
         }
 

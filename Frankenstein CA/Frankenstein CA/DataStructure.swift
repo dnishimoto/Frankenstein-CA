@@ -9,6 +9,11 @@ import Foundation
 import SwiftUI
 import SceneKit
 
+struct FrankensteinQDisplayCell: Identifiable, Equatable {
+    let objectName: String
+    let value: Float
+    var id: String { "\(objectName)_\(value)" }
+}
 struct FrankensteinCAPerception {
     var position: SIMD3<Float> = .zero
     var headingError: Float = 0
@@ -890,3 +895,4 @@ extension DetectedObjectInfo {
         return "I see " + text + "."
     }
 }
+

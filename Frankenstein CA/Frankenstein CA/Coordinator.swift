@@ -131,6 +131,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private let pushBlockSpeed: Float = 0.6
 
     var onPlanText: ((String) -> Void)?
+    var onQGrid: (([FrankensteinQDisplayCell]) -> Void)?
+    private var lastQGridPublishTime: TimeInterval = 0
 
     // MARK: - Ground Verification
 
@@ -904,7 +906,13 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             pendingPrediction = nil
         }
 
-        // MARK: 3. CA advisory values (learned object + goal Q-values)
+        // MARK: 3. Dirty Q-values in the field of vision
+        //
+        // Everything he can see has its Q-values marked dirty. The policy and
+        // the floor grid then change only those values when they update.
+        markFieldOfViewDirty(character: character, time: time)
+
+        // MARK: 3b. CA advisory values (learned object + goal Q-values)
 
         let perceivedValues = locomotion.policy.learnedActionValues(
             terrain: latestTerrainSample,
@@ -1055,6 +1063,20 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             }
 
             lastRecordedQUpdate = policyUpdates
+        }
+
+        // Publish the Q network grid (all Q-values, dirty ones flagged).
+        if time - lastQGridPublishTime >= 0.2 {
+            lastQGridPublishTime = time
+
+            let cells = locomotion.policy.qDisplaySnapshot(
+                terrain: latestTerrainSample,
+                body: locomotion.body
+            )
+
+            DispatchQueue.main.async { [weak self] in
+                self?.onQGrid?(cells)
+            }
         }
 
         qFloorGrid.update(
@@ -1621,6 +1643,44 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     // MARK: - Wide Field of View Scan
+
+    /// Marks the Q-values in Frankenstein's field of vision as dirty.
+    private func markFieldOfViewDirty(character: SCNNode, time: TimeInterval) {
+        let policy = locomotion.policy
+        policy.visionTime = time
+
+        // The state straight ahead (terrain + nearest object).
+        policy.markVisibleDirty(
+            terrain: latestTerrainSample,
+            body: locomotion.body
+        )
+
+        // Every object seen in the wide field of vision.
+        let seen = visibleObjects.prefix(12).map { item in
+            FrankensteinObjectObservation(
+                name: item.name,
+                width: item.dimensions.x,
+                height: item.dimensions.y,
+                depth: item.dimensions.z,
+                distance: item.distance,
+                pickupable: item.pickupable
+            )
+        }
+
+        policy.markVisibleDirty(
+            objects: Array(seen),
+            terrain: latestTerrainSample,
+            body: locomotion.body
+        )
+
+        // The floor cells in view.
+        qFloorGrid.markVisible(
+            position: character.presentation.worldPosition,
+            heading: Float(character.presentation.eulerAngles.y),
+            halfAngle: wideScanHalfAngleDegrees * .pi / 180,
+            range: 6
+        )
+    }
 
     private func isMovableName(_ name: String) -> Bool {
         let value = name.lowercased()
@@ -3909,3 +3969,4 @@ extension Coordinator {
         print("[Coordinator] CA path field generation=\(executive.field.generation), path distance=\(pathGoalDistance)")
     }
 }
+
