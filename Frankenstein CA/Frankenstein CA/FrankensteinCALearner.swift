@@ -1,18 +1,16 @@
-
 import Foundation
 import simd
-
 
 // MARK: - Learner (object / goal Q-values owned by the CA layer)
 
 /// Q-value store keyed by a CA-perceived state string.
 ///
 /// Improvements over a plain one-step table:
-///  - per-(state, action) visit counts give a decaying learning rate, so
-///    early experience moves values quickly and later experience refines them;
-///  - an eligibility trace (Q(lambda)-style) spreads each reward back over
-///    the last few state/action pairs, so "turned toward the route" gets
-///    credit when the later "walked and got closer" pays off.
+/// - per-(state, action) visit counts give a decaying learning rate, so
+///   early experience moves values quickly and later experience refines them;
+/// - an eligibility trace (Q(lambda)-style) spreads each reward back over
+///   the last few state/action pairs, so "turned toward the route" gets
+///   credit when the later "walked and got closer" pays off.
 final class FrankensteinCALearner {
     private var table: [String: [String: Float]] = [:]
     private var visits: [String: [String: Int]] = [:]
@@ -32,34 +30,34 @@ final class FrankensteinCALearner {
     let maximumTraces = 6
 
     var stateCount: Int { table.count }
+    
+    // Exploration parameters
+    var explorationRate: Float = 0.25 // Epsilon or temperature factor for alternative path exploration
+    var noveltyBonusScale: Float = 0.5
 
-    func reset() {
-        table.removeAll()
-        visits.removeAll()
-        traces.removeAll()
-    }
-
-    /// Forget credit-assignment history (call at episode boundaries).
-    func clearTraces() {
-        traces.removeAll()
+    func values(for key: String) -> [String: Float] {
+        return table[key] ?? [:]
     }
 
     func visitCount(key: String, action: String) -> Int {
         visits[key]?[action] ?? 0
     }
 
-    func values(for key: String) -> [String: Float] {
-        table[key] ?? [:]
-    }
-
     func ensure(key: String, actions: [String]) {
-        for action in actions where table[key]?[action] == nil {
-            table[key, default: [:]][action] = 0
+        if table[key] == nil {
+            table[key] = [:]
+            visits[key] = [:]
+        }
+        for action in actions {
+            if table[key]?[action] == nil {
+                table[key]?[action] = 0.0
+                visits[key]?[action] = 0
+            }
         }
     }
 
     private func learningRate(forVisits count: Int) -> Float {
-        max(minimumLearningRate, baseLearningRate / (1 + 0.15 * Float(count)))
+        return max(minimumLearningRate, baseLearningRate / (1 + 0.15 * Float(count)))
     }
 
     func reinforce(
@@ -69,15 +67,23 @@ final class FrankensteinCALearner {
         nextKey: String? = nil
     ) {
         guard reward.isFinite else { return }
+        ensure(key: key, actions: [action])
 
         let current = table[key]?[action] ?? 0
 
         var maxNext: Float = 0
-        if let nextKey {
-            maxNext = table[nextKey]?.values.max() ?? 0
+        if let nextKey, let nextActions = table[nextKey], !nextActions.isEmpty {
+            maxNext = nextActions.values.max() ?? 0
         }
 
-        let delta = reward + discountFactor * maxNext - current
+        // Track visit counts for novelty/exploration bonus
+        let currentVisits = visits[key]?[action] ?? 0
+        visits[key]?[action] = currentVisits + 1
+
+        let noveltyBonus = noveltyBonusScale / sqrt(Float(currentVisits + 1))
+        let totalReward = reward + noveltyBonus
+
+        let delta = totalReward + discountFactor * maxNext - current
 
         // The newest pair always receives full credit.
         traces.removeAll { $0.key == key && $0.action == action }
@@ -93,15 +99,22 @@ final class FrankensteinCALearner {
             let alpha = learningRate(forVisits: count)
             let old = table[trace.key]?[trace.action] ?? 0
 
-            table[trace.key, default: [:]][trace.action] =
-                old + alpha * trace.weight * delta
+            table[trace.key, default: [:]][trace.action] = old + alpha * trace.weight * delta
 
             traces[index].weight *= discountFactor * traceDecay
         }
 
-        visits[key, default: [:]][action, default: 0] += 1
-
         traces.removeAll { $0.weight < 0.02 }
+    }
+
+    func clearTraces() {
+        traces.removeAll()
+    }
+
+    func reset() {
+        table.removeAll()
+        visits.removeAll()
+        traces.removeAll()
     }
 }
 
@@ -150,6 +163,13 @@ final class FrankensteinCAPathField {
     private let memoryDuration: TimeInterval = 10
 
     private var remembered: [String: RememberedObstacle] = [:]
+
+    /// Extra traversal cost for a world position (x, z), from the Q floor
+    /// grid. The route bends away from cells where his actions went badly
+    /// (stuck, blocked, fell), so he moves toward objects over the ground
+    /// that has worked. Must return zero or more, so the field is still
+    /// measured in metres.
+    var learnedPenalty: ((SIMD2<Float>) -> Float)?
 
     /// Traversal cost per identified object class. Adapted by outcomes.
     private(set) var classCost: [String: Float] = [
@@ -266,7 +286,6 @@ final class FrankensteinCAPathField {
             let upper = cellCoordinates(for: maxWorld)
 
             // Objects seen far outside the local grid are not rasterized
-            // (and an empty range would be an invalid Swift range).
             guard upper.col >= 0, lower.col <= dimension - 1,
                   upper.row >= 0, lower.row <= dimension - 1 else {
                 continue
@@ -280,6 +299,28 @@ final class FrankensteinCAPathField {
 
                     kinds[i] = .obstacle
                     costs[i] = max(costs[i], cost)
+                }
+            }
+        }
+
+        // Learned ground quality
+        if let learnedPenalty = learnedPenalty {
+            for row in 0..<dimension {
+                for col in 0..<dimension {
+                    let world = SIMD2<Float>(
+                        origin.x + Float(col - half) * cellSize,
+                        origin.y + Float(row - half) * cellSize
+                    )
+
+                    let extra = learnedPenalty(world)
+
+                    if extra.isFinite, extra > 0 {
+                        let i = index(col: col, row: row)
+
+                        if kinds[i] != .obstacle {
+                            costs[i] += min(extra, 3)
+                        }
+                    }
                 }
             }
         }
@@ -378,11 +419,8 @@ final class FrankensteinCAPathField {
         }
     }
 
-    // MARK: Route preview (the sequence of headings along the routed path)
+    // MARK: Route preview
 
-    /// Follows the distance field downhill from the character and returns the
-    /// absolute heading of each successive cell step (0.5 m per entry), so the
-    /// CA can plan several actions ahead instead of reacting to one cell.
     func routePreview(maxCells: Int) -> [Float] {
         var headings: [Float] = []
 
@@ -417,7 +455,6 @@ final class FrankensteinCAPathField {
 
             guard let chosen = step else { break }
 
-            // Same convention as steering(): column is world x, row is world z.
             headings.append(atan2(-Float(chosen.dc), -Float(chosen.dr)))
 
             col += chosen.dc
@@ -462,7 +499,6 @@ final class FrankensteinCAPathField {
             return nil
         }
 
-        // Column maps to world x, row maps to world z.
         let dx = Float(step.dc)
         let dz = Float(step.dr)
 
@@ -497,4 +533,3 @@ final class FrankensteinCAExecutive {
         field.reset()
     }
 }
-

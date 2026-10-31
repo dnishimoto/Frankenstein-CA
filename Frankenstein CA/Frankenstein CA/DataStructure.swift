@@ -9,6 +9,16 @@ import Foundation
 import SwiftUI
 import SceneKit
 
+struct RememberedObject {
+    let name: String
+    var position: SIMD3<Float>
+    var dimensions: SIMD3<Float>
+    var pickupable: Bool
+    var movable: Bool
+    var lastSeen: TimeInterval
+    var timesSeen: Int
+}
+
 enum FrankensteinAction: Int, CaseIterable {
     case walk
     case run

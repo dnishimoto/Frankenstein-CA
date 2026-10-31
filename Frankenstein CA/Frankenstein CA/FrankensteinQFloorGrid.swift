@@ -130,6 +130,31 @@ final class FrankensteinQFloorGrid {
         )
     }
 
+    // MARK: Reading the grid (the CA's route uses these values)
+
+    /// What was learned in the cell under (x, z). Nil for an unvisited cell.
+    func reading(atX x: Float, z: Float) -> (value: Float, visits: Int)? {
+        guard let i = index(forX: x, z: z), cells[i].visits > 0 else {
+            return nil
+        }
+
+        return (cells[i].value, cells[i].visits)
+    }
+
+    /// Extra route cost (metres) for crossing a cell where his actions went
+    /// badly. Only poorly valued cells cost extra, scaled by how often the
+    /// cell has been learned, so one bad sample does not wall off the floor.
+    func pathFieldPenalty(atX x: Float, z: Float) -> Float {
+        guard let r = reading(atX: x, z: z),
+              r.visits >= 2,
+              r.value < 0 else {
+            return 0
+        }
+
+        let confidence = min(1, Float(r.visits) / 6)
+        return min(1.2, confidence * min(1.2, -r.value * 0.6))
+    }
+
     // MARK: Record a learning update
 
     /// Call when the policy finishes an update. `position` is where
