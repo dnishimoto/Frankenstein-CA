@@ -22,6 +22,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private let clearanceRange: Float = 3.0
 
     private var lastGoalDistance: Float = .infinity
+    private var lastGoalNodeID: ObjectIdentifier?
 
     var onCAStats: ((Int, Int) -> Void)?
 
@@ -52,8 +53,63 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private weak var handNode: SCNNode?
     private weak var rechargeStationNode: SCNNode?
     
+    /// Power below which the recharge station becomes the goal.
+    private let rechargeThreshold: Float = 30.0
+
+    /// The recharge station is the goal only when power is below the
+    /// threshold. A recharge already under way (he is on the station and
+    /// charging) continues until the battery is full, so it is not cut off
+    /// when the power rises past the threshold.
+    private var needsRecharge: Bool {
+        energyManager.powerLevel < rechargeThreshold || hasReportedRecharge
+    }
+
     private var effectiveRechargeStationNode: SCNNode? {
-        return energyManager.powerLevel < 30.0 ? rechargeStationNode : nil
+        return needsRecharge ? rechargeStationNode : nil
+    }
+
+    // MARK: - Letter mission (the goal while power is OK)
+    //
+    // Place the lettered blocks into the LetterSlot placeholders so they
+    // spell FRANKENSTEIN. The mission picks the next unfilled slot that has a
+    // matching block, sends him to the block, then (carrying it) to the slot.
+
+    private let letterWord = Array("FRANKENSTEIN")
+    private let letterSlotTolerance: Float = 0.30
+    private let letterPlaceReach: Float = 1.6
+    private let letterFetchStandoff: Float = 0.75
+    private weak var letterBlockTarget: SCNNode?
+    private weak var letterSlotTarget: SCNNode?
+    private var letterTargetIndex: Int?
+
+    // Dog: he can pick the dog up and hold it to get love.
+    private let dogName = "CarryableDog"
+    private let dogDetourRange: Float = 3.0
+    private let dogLoveSeconds: Float = 4.0
+    private let dogCooldownSeconds: TimeInterval = 25
+    private weak var dogTarget: SCNNode?
+    private var dogHoldSeconds: Float = 0
+    private var dogCooldownUntil: TimeInterval = 0
+    private var wasCarryingDog = false
+    private var assistTimer: Float = 0
+    private weak var loveHeartsNode: SCNNode?
+
+    private var carryingDog: Bool { carriedNode?.name == dogName }
+
+    private var carryingLetterBlock: Bool {
+        guard let carriedNode else { return false }
+        return letter(ofBlock: carriedNode) != nil
+    }
+
+    /// What the path field, spline and outcome reward aim at right now: the
+    /// recharge station when power is low, otherwise the letter mission's
+    /// block (to fetch) or slot (to fill).
+    private var goalNode: SCNNode? {
+        if needsRecharge { return rechargeStationNode }
+        if carryingDog { return nil }
+        if carriedNode == nil, let dog = dogTarget { return dog }
+        guard letterTargetIndex != nil else { return nil }
+        return carryingLetterBlock ? letterSlotTarget : letterBlockTarget
     }
 
     // MARK: - Simulation
@@ -233,11 +289,39 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private func reachablePickupTarget(character: SCNNode, scene: SCNScene) -> SCNNode? {
-        guard carriedNode == nil, handNode != nil,
-              let hit = nearestPickupNode(from: character, in: scene),
-              let target = pickupTarget(for: hit),
-              canManipulate(target, from: character) else { return nil }
-        return target
+        guard carriedNode == nil, handNode != nil else { return nil }
+
+        if let hit = nearestPickupNode(from: character, in: scene),
+           let target = pickupTarget(for: hit),
+           canManipulate(target, from: character),
+           isPickupAllowed(target) {
+            return target
+        }
+
+        // The chest-height ray passes over low blocks and the dog, so the
+        // letter blocks and the dog are also found by position.
+        let c = character.presentation.worldPosition
+
+        return scene.rootNode.childNodes { node, _ in
+            let name = node.name ?? ""
+            return name.hasPrefix("LetterBlock_") || name == self.dogName
+        }
+        .filter { canManipulate($0, from: character) && isPickupAllowed($0) }
+        .min { a, b in
+            let pa = a.presentation.worldPosition
+            let pb = b.presentation.worldPosition
+            let da = (pa.x - c.x) * (pa.x - c.x) + (pa.z - c.z) * (pa.z - c.z)
+            let db = (pb.x - c.x) * (pb.x - c.x) + (pb.z - c.z) * (pb.z - c.z)
+            return da < db
+        }
+    }
+
+    /// The dog is not picked up again during its cooldown.
+    private func isPickupAllowed(_ node: SCNNode) -> Bool {
+        if node.name == dogName {
+            return currentFrameTime >= dogCooldownUntil
+        }
+        return true
     }
 
     private var canLiftNow: Bool {
@@ -434,6 +518,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         qFloorGrid.attach(to: scene)
         planSpline.attach(to: scene)
         addLetterPlaceholders(to: scene)
+        addDog(to: scene)
         
         setupPowerMeter(on: characterNode)
 
@@ -761,6 +846,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         rechargeStationNode?.isHidden = false
         rechargeStationNode?.physicsBody?.categoryBitMask = 1
+
+        updateLetterMission()
 
         if let textGeo = powerMeterNode?.geometry as? SCNText {
             let percentage = Int(energyManager.powerLevel)
@@ -1127,9 +1214,21 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         let characterXZ = SIMD2<Float>(Float(c.x), Float(c.z))
 
         var goalXZ: SIMD2<Float>?
-        if let station = effectiveRechargeStationNode {
-            let s = station.presentation.worldPosition
-            goalXZ = SIMD2<Float>(Float(s.x), Float(s.z))
+        if let node = goalNode {
+            let s = node.presentation.worldPosition
+            var target = SIMD2<Float>(Float(s.x), Float(s.z))
+
+            // Fetching a block: route to a stand-off point on his side of
+            // it, not into the block (which the field treats as an obstacle).
+            if !needsRecharge, carriedNode == nil {
+                let offset = characterXZ - target
+                let length = simd_length(offset)
+                if length > letterFetchStandoff {
+                    target += offset / length * letterFetchStandoff
+                }
+            }
+
+            goalXZ = target
         }
 
         var obstacles: [FrankensteinCAPathField.Obstacle] = []
@@ -1293,8 +1392,28 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         guard let ca else { return }
 
         var perception = FrankensteinCAPerception()
-        perception.goal = .recharge
-        perception.subGoal = ""
+        // Recharge is the goal only while power is low (or a recharge is
+        // under way). Otherwise there is no station to seek.
+        if needsRecharge {
+            perception.goal = .recharge
+            perception.subGoal = ""
+        } else if carryingDog {
+            perception.goal = .completeInteraction("hug dog")
+            perception.subGoal = "give love"
+        } else if carriedNode == nil, dogTarget != nil {
+            perception.goal = .completeInteraction("hug dog")
+            perception.subGoal = "pick up dog"
+        } else if let index = letterTargetIndex {
+            // Power is OK: the primary goal is placing the letter blocks.
+            perception.goal = .placeLetterBlock(
+                letter: letterWord[index],
+                targetIndex: index
+            )
+            perception.subGoal = carryingLetterBlock ? "carry block to slot" : "fetch block"
+        } else {
+            perception.goal = .reachPosition
+            perception.subGoal = "no letter block to place"
+        }
 
         let routedHeading = pathSteering?.heading ?? heading
         perception.headingError = pathSteering == nil ? 0 : wrappedAngle(routedHeading - heading)
@@ -1525,6 +1644,32 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             merged[.jump, default: 0] -= 5.0
         }
 
+        // Letter mission: put the carried block down when its slot is in
+        // reach, and keep hold of it until then.
+        if carryingDog {
+            // Hold the dog long enough to get love, then put it down.
+            merged[.placeObject, default: 0] += dogHoldSeconds >= dogLoveSeconds ? 8.0 : -4.0
+            merged[.throwObject, default: 0] -= 6.0
+        }
+
+        if !needsRecharge,
+           carryingLetterBlock,
+           let character = characterNode,
+           let slot = letterSlotTarget {
+            let c = character.presentation.worldPosition
+            let t = slot.presentation.worldPosition
+            let dx = Float(t.x - c.x)
+            let dz = Float(t.z - c.z)
+            let distance = sqrt(dx * dx + dz * dz)
+
+            if distance <= letterPlaceReach {
+                merged[.placeObject, default: 0] += 8.0
+            } else {
+                merged[.placeObject, default: 0] -= 3.0
+                merged[.throwObject, default: 0] -= 3.0
+            }
+        }
+
         if let target = pushTargetNode,
            target.parent != nil,
            allowedActions.contains(.pushObject),
@@ -1604,7 +1749,10 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private func updatePlanSpline(character: SCNNode, time: TimeInterval) {
-        guard let station = effectiveRechargeStationNode else {
+        // Destination: the station while recharging, else the letter slot.
+        let destinationNode = needsRecharge ? rechargeStationNode : letterSlotTarget
+
+        guard let station = destinationNode else {
             planSpline.update(
                 time: time,
                 character: character.presentation.worldPosition,
@@ -1621,7 +1769,12 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         var objectPosition: SCNVector3?
 
-        if let target = pushTargetNode, target.parent != nil {
+        if !needsRecharge {
+            // The block that goes into the slot (not while it is carried).
+            if !carryingLetterBlock, let block = letterBlockTarget, block.parent != nil {
+                objectPosition = block.presentation.worldPosition
+            }
+        } else if let target = pushTargetNode, target.parent != nil {
             objectPosition = target.presentation.worldPosition
         } else if planMovesObject {
             objectPosition = visibleObjects
@@ -1673,6 +1826,309 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             halfAngle: wideScanHalfAngleDegrees * .pi / 180,
             range: 6
         )
+    }
+
+    // MARK: Letter mission logic
+
+    private func letter(ofBlock node: SCNNode) -> Character? {
+        guard let name = node.name, name.hasPrefix("LetterBlock_") else { return nil }
+        let parts = name.split(separator: "_")
+        guard parts.count >= 2, let letter = parts[1].first else { return nil }
+        return letter
+    }
+
+    private func letterSlotNode(index: Int) -> SCNNode? {
+        guard let scene, letterWord.indices.contains(index) else { return nil }
+        return scene.rootNode.childNode(
+            withName: "LetterSlot_\(index)_\(letterWord[index])",
+            recursively: true
+        )
+    }
+
+    /// The first unfilled slot that wants the carried block's letter.
+    private func letterSlotIndex(forCarried block: SCNNode) -> Int? {
+        guard let letter = letter(ofBlock: block) else { return nil }
+
+        return letterWord.indices.first {
+            energyManager.placedLetters[$0] == nil && letterWord[$0] == letter
+        }
+    }
+
+    private func looseLetterBlocks(_ letter: Character) -> [SCNNode] {
+        guard let scene else { return [] }
+
+        return scene.rootNode.childNodes { node, _ in
+            node !== self.carriedNode &&
+            node.name?.hasPrefix("LetterBlock_\(letter)_") == true
+        }
+    }
+
+    /// Chooses the block and slot to work on, and sets a block into its slot
+    /// when it has been put down on it.
+    private func updateLetterMission() {
+        guard let scene, let character = characterNode else { return }
+        guard !needsRecharge else { return }
+
+        // 1. A loose block resting on a slot that wants its letter is placed.
+        for index in letterWord.indices where energyManager.placedLetters[index] == nil {
+            guard let slot = letterSlotNode(index: index) else { continue }
+            let sp = slot.presentation.worldPosition
+
+            for block in looseLetterBlocks(letterWord[index]) {
+                let bp = block.presentation.worldPosition
+                let dx = Float(bp.x - sp.x)
+                let dz = Float(bp.z - sp.z)
+
+                guard sqrt(dx * dx + dz * dz) <= letterSlotTolerance,
+                      Float(bp.y) < Float(sp.y) + 0.6 else { continue }
+
+                block.position = SCNVector3(
+                    sp.x,
+                    sp.y + worldDimensions(of: slot).y * 0.5 + worldDimensions(of: block).y * 0.5 + 0.005,
+                    sp.z
+                )
+
+                if let body = block.physicsBody {
+                    body.velocity = SCNVector3Zero
+                    body.angularVelocity = SCNVector4Zero
+                    body.type = .kinematic
+                    body.resetTransform()
+                }
+
+                // Placed blocks no longer count as loose, movable blocks.
+                block.name = "PlacedLetter_\(letterWord[index])_\(index)"
+                energyManager.placedLetters[index] = letterWord[index]
+
+                reinforceOutcome(
+                    stateKey: goalStateKey(terrain: latestTerrainSample),
+                    action: locomotion.output.action,
+                    reward: 3.0
+                )
+                break
+            }
+        }
+
+        // 2. Choose what to work on.
+        let c = character.presentation.worldPosition
+
+        updateDogLove(character: character)
+
+        if carryingDog {
+            dogTarget = nil
+            runAssist(character: character)
+            return
+        }
+
+        if let held = carriedNode, let index = letterSlotIndex(forCarried: held) {
+            letterTargetIndex = index
+            letterBlockTarget = held
+            letterSlotTarget = letterSlotNode(index: index)
+            dogTarget = nil
+            runAssist(character: character)
+            return
+        }
+
+        // His dog: when he is near it and the cooldown is over, he greets it
+        // before going back to the letters.
+        dogTarget = nil
+
+        if carriedNode == nil,
+           currentFrameTime >= dogCooldownUntil,
+           let dog = scene.rootNode.childNode(withName: dogName, recursively: true),
+           dog.parent != nil {
+            let p = dog.presentation.worldPosition
+            let dx = Float(p.x - c.x)
+            let dz = Float(p.z - c.z)
+
+            if sqrt(dx * dx + dz * dz) <= dogDetourRange {
+                dogTarget = dog
+            }
+        }
+
+        var best: (index: Int, block: SCNNode, distance: Float)?
+
+        for index in letterWord.indices where energyManager.placedLetters[index] == nil {
+            for block in looseLetterBlocks(letterWord[index]) where block.parent != nil {
+                let p = block.presentation.worldPosition
+                let dx = Float(p.x - c.x)
+                let dz = Float(p.z - c.z)
+                let distance = sqrt(dx * dx + dz * dz)
+
+                // Slots are filled in order: the first slot with a block wins.
+                if best == nil || (index == best!.index && distance < best!.distance) {
+                    if best == nil || index == best!.index {
+                        best = (index, block, distance)
+                    }
+                }
+            }
+
+            if best != nil { break }
+        }
+
+        if let best, let slot = letterSlotNode(index: best.index) {
+            letterTargetIndex = best.index
+            letterBlockTarget = best.block
+            letterSlotTarget = slot
+        } else {
+            letterTargetIndex = nil
+            letterBlockTarget = nil
+            letterSlotTarget = nil
+        }
+
+        runAssist(character: character)
+    }
+
+    /// If the CA has not lifted/placed on its own after a short time, do it
+    /// for him, so a block that is in reach always gets picked up and a block
+    /// held at its slot always gets set down.
+    private func runAssist(character: SCNNode) {
+        let c = character.presentation.worldPosition
+
+        func planarDistance(to node: SCNNode) -> Float {
+            let p = node.presentation.worldPosition
+            let dx = Float(p.x - c.x)
+            let dz = Float(p.z - c.z)
+            return sqrt(dx * dx + dz * dz)
+        }
+
+        var shouldAct = false
+        var action: () -> Void = {}
+
+        if carryingDog {
+            if dogHoldSeconds >= dogLoveSeconds + 0.5 {
+                shouldAct = true
+                action = { _ = self.placeCarriedObjectAhead() }
+            }
+        } else if carryingLetterBlock {
+            if let slot = letterSlotTarget, planarDistance(to: slot) <= letterPlaceReach {
+                shouldAct = true
+                action = { _ = self.placeCarriedObjectAhead() }
+            }
+        } else if let node = dogTarget ?? letterBlockTarget, node.parent != nil {
+            if planarDistance(to: node) <= 1.0 {
+                shouldAct = true
+                action = { _ = self.attemptPickup() }
+            }
+        }
+
+        if shouldAct {
+            assistTimer += dtFromLastFrame
+
+            if assistTimer >= 2.5 {
+                assistTimer = 0
+                action()
+            }
+        } else {
+            assistTimer = 0
+        }
+    }
+
+    // MARK: Dog
+
+    /// Holding the dog gives love. Putting it down starts a cooldown so he
+    /// does not pick it straight back up.
+    private func updateDogLove(character: SCNNode) {
+        let dt = dtFromLastFrame
+
+        if carryingDog {
+            dogHoldSeconds += dt
+            energyManager.love = min(100, energyManager.love + 12 * dt)
+            showLoveHearts(true, on: character)
+        } else {
+            if wasCarryingDog {
+                dogCooldownUntil = currentFrameTime + dogCooldownSeconds
+            }
+            dogHoldSeconds = 0
+            showLoveHearts(false, on: character)
+        }
+
+        wasCarryingDog = carryingDog
+    }
+
+    private func showLoveHearts(_ visible: Bool, on character: SCNNode) {
+        if loveHeartsNode == nil {
+            let text = SCNText(string: "❤ ❤ ❤", extrusionDepth: 0.01)
+            text.font = UIFont.systemFont(ofSize: 0.6)
+            let material = SCNMaterial()
+            material.diffuse.contents = UIColor.systemPink
+            material.emission.contents = UIColor.systemPink
+            text.materials = [material]
+
+            let node = SCNNode(geometry: text)
+            node.name = "LoveHeartsMarker"
+            node.scale = SCNVector3(0.5, 0.5, 0.5)
+
+            let (minBox, maxBox) = text.boundingBox
+            node.pivot = SCNMatrix4MakeTranslation((minBox.x + maxBox.x) * 0.5, 0, 0)
+            node.position = SCNVector3(0, 2.4, 0)
+
+            let billboard = SCNBillboardConstraint()
+            billboard.freeAxes = .Y
+            node.constraints = [billboard]
+
+            let bob = SCNAction.sequence([
+                SCNAction.moveBy(x: 0, y: 0.15, z: 0, duration: 0.5),
+                SCNAction.moveBy(x: 0, y: -0.15, z: 0, duration: 0.5)
+            ])
+            node.runAction(SCNAction.repeatForever(bob))
+
+            character.addChildNode(node)
+            loveHeartsNode = node
+        }
+
+        loveHeartsNode?.isHidden = !visible
+    }
+
+    /// Adds his dog to the scene. It is a carryable object he can pick up.
+    private func addDog(to scene: SCNScene) {
+        scene.rootNode.childNode(withName: dogName, recursively: false)?.removeFromParentNode()
+
+        let dog = SCNNode()
+        dog.name = dogName
+
+        func part(_ geometry: SCNGeometry, _ color: UIColor, _ position: SCNVector3) -> SCNNode {
+            let material = SCNMaterial()
+            material.diffuse.contents = color
+            geometry.materials = [material]
+            let node = SCNNode(geometry: geometry)
+            node.position = position
+            return node
+        }
+
+        let fur = UIColor(red: 0.62, green: 0.40, blue: 0.22, alpha: 1)
+        let dark = UIColor(red: 0.30, green: 0.18, blue: 0.10, alpha: 1)
+
+        dog.addChildNode(part(SCNBox(width: 0.22, height: 0.20, length: 0.46, chamferRadius: 0.06), fur, SCNVector3(0, 0, 0)))
+        dog.addChildNode(part(SCNSphere(radius: 0.12), fur, SCNVector3(0, 0.10, -0.28)))
+        dog.addChildNode(part(SCNBox(width: 0.06, height: 0.12, length: 0.04, chamferRadius: 0.01), dark, SCNVector3(-0.07, 0.24, -0.28)))
+        dog.addChildNode(part(SCNBox(width: 0.06, height: 0.12, length: 0.04, chamferRadius: 0.01), dark, SCNVector3(0.07, 0.24, -0.28)))
+        dog.addChildNode(part(SCNSphere(radius: 0.04), dark, SCNVector3(0, 0.08, -0.39)))
+        dog.addChildNode(part(SCNCylinder(radius: 0.025, height: 0.22), fur, SCNVector3(0, 0.12, 0.28)))
+
+        // Tail wag.
+        if let tail = dog.childNodes.last {
+            tail.eulerAngles = SCNVector3(0.9, 0, 0)
+            let wag = SCNAction.sequence([
+                SCNAction.rotateBy(x: 0, y: 0, z: 0.5, duration: 0.15),
+                SCNAction.rotateBy(x: 0, y: 0, z: -0.5, duration: 0.15)
+            ])
+            tail.runAction(SCNAction.repeatForever(wag))
+        }
+
+        // Stands on the floor (body is 0.20 tall; legs are not modelled).
+        dog.position = SCNVector3(1.5, 0.15, 5.0)
+
+        let shape = SCNPhysicsShape(
+            shapes: [SCNPhysicsShape(geometry: SCNBox(width: 0.24, height: 0.24, length: 0.7, chamferRadius: 0), options: nil)],
+            transforms: [NSValue(scnMatrix4: SCNMatrix4MakeTranslation(0, 0.05, -0.05))]
+        )
+        let body = SCNPhysicsBody(type: .dynamic, shape: shape)
+        body.mass = 1.0
+        body.friction = 0.8
+        body.angularDamping = 0.9
+        dog.physicsBody = body
+
+        scene.rootNode.addChildNode(dog)
     }
 
     private func isMovableName(_ name: String) -> Bool {
@@ -2476,12 +2932,20 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         scene: SCNScene,
         time: TimeInterval
     ) {
-        guard let station = effectiveRechargeStationNode else { return }
+        guard let station = goalNode else { return }
 
         let action = output.action
         let actionName = String(describing: action)
         let currentPosition = character.presentation.worldPosition
         let stationPosition = station.presentation.worldPosition
+
+        // A new goal target (another block, the slot, the station) restarts
+        // the progress measurement, so the jump in distance is not rewarded.
+        let goalID = ObjectIdentifier(station)
+        if goalID != lastGoalNodeID {
+            lastGoalNodeID = goalID
+            lastEvaluatedActionName = ""
+        }
 
         let currentDx = Float(currentPosition.x - stationPosition.x)
         let currentDz = Float(currentPosition.z - stationPosition.z)
@@ -2724,7 +3188,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         while let candidate = current {
             let name = candidate.name?.lowercased() ?? ""
             if name.contains("pickup") || name.contains("movable") || name.contains("carryable") ||
-               name.contains("crate") || name.contains("box") || name == "table" {
+               name.contains("crate") || name.contains("box") || name.contains("letterblock") || name == "table" {
                 return candidate
             }
             current = candidate.parent
@@ -2861,6 +3325,24 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             destinationXZ.z
         )
 
+        // Letter block put down within reach of its slot: set it on the slot.
+        if !thrown, let index = letterSlotIndex(forCarried: carriedNode),
+           let slot = letterSlotNode(index: index) {
+            let sp = slot.presentation.worldPosition
+            let toSlot = sqrt(
+                Float((sp.x - position.x) * (sp.x - position.x)) +
+                Float((sp.z - position.z) * (sp.z - position.z))
+            )
+
+            if toSlot <= letterPlaceReach {
+                carriedNode.position = SCNVector3(
+                    sp.x,
+                    sp.y + worldDimensions(of: slot).y * 0.5 + worldDimensions(of: carriedNode).y * 0.5 + 0.005,
+                    sp.z
+                )
+            }
+        }
+
         configurePhysicsBody(for: carriedNode, forceDynamic: true)
         if let body = carriedNode.physicsBody {
             body.type = .dynamic
@@ -2965,6 +3447,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         let stats = """
         Action: \(action)
         Power: \(Int(energyManager.powerLevel))%
+        Love: \(Int(energyManager.love))%
         Terrain: \(terrain)
         Distance ahead: \(String(format: "%.2f", Double(latestTerrainSample.distance))) m
         Visible objects: \(visibleObjects.count)

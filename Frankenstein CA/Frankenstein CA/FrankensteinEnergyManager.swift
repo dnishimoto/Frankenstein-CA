@@ -9,6 +9,16 @@ import Foundation
 import Combine
 
 //
+//  File.swift
+//  Frankenstein CA
+//
+//  Created by David Nishimoto on 10/31/26.
+//
+
+import Foundation
+import Combine
+
+//
 //  FrankensteinEnergyManager.swift
 //  Frankenstein CA
 //
@@ -22,6 +32,9 @@ final class FrankensteinEnergyManager: ObservableObject {
     @Published var powerLevel: Float = 100.0
     @Published var maxPower: Float = 100.0
     @Published var isRecharging: Bool = false
+
+    /// Love from his dog (0...100). Rises while he holds the dog.
+    @Published var love: Float = 0
     
     let targetWord = "FRANKENSTEIN"
     @Published var placedLetters: [Character?] = Array(repeating: nil, count: 12)
@@ -51,6 +64,7 @@ final class FrankensteinEnergyManager: ObservableObject {
     func reset() {
         powerLevel = 100.0
         isRecharging = false
+        love = 0
         placedLetters = Array(repeating: nil, count: 12)
     }
 }
