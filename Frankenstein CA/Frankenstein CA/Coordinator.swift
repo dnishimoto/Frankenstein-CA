@@ -5,7 +5,7 @@ import SwiftUI
 import UIKit
 
 final class Coordinator: NSObject, SCNSceneRendererDelegate {
-    private var powerLevel: Float = 100.0
+    let energyManager: FrankensteinEnergyManager
     private weak var powerMeterNode: SCNNode?
     private var currentFrameTime: TimeInterval = 0
     private let requiredRechargeContactDuration: TimeInterval = 1.0
@@ -53,7 +53,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private weak var rechargeStationNode: SCNNode?
     
     private var effectiveRechargeStationNode: SCNNode? {
-        return powerLevel < 30.0 ? rechargeStationNode : nil
+        return energyManager.powerLevel < 30.0 ? rechargeStationNode : nil
     }
 
     // MARK: - Simulation
@@ -108,10 +108,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private var latestRayObservations: [RaycastObservation] = []
 
     // MARK: - Wide Field of View
-    //
-    // The narrow corridor scan above drives terrain classification, so it
-    // stays as it is. This second, wide scan sees the whole forward half-plane
-    // out to a long range and feeds the path field, the CA and the UI.
 
     private var wideDetections: [DetectedObjectInfo] = []
     private var visibleObjects: [DetectedObjectInfo] = []
@@ -211,18 +207,18 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         let ahead = dx * forward.x + dz * forward.z
         return ahead > 0.05 && ahead / (distance * length) >= minimumManipulationAlignment
     }
+
     private func setRechargeStationFlashing(_ flashing: Bool) {
         guard let station = rechargeStationNode else { return }
         
         if flashing {
-            // Check if it's already animating to avoid duplicating actions
             guard station.action(forKey: "flashingBlue") == nil else { return }
             
             let tintBlue = SCNAction.run { node in
                 node.geometry?.materials.first?.diffuse.contents = UIColor.systemBlue
             }
             let tintOriginal = SCNAction.run { node in
-                node.geometry?.materials.first?.diffuse.contents = UIColor.systemCyan // or your original color
+                node.geometry?.materials.first?.diffuse.contents = UIColor.systemCyan
             }
             let wait = SCNAction.wait(duration: 0.3)
             
@@ -232,10 +228,10 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             station.runAction(repeatAction, forKey: "flashingBlue")
         } else {
             station.removeAction(forKey: "flashingBlue")
-            // Reset back to standard color
             station.geometry?.materials.first?.diffuse.contents = UIColor.systemCyan
         }
     }
+
     private func reachablePickupTarget(character: SCNNode, scene: SCNScene) -> SCNNode? {
         guard carriedNode == nil, handNode != nil,
               let hit = nearestPickupNode(from: character, in: scene),
@@ -257,11 +253,13 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     init(
         scene: SCNScene,
         characterNode: SCNNode,
-        locomotion: FrankensteinLocomotion
+        locomotion: FrankensteinLocomotion,
+        energyManager: FrankensteinEnergyManager
     ) {
         self.scene = scene
         self.characterNode = characterNode
         self.locomotion = locomotion
+        self.energyManager = energyManager
 
         super.init()
 
@@ -312,6 +310,13 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private func makeGoalObservation(
         character: SCNNode
     ) -> FrankensteinGoalObservation? {
+        let powerPercentage =
+            energyManager.powerLevel / max(energyManager.maxPower, 1) * 100
+
+        guard powerPercentage < 30 else {
+            return nil
+        }
+
         guard let station = effectiveRechargeStationNode else {
             return nil
         }
@@ -399,41 +404,41 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     // MARK: - Scene Attachment
 
     func attach(
-            scene: SCNScene,
-            characterNode: SCNNode
-        ) {
-            self.scene = scene
-            self.characterNode = characterNode
+        scene: SCNScene,
+        characterNode: SCNNode
+    ) {
+        self.scene = scene
+        self.characterNode = characterNode
 
-            characterFootOffset = measureCharacterFootOffset(characterNode)
-            configurePhysicsWorld(in: scene)
-            addMovableBlockCourse(to: scene)
+        characterFootOffset = measureCharacterFootOffset(characterNode)
+        configurePhysicsWorld(in: scene)
+        addMovableBlockCourse(to: scene)
 
-            characterVerticalVelocity = 0
-            hasReportedFall = false
-            hasReportedRecharge = false
+        characterVerticalVelocity = 0
+        hasReportedFall = false
+        hasReportedRecharge = false
 
-            previousCharacterPosition =
-                characterNode.presentation.worldPosition
+        previousCharacterPosition =
+            characterNode.presentation.worldPosition
 
-            hasPreviousCharacterPosition = true
-            jumpBaseY = nil
+        hasPreviousCharacterPosition = true
+        jumpBaseY = nil
 
-            doorNode = findNode(containing: "door", under: scene.rootNode)
-            tableNode = findNode(containing: "table", under: scene.rootNode)
-            rechargeStationNode = findNode(
-                containing: "rechargestation",
-                under: scene.rootNode
-            )
+        doorNode = findNode(containing: "door", under: scene.rootNode)
+        tableNode = findNode(containing: "table", under: scene.rootNode)
+        rechargeStationNode = findNode(
+            containing: "rechargestation",
+            under: scene.rootNode
+        )
 
-            qFloorGrid.attach(to: scene)
-            planSpline.attach(to: scene)
-            addLetterPlaceholders(to: scene)
-            
-            setupPowerMeter(on: characterNode)
+        qFloorGrid.attach(to: scene)
+        planSpline.attach(to: scene)
+        addLetterPlaceholders(to: scene)
+        
+        setupPowerMeter(on: characterNode)
 
-            publishDebug("Coordinator attached to displayed scene.")
-        }
+        publishDebug("Coordinator attached to displayed scene.")
+    }
 
     private func addMovableBlockCourse(to scene: SCNScene) {
         guard !spawnedMovableBlocks else { return }
@@ -714,401 +719,401 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         lastEvaluatedActionName = ""
         lastDisplayedActionName = ""
+        
+        energyManager.reset()
     }
 
     // MARK: - Renderer Update
 
     func renderer(
-            _ renderer: SCNSceneRenderer,
-            updateAtTime time: TimeInterval
-        ) {
-            guard isRunning,
-                  let scene = scene,
-                  let character = characterNode else {
-                return
+        _ renderer: SCNSceneRenderer,
+        updateAtTime time: TimeInterval
+    ) {
+        guard isRunning,
+              let scene = scene,
+              let character = characterNode else {
+            return
+        }
+
+        currentFrameTime = time
+
+        let dt: Float
+        if lastFrameTime == 0 {
+            dt = 1.0 / 60.0
+        } else {
+            dt = Float(min(max(time - lastFrameTime, 1.0 / 240.0), 0.05))
+        }
+
+        lastFrameTime = time
+        dtFromLastFrame = dt
+
+        // MARK: Power Level & Energy Management via FrankensteinEnergyManager
+        energyManager.isRecharging = hasReportedRecharge
+        if hasReportedRecharge {
+            energyManager.recharge(dt: dt)
+            if energyManager.powerLevel >= energyManager.maxPower {
+                hasReportedRecharge = false
+                hasCompletedRechargeGoal = false
             }
+        } else {
+            energyManager.consumeEnergy(for: locomotion.output.action, dt: dt)
+        }
 
-            currentFrameTime = time
+        rechargeStationNode?.isHidden = false
+        rechargeStationNode?.physicsBody?.categoryBitMask = 1
 
-            let dt: Float
-            if lastFrameTime == 0 {
-                dt = 1.0 / 60.0
-            } else {
-                dt = Float(min(max(time - lastFrameTime, 1.0 / 240.0), 0.05))
-            }
-
-            lastFrameTime = time
-            dtFromLastFrame = dt
-
-            // MARK: Power Level & Recharge Station Visibility Management
-            if hasReportedRecharge {
-                powerLevel = min(100.0, powerLevel + dt * 35.0)
-                if powerLevel >= 100.0 {
-                    hasReportedRecharge = false
-                    hasCompletedRechargeGoal = false
-                }
-            } else {
-                let drainRate: Float = locomotion.output.speed > 0 ? 2.0 : 0.4
-                powerLevel = max(0.0, powerLevel - dt * drainRate)
-            }
-
-            // Frankenstein only sees/interacts with the recharge station when power < 30%
-            let shouldShowRecharge = powerLevel < 30.0
-            rechargeStationNode?.isHidden = !shouldShowRecharge
-            rechargeStationNode?.physicsBody?.categoryBitMask = shouldShowRecharge ? 1 : 0
-
-            if let textGeo = powerMeterNode?.geometry as? SCNText {
-                let percentage = Int(powerLevel)
-                textGeo.string = "⚡ Power: \(percentage)%"
-                if let mat = textGeo.materials.first {
-                    if powerLevel > 50 {
-                        mat.diffuse.contents = UIColor.systemGreen
-                    } else if powerLevel > 20 {
-                        mat.diffuse.contents = UIColor.systemYellow
-                    } else {
-                        mat.diffuse.contents = UIColor.systemRed
-                    }
+        if let textGeo = powerMeterNode?.geometry as? SCNText {
+            let percentage = Int(energyManager.powerLevel)
+            textGeo.string = "⚡ Power: \(percentage)%"
+            if let mat = textGeo.materials.first {
+                if energyManager.powerLevel > 50 {
+                    mat.diffuse.contents = UIColor.systemGreen
+                } else if energyManager.powerLevel > 20 {
+                    mat.diffuse.contents = UIColor.systemYellow
+                } else {
+                    mat.diffuse.contents = UIColor.systemRed
                 }
             }
+        }
 
-            if time - lastCATickTime >= caTickInterval {
-                lastCATickTime = time
-                DispatchQueue.main.async { [weak self] in
-                    self?.tickCA()
-                }
+        if time - lastCATickTime >= caTickInterval {
+            lastCATickTime = time
+            DispatchQueue.main.async { [weak self] in
+                self?.tickCA()
             }
+        }
 
-            // MARK: 1. Object perception
+        // MARK: 1. Object perception
 
-            if time - lastSensorTime >= sensorInterval {
-                lastSensorTime = time
+        if time - lastSensorTime >= sensorInterval {
+            lastSensorTime = time
 
-                let detailedDetections = detectAllObjectsAhead(
-                    from: character,
-                    in: scene
-                )
-
-                latestDetections = detailedDetections.map { $0.info }
-
-                latestDetectionNodes = Dictionary(
-                    uniqueKeysWithValues: detailedDetections.map {
-                        (ObjectIdentifier($0.node), $0.info)
-                    }
-                )
-
-                latestDetection = latestDetections.first
-
-                pushTargetNode = findPushTargetNode(
-                    character: character,
-                    in: scene,
-                    detections: detailedDetections
-                )
-
-                if time - lastWideScanTime >= wideScanInterval {
-                    lastWideScanTime = time
-                    wideDetections = scanWideFieldOfView(
-                        from: character,
-                        in: scene
-                    )
-                }
-
-                visibleObjects = mergeVisibleObjects(
-                    near: latestDetections,
-                    wide: wideDetections,
-                    character: character
-                )
-
-                verifiedGroundSupport = verifySupportBeneathCharacter(
-                    character: character,
-                    in: scene
-                )
-
-                let fanObstacles = scanClearanceFan(
-                    from: character,
-                    in: scene
-                )
-
-                updatePathField(
-                    character: character,
-                    detections: visibleObjects,
-                    extraObstacles: fanObstacles,
-                    time: time
-                )
-
-                updateObjectQValues(
-                    terrain: latestTerrainSample,
-                    detections: detailedDetections
-                )
-
-                let nearest = latestDetections.first
-                let everythingSeen = visibleObjects
-
-                DispatchQueue.main.async { [weak self] in
-                    self?.onDetectedObject?(nearest)
-                    self?.onDetectedObjects?(everythingSeen)
-                }
-
-                logRayObservations()
-            }
-
-            latestTerrainSample = makeTerrainSample(
-                for: character,
+            let detailedDetections = detectAllObjectsAhead(
+                from: character,
                 in: scene
             )
 
-            latestTerrainSample.objectName = latestDetection?.name ?? ""
-            latestTerrainSample.carryingObject = carriedNode != nil
-            latestTerrainSample.objectPickupable = canLiftNow
+            latestDetections = detailedDetections.map { $0.info }
 
-            if let target = pushTargetNode, target.parent != nil {
+            latestDetectionNodes = Dictionary(
+                uniqueKeysWithValues: detailedDetections.map {
+                    (ObjectIdentifier($0.node), $0.info)
+                }
+            )
+
+            latestDetection = latestDetections.first
+
+            pushTargetNode = findPushTargetNode(
+                character: character,
+                in: scene,
+                detections: detailedDetections
+            )
+
+            if time - lastWideScanTime >= wideScanInterval {
+                lastWideScanTime = time
+                wideDetections = scanWideFieldOfView(
+                    from: character,
+                    in: scene
+                )
+            }
+
+            visibleObjects = mergeVisibleObjects(
+                near: latestDetections,
+                wide: wideDetections,
+                character: character
+            )
+
+            verifiedGroundSupport = verifySupportBeneathCharacter(
+                character: character,
+                in: scene
+            )
+
+            let fanObstacles = scanClearanceFan(
+                from: character,
+                in: scene
+            )
+
+            updatePathField(
+                character: character,
+                detections: visibleObjects,
+                extraObstacles: fanObstacles,
+                time: time
+            )
+
+            updateObjectQValues(
+                terrain: latestTerrainSample,
+                detections: detailedDetections
+            )
+
+            let nearest = latestDetections.first
+            let everythingSeen = visibleObjects
+
+            DispatchQueue.main.async { [weak self] in
+                self?.onDetectedObject?(nearest)
+                self?.onDetectedObjects?(everythingSeen)
+            }
+
+            logRayObservations()
+        }
+
+        latestTerrainSample = makeTerrainSample(
+            for: character,
+            in: scene
+        )
+
+        latestTerrainSample.objectName = latestDetection?.name ?? ""
+        latestTerrainSample.carryingObject = carriedNode != nil
+        latestTerrainSample.objectPickupable = canLiftNow
+
+        if let target = pushTargetNode, target.parent != nil {
+            let c = character.presentation.worldPosition
+            let n = target.presentation.worldPosition
+            let dx = Float(n.x - c.x)
+            let dz = Float(n.z - c.z)
+            let targetDistance = sqrt(dx * dx + dz * dz)
+            if targetDistance.isFinite && targetDistance <= 2.3 {
+                let dimensions = worldDimensions(of: target)
+                let targetTop = Float(n.y) + dimensions.y * 0.5
+                latestTerrainSample.objectMovable = true
+                latestTerrainSample.objectName = target.name ?? "MovableBlock"
+                latestTerrainSample.distance = targetDistance
+                latestTerrainSample.obstacleHeight = max(
+                    0,
+                    targetTop - latestTerrainSample.groundHeight
+                )
+                latestTerrainSample.obstacleDepth = dimensions.z
+                latestTerrainSample.canLandOnObject =
+                    dimensions.x >= 0.3 && dimensions.z >= 0.3 &&
+                    latestTerrainSample.obstacleHeight > 0.05 &&
+                    latestTerrainSample.obstacleHeight <= 1.0 &&
+                    hasClearSpace(
+                        around: SCNVector3(n.x, Float(targetTop + 0.15), n.z),
+                        in: scene
+                    )
+                if latestTerrainSample.obstacleHeight > 0.45 {
+                    latestTerrainSample.terrain = .hurdle
+                } else if latestTerrainSample.obstacleHeight > 0.05 {
+                    latestTerrainSample.terrain = .raisedStep
+                }
+            }
+        }
+
+        let currentPosition = character.presentation.worldPosition
+        updateStuckDuration(position: currentPosition, deltaTime: dt)
+
+        let actualDisplacement: Float?
+        if hasPreviousCharacterPosition {
+            actualDisplacement = measureForwardDisplacement(
+                from: previousCharacterPosition,
+                to: currentPosition
+            )
+        } else {
+            actualDisplacement = nil
+        }
+
+        previousCharacterPosition = currentPosition
+        hasPreviousCharacterPosition = true
+
+        if let prediction = pendingPrediction, let actualDisplacement {
+            let error = predictivePerception.observe(
+                prediction: prediction,
+                actualForwardDisplacement: actualDisplacement,
+                terrain: latestTerrainSample
+            )
+            if abs(error) > 0.18 {
+                publishDebug("Prediction error adjusted.")
+            }
+            pendingPrediction = nil
+        }
+
+        markFieldOfViewDirty(character: character, time: time)
+
+        let perceivedValues = locomotion.policy.learnedActionValues(
+            terrain: latestTerrainSample,
+            body: locomotion.body
+        )
+
+        let perceivedActions = FrankensteinActionConstraints.allowedActions(
+            terrain: latestTerrainSample,
+            body: locomotion.body
+        )
+
+        let advisoryValues = makeAdvisoryActionValues(
+            baseValues: perceivedValues,
+            allowedActions: perceivedActions
+        )
+
+        locomotion.receivePerception(
+            allowedActions: perceivedActions,
+            qValues: advisoryValues
+        )
+
+        let objectObservation: FrankensteinObjectObservation? = {
+            if let target = pushTargetNode,
+               target.parent != nil,
+               let character = characterNode {
                 let c = character.presentation.worldPosition
                 let n = target.presentation.worldPosition
                 let dx = Float(n.x - c.x)
                 let dz = Float(n.z - c.z)
-                let targetDistance = sqrt(dx * dx + dz * dz)
-                if targetDistance.isFinite && targetDistance <= 2.3 {
-                    let dimensions = worldDimensions(of: target)
-                    let targetTop = Float(n.y) + dimensions.y * 0.5
-                    latestTerrainSample.objectMovable = true
-                    latestTerrainSample.objectName = target.name ?? "MovableBlock"
-                    latestTerrainSample.distance = targetDistance
-                    latestTerrainSample.obstacleHeight = max(
-                        0,
-                        targetTop - latestTerrainSample.groundHeight
+                let distance = sqrt(dx * dx + dz * dz)
+                if distance.isFinite && distance <= 2.3 {
+                    let size = worldDimensions(of: target)
+                    return FrankensteinObjectObservation(
+                        name: target.name ?? "MovableBlock",
+                        width: max(0.05, size.x),
+                        height: max(0.05, size.y),
+                        depth: max(0.05, size.z),
+                        distance: distance,
+                        pickupable: pickupTarget(for: target) != nil
                     )
-                    latestTerrainSample.obstacleDepth = dimensions.z
-                    latestTerrainSample.canLandOnObject =
-                        dimensions.x >= 0.3 && dimensions.z >= 0.3 &&
-                        latestTerrainSample.obstacleHeight > 0.05 &&
-                        latestTerrainSample.obstacleHeight <= 1.0 &&
-                        hasClearSpace(
-                            around: SCNVector3(n.x, Float(targetTop + 0.15), n.z),
-                            in: scene
-                        )
-                    if latestTerrainSample.obstacleHeight > 0.45 {
-                        latestTerrainSample.terrain = .hurdle
-                    } else if latestTerrainSample.obstacleHeight > 0.05 {
-                        latestTerrainSample.terrain = .raisedStep
-                    }
                 }
             }
-
-            let currentPosition = character.presentation.worldPosition
-            updateStuckDuration(position: currentPosition, deltaTime: dt)
-
-            let actualDisplacement: Float?
-            if hasPreviousCharacterPosition {
-                actualDisplacement = measureForwardDisplacement(
-                    from: previousCharacterPosition,
-                    to: currentPosition
+            return latestDetection.map { item in
+                FrankensteinObjectObservation(
+                    name: item.name,
+                    width: item.dimensions.x,
+                    height: item.dimensions.y,
+                    depth: item.dimensions.z,
+                    distance: item.distance,
+                    pickupable: item.pickupable
                 )
-            } else {
-                actualDisplacement = nil
             }
+        }()
 
-            previousCharacterPosition = currentPosition
-            hasPreviousCharacterPosition = true
+        pushPerceptionToCA(
+            terrain: latestTerrainSample,
+            allowedActions: perceivedActions,
+            time: time
+        )
 
-            if let prediction = pendingPrediction, let actualDisplacement {
-                let error = predictivePerception.observe(
-                    prediction: prediction,
-                    actualForwardDisplacement: actualDisplacement,
-                    terrain: latestTerrainSample
+        let output = locomotion.step(
+            deltaTime: dt,
+            terrain: latestTerrainSample,
+            actualDisplacement: actualDisplacement,
+            objectObservation: objectObservation
+        )
+
+        pendingPrediction = predictivePerception.predict(
+            actionName: String(describing: output.action),
+            terrain: latestTerrainSample,
+            body: locomotion.body,
+            objectObservation: objectObservation
+        )
+
+        applyMovement(
+            output: output,
+            deltaTime: dt,
+            character: character,
+            scene: scene
+        )
+
+        applyPush(
+            output: output,
+            deltaTime: dt,
+            character: character
+        )
+
+        let finalPosition = character.presentation.worldPosition
+        let stationaryByDesign: Set<FrankensteinAction> = [
+            .turnLeft, .turnRight, .recover,
+            .liftObject, .placeObject, .throwObject
+        ]
+
+        if !stationaryByDesign.contains(output.action) {
+            ca?.observeMovementForFutility(
+                action: output.action,
+                x: Float(finalPosition.x),
+                z: Float(finalPosition.z),
+                timestamp: time
+            )
+        }
+
+        if goalProgressRate > 0.15 {
+            ca?.forgiveFutility(for: output.action, amount: 0.05)
+        }
+
+        evaluateActionOutcome(
+            output: output,
+            actualDisplacement: actualDisplacement,
+            character: character,
+            scene: scene,
+            time: time
+        )
+
+        animateCharacter(character: character)
+        updateCarriedObject()
+        updateDoorInteraction(executedAction: output.action)
+
+        let policyUpdates = locomotion.policy.updateCount
+        if policyUpdates > lastRecordedQUpdate {
+            let newCount = policyUpdates - lastRecordedQUpdate
+            for record in locomotion.policy.qUpdateRecords.suffix(newCount) {
+                qFloorGrid.record(
+                    position: character.presentation.worldPosition,
+                    action: record.action,
+                    newValue: record.newValue
                 )
-                if abs(error) > 0.18 {
-                    publishDebug("Prediction error adjusted.")
-                }
-                pendingPrediction = nil
             }
+            lastRecordedQUpdate = policyUpdates
+        }
 
-            markFieldOfViewDirty(character: character, time: time)
-
-            let perceivedValues = locomotion.policy.learnedActionValues(
+        if time - lastQGridPublishTime >= 0.2 {
+            lastQGridPublishTime = time
+            let cells = locomotion.policy.qDisplaySnapshot(
+                objectsInView: visibleObservations(),
                 terrain: latestTerrainSample,
                 body: locomotion.body
             )
-
-            let perceivedActions = FrankensteinActionConstraints.allowedActions(
-                terrain: latestTerrainSample,
-                body: locomotion.body
-            )
-
-            let advisoryValues = makeAdvisoryActionValues(
-                baseValues: perceivedValues,
-                allowedActions: perceivedActions
-            )
-
-            locomotion.receivePerception(
-                allowedActions: perceivedActions,
-                qValues: advisoryValues
-            )
-
-            let objectObservation: FrankensteinObjectObservation? = {
-                if let target = pushTargetNode,
-                   target.parent != nil,
-                   let character = characterNode {
-                    let c = character.presentation.worldPosition
-                    let n = target.presentation.worldPosition
-                    let dx = Float(n.x - c.x)
-                    let dz = Float(n.z - c.z)
-                    let distance = sqrt(dx * dx + dz * dz)
-                    if distance.isFinite && distance <= 2.3 {
-                        let size = worldDimensions(of: target)
-                        return FrankensteinObjectObservation(
-                            name: target.name ?? "MovableBlock",
-                            width: max(0.05, size.x),
-                            height: max(0.05, size.y),
-                            depth: max(0.05, size.z),
-                            distance: distance,
-                            pickupable: pickupTarget(for: target) != nil
-                        )
-                    }
-                }
-                return latestDetection.map { item in
-                    FrankensteinObjectObservation(
-                        name: item.name,
-                        width: item.dimensions.x,
-                        height: item.dimensions.y,
-                        depth: item.dimensions.z,
-                        distance: item.distance,
-                        pickupable: item.pickupable
-                    )
-                }
-            }()
-
-            pushPerceptionToCA(
-                terrain: latestTerrainSample,
-                allowedActions: perceivedActions,
-                time: time
-            )
-
-            let output = locomotion.step(
-                deltaTime: dt,
-                terrain: latestTerrainSample,
-                actualDisplacement: actualDisplacement,
-                objectObservation: objectObservation
-            )
-
-            pendingPrediction = predictivePerception.predict(
-                actionName: String(describing: output.action),
-                terrain: latestTerrainSample,
-                body: locomotion.body,
-                objectObservation: objectObservation
-            )
-
-            applyMovement(
-                output: output,
-                deltaTime: dt,
-                character: character,
-                scene: scene
-            )
-
-            applyPush(
-                output: output,
-                deltaTime: dt,
-                character: character
-            )
-
-            let finalPosition = character.presentation.worldPosition
-            let stationaryByDesign: Set<FrankensteinAction> = [
-                .turnLeft, .turnRight, .recover,
-                .liftObject, .placeObject, .throwObject
-            ]
-
-            if !stationaryByDesign.contains(output.action) {
-                ca?.observeMovementForFutility(
-                    action: output.action,
-                    x: Float(finalPosition.x),
-                    z: Float(finalPosition.z),
-                    timestamp: time
-                )
-            }
-
-            if goalProgressRate > 0.15 {
-                ca?.forgiveFutility(for: output.action, amount: 0.05)
-            }
-
-            evaluateActionOutcome(
-                output: output,
-                actualDisplacement: actualDisplacement,
-                character: character,
-                scene: scene,
-                time: time
-            )
-
-            animateCharacter(character: character)
-            updateCarriedObject()
-            updateDoorInteraction(executedAction: output.action)
-
-            let policyUpdates = locomotion.policy.updateCount
-            if policyUpdates > lastRecordedQUpdate {
-                let newCount = policyUpdates - lastRecordedQUpdate
-                for record in locomotion.policy.qUpdateRecords.suffix(newCount) {
-                    qFloorGrid.record(
-                        position: character.presentation.worldPosition,
-                        action: record.action,
-                        newValue: record.newValue
-                    )
-                }
-                lastRecordedQUpdate = policyUpdates
-            }
-
-            if time - lastQGridPublishTime >= 0.2 {
-                lastQGridPublishTime = time
-                let cells = locomotion.policy.qDisplaySnapshot(
-                    objectsInView: visibleObservations(),
-                    terrain: latestTerrainSample,
-                    body: locomotion.body
-                )
-                DispatchQueue.main.async { [weak self] in
-                    self?.onQGrid?(cells)
-                }
-            }
-
-            updatePlanSpline(character: character, time: time)
-
-            qFloorGrid.update(
-                position: character.presentation.worldPosition,
-                policy: locomotion.policy,
-                sample: latestTerrainSample,
-                body: locomotion.body
-            )
-
-            // Only register recharge if the station is active (power < 30%) and reached
-            if let station = effectiveRechargeStationNode {
-                let c = character.presentation.worldPosition
-                let size = worldDimensions(of: station)
-                let s = station.presentation.worldPosition
-                let topY = worldTopY(of: station)
-
-                let onTop =
-                    abs(Float(c.x - s.x)) <= max(0.15, size.x * 0.5) &&
-                    abs(Float(c.z - s.z)) <= max(0.15, size.z * 0.5) &&
-                    abs(Float(c.y) + characterFootOffset - topY) <= 0.18
-
-                if onTop {
-                    if !hasReportedRecharge {
-                        locomotion.reportRecharge()
-                        hasReportedRecharge = true
-                        setRechargeStationFlashing(true) // Start flashing blue
-                        reinforceOutcome(stateKey: goalStateKey(terrain: latestTerrainSample), action: output.action, reward: 2.0)
-                    }
-                } else {
-                    if hasReportedRecharge {
-                        setRechargeStationFlashing(false) // Stop flashing if stepped off
-                    }
-                    hasReportedRecharge = false
-                }
-            } else {
-                setRechargeStationFlashing(false)
-                hasReportedRecharge = false
-            }
-
-            if time - lastStatsTime >= statsInterval {
-                lastStatsTime = time
-                publishGeneralStats()
+            DispatchQueue.main.async { [weak self] in
+                self?.onQGrid?(cells)
             }
         }
+
+        updatePlanSpline(character: character, time: time)
+
+        qFloorGrid.update(
+            position: character.presentation.worldPosition,
+            policy: locomotion.policy,
+            sample: latestTerrainSample,
+            body: locomotion.body
+        )
+
+        // Only register recharge if the station is active (power < 30%) and reached
+        if let station = effectiveRechargeStationNode {
+            let c = character.presentation.worldPosition
+            let size = worldDimensions(of: station)
+            let s = station.presentation.worldPosition
+            let topY = worldTopY(of: station)
+
+            let onTop =
+                abs(Float(c.x - s.x)) <= max(0.15, size.x * 0.5) &&
+                abs(Float(c.z - s.z)) <= max(0.15, size.z * 0.5) &&
+                abs(Float(c.y) + characterFootOffset - topY) <= 0.18
+
+            if onTop {
+                if !hasReportedRecharge {
+                    locomotion.reportRecharge()
+                    hasReportedRecharge = true
+                    setRechargeStationFlashing(true) // Start flashing blue
+                    reinforceOutcome(stateKey: goalStateKey(terrain: latestTerrainSample), action: output.action, reward: 2.0)
+                }
+            } else {
+                if hasReportedRecharge {
+                    setRechargeStationFlashing(false) // Stop flashing if stepped off
+                }
+                hasReportedRecharge = false
+            }
+        } else {
+            setRechargeStationFlashing(false)
+            hasReportedRecharge = false
+        }
+
+        if time - lastStatsTime >= statsInterval {
+            lastStatsTime = time
+            publishGeneralStats()
+        }
+    }
 
     // MARK: - CA Path Field
 
@@ -1122,7 +1127,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         let characterXZ = SIMD2<Float>(Float(c.x), Float(c.z))
 
         var goalXZ: SIMD2<Float>?
-        // Only target the recharge station if power is < 30%
         if let station = effectiveRechargeStationNode {
             let s = station.presentation.worldPosition
             goalXZ = SIMD2<Float>(Float(s.x), Float(s.z))
@@ -1282,142 +1286,142 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private func pushPerceptionToCA(
-            terrain: FrankensteinTerrainSample,
-            allowedActions: [FrankensteinAction],
-            time: TimeInterval
-        ) {
-            guard let ca else { return }
+        terrain: FrankensteinTerrainSample,
+        allowedActions: [FrankensteinAction],
+        time: TimeInterval
+    ) {
+        guard let ca else { return }
 
-            var perception = FrankensteinCAPerception()
-            perception.goal = .recharge
-            perception.subGoal = ""
+        var perception = FrankensteinCAPerception()
+        perception.goal = .recharge
+        perception.subGoal = ""
 
-            let routedHeading = pathSteering?.heading ?? heading
-            perception.headingError = pathSteering == nil ? 0 : wrappedAngle(routedHeading - heading)
+        let routedHeading = pathSteering?.heading ?? heading
+        perception.headingError = pathSteering == nil ? 0 : wrappedAngle(routedHeading - heading)
 
-            perception.pathDistance = pathGoalDistance
-            perception.isDetouring = pathSteering?.isDetouring ?? false
-            perception.goalProgressRate = goalProgressRate
+        perception.pathDistance = pathGoalDistance
+        perception.isDetouring = pathSteering?.isDetouring ?? false
+        perception.goalProgressRate = goalProgressRate
 
-            perception.atGoal =
-                hasReportedRecharge ||
-                (pathGoalDistance.isFinite && pathGoalDistance < 0.35)
+        perception.atGoal =
+            hasReportedRecharge ||
+            (pathGoalDistance.isFinite && pathGoalDistance < 0.35)
 
-            perception.clearanceAhead = clearanceAhead
-            perception.clearancePlus = clearancePlus
-            perception.clearanceMinus = clearanceMinus
+        perception.clearanceAhead = clearanceAhead
+        perception.clearancePlus = clearancePlus
+        perception.clearanceMinus = clearanceMinus
 
-            if let detection = latestDetection {
-                perception.nearestObjectClass = objectClass(for: detection.name)
-                perception.nearestObjectDistance = detection.distance
-                perception.nearestObjectPickupable = detection.pickupable
-                perception.nearestObjectMovable = isMovableName(detection.name)
-                perception.nearestObjectName = detection.name
-            }
-
-            if let target = pushTargetNode,
-               target.parent != nil,
-               let character = characterNode {
-                let c = character.presentation.worldPosition
-                let n = target.presentation.worldPosition
-                let dx = Float(n.x - c.x)
-                let dz = Float(n.z - c.z)
-                let distance = sqrt(dx * dx + dz * dz)
-
-                if distance.isFinite && distance <= 2.3 {
-                    perception.nearestObjectClass = "movable"
-                    perception.nearestObjectDistance = distance
-                    perception.nearestObjectPickupable = pickupTarget(for: target) != nil
-                    perception.nearestObjectMovable = true
-                    perception.nearestObjectName = target.name ?? "MovableBlock"
-                }
-            }
-
-            let distant = visibleObjects.filter { $0.distance >= 3.0 }
-            perception.distantObjectSummary = distant.isEmpty ? "" : DetectedObjectInfo.summary(of: distant, limit: 3)
-
-            perception.routeRelativeHeadings = executive.field
-                .routePreview(maxCells: 8)
-                .map { wrappedAngle($0 - heading) }
-
-            let goalValues = executive.learner.values(for: goalStateKey(terrain: terrain))
-            let objectValues = latestDetection.map {
-                executive.learner.values(for: objectStateKey(for: $0, terrain: terrain))
-            } ?? [:]
-
-            var advisory: [FrankensteinAction: Float] = [:]
-            for action in FrankensteinAction.allCases {
-                let name = String(describing: action)
-                let goalVal = goalValues[name] ?? 0
-                let objVal = objectValues[name] ?? 0
-                advisory[action] = 0.35 * goalVal + 0.20 * objVal
-            }
-
-            if allowedActions.contains(.liftObject), canLiftNow {
-                advisory[.liftObject, default: 0] += 5.0
-                advisory[.jump, default: 0] -= 5.0
-            }
-
-            if let target = pushTargetNode,
-               target.parent != nil,
-               let character = characterNode {
-                let c = character.presentation.worldPosition
-                let n = target.presentation.worldPosition
-                let dx = Float(n.x - c.x)
-                let dz = Float(n.z - c.z)
-                let distance = sqrt(dx * dx + dz * dz)
-                let forward = forwardVector()
-                let ahead = dx * forward.x + dz * forward.z
-                let sideways = abs(dx * forward.z - dz * forward.x)
-                let alignment = distance > 0.001 ? ahead / distance : 0
-
-                let routeBlocked =
-                    clearanceAhead < 1.0 ||
-                    terrain.terrain == .hurdle ||
-                    terrain.terrain == .raisedStep ||
-                    (pathSteering?.isDetouring ?? false)
-
-                if distance.isFinite,
-                   distance <= 1.0,
-                   ahead > 0.05,
-                   alignment > 0.7,
-                   (routeBlocked || stuckSeconds > stuckThreshold) {
-                    advisory[.pushObject, default: 0] += 7.0
-                    advisory[.jump, default: 0] -= 1.0
-                } else {
-                    advisory[.pushObject, default: 0] -= 1.0
-                }
-            }
-
-            if let detection = latestDetection,
-               detection.distance <= 2.5,
-               (detection.name.lowercased().contains("recharge") ||
-                detection.name.lowercased().contains("platform")) {
-                advisory[.jump, default: 0] += 4.0
-                advisory[.walk, default: 0] -= 1.0
-            }
-
-            if let target = pushTargetNode, target.parent != nil {
-                perception.subGoal = "Approach and interact with movable block"
-            } else if let detection = latestDetection, detection.distance < 3.0 {
-                perception.subGoal = "Approach \(detection.name)"
-            } else {
-                perception.subGoal = ""
-            }
-
-            perception.advisoryValues = advisory
-            perception.stateKey = [
-                String(describing: terrain.terrain),
-                headingBand(perception.headingError),
-                clearanceBand(clearanceAhead),
-                perception.nearestObjectClass,
-                perception.nearestObjectDistance.isFinite ? distanceBand(perception.nearestObjectDistance) : "none",
-                carriedNode != nil ? "carrying" : "empty"
-            ].joined(separator: "|")
-
-            perception.timestamp = time
-            ca.receivePerception(perception)
+        if let detection = latestDetection {
+            perception.nearestObjectClass = objectClass(for: detection.name)
+            perception.nearestObjectDistance = detection.distance
+            perception.nearestObjectPickupable = detection.pickupable
+            perception.nearestObjectMovable = isMovableName(detection.name)
+            perception.nearestObjectName = detection.name
         }
+
+        if let target = pushTargetNode,
+           target.parent != nil,
+           let character = characterNode {
+            let c = character.presentation.worldPosition
+            let n = target.presentation.worldPosition
+            let dx = Float(n.x - c.x)
+            let dz = Float(n.z - c.z)
+            let distance = sqrt(dx * dx + dz * dz)
+
+            if distance.isFinite && distance <= 2.3 {
+                perception.nearestObjectClass = "movable"
+                perception.nearestObjectDistance = distance
+                perception.nearestObjectPickupable = pickupTarget(for: target) != nil
+                perception.nearestObjectMovable = true
+                perception.nearestObjectName = target.name ?? "MovableBlock"
+            }
+        }
+
+        let distant = visibleObjects.filter { $0.distance >= 3.0 }
+        perception.distantObjectSummary = distant.isEmpty ? "" : DetectedObjectInfo.summary(of: distant, limit: 3)
+
+        perception.routeRelativeHeadings = executive.field
+            .routePreview(maxCells: 8)
+            .map { wrappedAngle($0 - heading) }
+
+        let goalValues = executive.learner.values(for: goalStateKey(terrain: terrain))
+        let objectValues = latestDetection.map {
+            executive.learner.values(for: objectStateKey(for: $0, terrain: terrain))
+        } ?? [:]
+
+        var advisory: [FrankensteinAction: Float] = [:]
+        for action in FrankensteinAction.allCases {
+            let name = String(describing: action)
+            let goalVal = goalValues[name] ?? 0
+            let objVal = objectValues[name] ?? 0
+            advisory[action] = 0.35 * goalVal + 0.20 * objVal
+        }
+
+        if allowedActions.contains(.liftObject), canLiftNow {
+            advisory[.liftObject, default: 0] += 5.0
+            advisory[.jump, default: 0] -= 5.0
+        }
+
+        if let target = pushTargetNode,
+           target.parent != nil,
+           let character = characterNode {
+            let c = character.presentation.worldPosition
+            let n = target.presentation.worldPosition
+            let dx = Float(n.x - c.x)
+            let dz = Float(n.z - c.z)
+            let distance = sqrt(dx * dx + dz * dz)
+            let forward = forwardVector()
+            let ahead = dx * forward.x + dz * forward.z
+            let sideways = abs(dx * forward.z - dz * forward.x)
+            let alignment = distance > 0.001 ? ahead / distance : 0
+
+            let routeBlocked =
+                clearanceAhead < 1.0 ||
+                terrain.terrain == .hurdle ||
+                terrain.terrain == .raisedStep ||
+                (pathSteering?.isDetouring ?? false)
+
+            if distance.isFinite,
+               distance <= 1.0,
+               ahead > 0.05,
+               alignment > 0.7,
+               (routeBlocked || stuckSeconds > stuckThreshold) {
+                advisory[.pushObject, default: 0] += 7.0
+                advisory[.jump, default: 0] -= 1.0
+            } else {
+                advisory[.pushObject, default: 0] -= 1.0
+            }
+        }
+
+        if let detection = latestDetection,
+           detection.distance <= 2.5,
+           (detection.name.lowercased().contains("recharge") ||
+            detection.name.lowercased().contains("platform")) {
+            advisory[.jump, default: 0] += 4.0
+            advisory[.walk, default: 0] -= 1.0
+        }
+
+        if let target = pushTargetNode, target.parent != nil {
+            perception.subGoal = "Approach and interact with movable block"
+        } else if let detection = latestDetection, detection.distance < 3.0 {
+            perception.subGoal = "Approach \(detection.name)"
+        } else {
+            perception.subGoal = ""
+        }
+
+        perception.advisoryValues = advisory
+        perception.stateKey = [
+            String(describing: terrain.terrain),
+            headingBand(perception.headingError),
+            clearanceBand(clearanceAhead),
+            perception.nearestObjectClass,
+            perception.nearestObjectDistance.isFinite ? distanceBand(perception.nearestObjectDistance) : "none",
+            carriedNode != nil ? "carrying" : "empty"
+        ].joined(separator: "|")
+
+        perception.timestamp = time
+        ca.receivePerception(perception)
+    }
 
     private func addLetterPlaceholders(to scene: SCNScene) {
         let targetWord = Array("FRANKENSTEIN")
@@ -1439,7 +1443,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             let node = SCNNode(geometry: box)
             node.name = slotName
             
-            // Shifted to the left corner (adjust -5.0 to fit your exact left wall/corner boundary)
             let xOffset = -5.0 + Float(index) * 0.52
             
             node.position = SCNVector3(xOffset, 0.05, -2.5)
@@ -1465,6 +1468,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             node.addChildNode(textNode)
         }
     }
+
     private func setupPowerMeter(on character: SCNNode) {
         powerMeterNode?.removeFromParentNode()
         
@@ -1490,65 +1494,65 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private func makeAdvisoryActionValues(
-            baseValues: [FrankensteinAction: Float],
-            allowedActions: [FrankensteinAction]
-        ) -> [FrankensteinAction: Float] {
-            var merged = baseValues
+        baseValues: [FrankensteinAction: Float],
+        allowedActions: [FrankensteinAction]
+    ) -> [FrankensteinAction: Float] {
+        var merged = baseValues
 
-            let goalKey = goalStateKey(terrain: latestTerrainSample)
-            let goalValues = executive.learner.values(for: goalKey)
+        let goalKey = goalStateKey(terrain: latestTerrainSample)
+        let goalValues = executive.learner.values(for: goalKey)
 
-            let objectKey = latestDetection.map {
-                objectStateKey(for: $0, terrain: latestTerrainSample)
-            }
-
-            let objectValues = objectKey.map {
-                executive.learner.values(for: $0)
-            } ?? [:]
-
-            for action in allowedActions {
-                let actionName = String(describing: action)
-                let goalValue = goalValues[actionName] ?? 0
-                let objectValue = objectValues[actionName] ?? 0
-
-                merged[action, default: 0] +=
-                    0.35 * goalValue +
-                    0.20 * objectValue
-            }
-
-            if allowedActions.contains(.liftObject), canLiftNow {
-                merged[.liftObject, default: 0] += 5.0
-                merged[.jump, default: 0] -= 5.0
-            }
-
-            if let target = pushTargetNode,
-               target.parent != nil,
-               allowedActions.contains(.pushObject),
-               let character = characterNode {
-                let c = character.presentation.worldPosition
-                let n = target.presentation.worldPosition
-                let dx = Float(n.x - c.x)
-                let dz = Float(n.z - c.z)
-                let distance = sqrt(dx * dx + dz * dz)
-                let forward = forwardVector()
-                let ahead = dx * forward.x + dz * forward.z
-                let sideways = abs(dx * forward.z - dz * forward.x)
-                let alignment = distance > 0.001 ? ahead / distance : 0
-                let routeBlocked = clearanceAhead < 1.0 ||
-                    latestTerrainSample.terrain == .hurdle ||
-                    latestTerrainSample.terrain == .raisedStep ||
-                    (pathSteering?.isDetouring ?? false)
-                if distance.isFinite, distance <= 1.0,
-                   ahead > 0.05, alignment > 0.7,
-                   (routeBlocked || stuckSeconds > stuckThreshold) {
-                    merged[.pushObject, default: 0] += 7.0
-                } else {
-                    merged[.pushObject, default: 0] -= 1.0
-                }
-            }
-
-            return merged
+        let objectKey = latestDetection.map {
+            objectStateKey(for: $0, terrain: latestTerrainSample)
         }
+
+        let objectValues = objectKey.map {
+            executive.learner.values(for: $0)
+        } ?? [:]
+
+        for action in allowedActions {
+            let actionName = String(describing: action)
+            let goalValue = goalValues[actionName] ?? 0
+            let objectValue = objectValues[actionName] ?? 0
+
+            merged[action, default: 0] +=
+                0.35 * goalValue +
+                0.20 * objectValue
+        }
+
+        if allowedActions.contains(.liftObject), canLiftNow {
+            merged[.liftObject, default: 0] += 5.0
+            merged[.jump, default: 0] -= 5.0
+        }
+
+        if let target = pushTargetNode,
+           target.parent != nil,
+           allowedActions.contains(.pushObject),
+           let character = characterNode {
+            let c = character.presentation.worldPosition
+            let n = target.presentation.worldPosition
+            let dx = Float(n.x - c.x)
+            let dz = Float(n.z - c.z)
+            let distance = sqrt(dx * dx + dz * dz)
+            let forward = forwardVector()
+            let ahead = dx * forward.x + dz * forward.z
+            let sideways = abs(dx * forward.z - dz * forward.x)
+            let alignment = distance > 0.001 ? ahead / distance : 0
+            let routeBlocked = clearanceAhead < 1.0 ||
+                latestTerrainSample.terrain == .hurdle ||
+                latestTerrainSample.terrain == .raisedStep ||
+                (pathSteering?.isDetouring ?? false)
+            if distance.isFinite, distance <= 1.0,
+               ahead > 0.05, alignment > 0.7,
+               (routeBlocked || stuckSeconds > stuckThreshold) {
+                merged[.pushObject, default: 0] += 7.0
+            } else {
+                merged[.pushObject, default: 0] -= 1.0
+            }
+        }
+
+        return merged
+    }
 
     private func findPushTargetNode(
         character: SCNNode,
@@ -2453,9 +2457,13 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 if !hasReportedRecharge {
                     locomotion.reportRecharge()
                     hasReportedRecharge = true
+                    setRechargeStationFlashing(true)
                     reinforceOutcome(stateKey: goalStateKey(terrain: latestTerrainSample), action: output.action, reward: 2.0)
                 }
             } else {
+                if hasReportedRecharge {
+                    setRechargeStationFlashing(false)
+                }
                 hasReportedRecharge = false
             }
         }
@@ -2956,7 +2964,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         let pathText = pathGoalDistance.isFinite ? String(format: "%.2f", Double(pathGoalDistance)) : "n/a"
         let stats = """
         Action: \(action)
-        Power: \(Int(powerLevel))%
+        Power: \(Int(energyManager.powerLevel))%
         Terrain: \(terrain)
         Distance ahead: \(String(format: "%.2f", Double(latestTerrainSample.distance))) m
         Visible objects: \(visibleObjects.count)

@@ -19,48 +19,52 @@ struct FrankensteinSceneView: UIViewRepresentable {
 
     // MARK: - Coordinator
 
-    func makeCoordinator() -> Coordinator {
-        let placeholderScene = SCNScene()
-        let placeholderCharacter = Self.makeFrankensteinCharacter()
-        let locomotion = FrankensteinLocomotion()
+    // MARK: - Coordinator
 
-        let coordinator = Coordinator(
-            scene: placeholderScene,
-            characterNode: placeholderCharacter,
-            locomotion: locomotion
-        )
+        func makeCoordinator() -> Coordinator {
+            let placeholderScene = SCNScene()
+            let placeholderCharacter = Self.makeFrankensteinCharacter()
+            let locomotion = FrankensteinLocomotion()
+            let energyManager = FrankensteinEnergyManager()
 
-        coordinator.onStats = { stats in
-            print("[Frankenstein Stats]\n\(stats)")
-        }
+            let coordinator = Coordinator(
+                scene: placeholderScene,
+                characterNode: placeholderCharacter,
+                locomotion: locomotion,
+                energyManager: energyManager
+            )
 
-        coordinator.onDebugInfo = { message in
-            print("[Frankenstein Debug] \(message)")
-        }
-
-        coordinator.onDetectedObject = { object in
-            if let object = object {
-                let dimensions = object.dimensions
-                let distance = object.distance
-
-                print(
-                    """
-                    [Detected Object]
-                    Name: \(object.name)
-                    Dimensions: \(dimensions)
-                    Distance: \(distance)
-                    Pickupable: \(object.pickupable)
-                    """
-                )
+            coordinator.onStats = { (stats: String) in
+                print("[Frankenstein Stats]\n\(stats)")
             }
-        }
 
-        coordinator.onActionChanged = { action in
-            print("[Frankenstein Action] \(action)")
-        }
+            coordinator.onDebugInfo = { (message: String) in
+                print("[Frankenstein Debug] \(message)")
+            }
 
-        return coordinator
-    }
+            coordinator.onDetectedObject = { (object: DetectedObjectInfo?) in
+                if let object = object {
+                    let dimensions = object.dimensions
+                    let distance = object.distance
+
+                    print(
+                        """
+                        [Detected Object]
+                        Name: \(object.name)
+                        Dimensions: \(dimensions)
+                        Distance: \(distance)
+                        Pickupable: \(object.pickupable)
+                        """
+                    )
+                }
+            }
+
+            coordinator.onActionChanged = { (action: String) in
+                print("[Frankenstein Action] \(action)")
+            }
+
+            return coordinator
+        }
 
     // MARK: - Create Scene View
 

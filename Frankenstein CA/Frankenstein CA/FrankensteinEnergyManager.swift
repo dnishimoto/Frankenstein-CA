@@ -28,18 +28,18 @@ final class FrankensteinEnergyManager: ObservableObject {
     
     func consumeEnergy(for action: FrankensteinAction, dt: Float) {
         guard !isRecharging else { return }
-        
+         
         let costPerSecond: Float
         switch action {
-        case .run: costPerSecond = 0.6
-        case .jump, .pushObject, .liftObject, .throwObject: costPerSecond = 0.85
-        case .walk, .stepUp, .stepDown: costPerSecond = 0.25
-        case .crouch, .crawl, .roll: costPerSecond = 0.35
-        case .turnLeft, .turnRight, .stepForward, .backward: costPerSecond = 0.1
-        case .recover: costPerSecond = 0.05
-        case .placeObject: costPerSecond = 0.2
+        case .run: costPerSecond = 0.6 / 100.0
+        case .jump, .pushObject, .liftObject, .throwObject: costPerSecond = 0.85 / 100.0
+        case .walk, .stepUp, .stepDown: costPerSecond = 0.25 / 100.0
+        case .crouch, .crawl, .roll: costPerSecond = 0.35 / 100.0
+        case .turnLeft, .turnRight, .stepForward, .backward: costPerSecond = 0.1 / 100.0
+        case .recover: costPerSecond = 0.05 / 100.0
+        case .placeObject: costPerSecond = 0.2 / 100.0
         }
-        
+         
         powerLevel = max(0.0, powerLevel - (costPerSecond * dt))
     }
     
