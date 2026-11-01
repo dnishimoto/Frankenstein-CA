@@ -815,16 +815,56 @@ final class FrankensteinCA: ObservableObject {
         return goalProgressGain * tanhf(stat.mean / 0.6)
     }
 
+    /// Within this distance (m) of an obstruction the plan clears it.
+    private let obstructionReach: Float = 1.4
+    /// How far above the best rollout the clearing action is valued.
+    private let obstructionPlanBonus: Float = 3.0
+
+    /// An obstruction (the table, a letterless block) on the route becomes a
+    /// planned action: the plan walks up to it, then kicks it out of the way
+    /// (or lifts a block), then carries on to the goal.
+    private func applyObstructionToPlan(
+        _ plan: inout [FrankensteinAction: Float],
+        allowed: [FrankensteinAction],
+        perception p: FrankensteinCAPerception
+    ) {
+        // Blocked (walking but not displacing): clearing it comes first and
+        // is attempted from further away.
+        let reach = p.obstructionBlocked ? obstructionReach + 0.4 : obstructionReach
+        guard let action = p.obstructionAction,
+              p.obstructionDistance <= reach,
+              allowed.contains(action) else { return }
+
+        let top = plan.values.max() ?? 0
+        plan[action] = top + (p.obstructionBlocked ? 2 * obstructionPlanBonus : obstructionPlanBonus)
+        plannedSequence = [action] + plannedSequence.filter { $0 != action }
+    }
+
     private func updatePlanBuffer(
         plan: [FrankensteinAction: Float],
-        allowed: [FrankensteinAction]
+        allowed: [FrankensteinAction],
+        perception p: FrankensteinCAPerception?
     ) {
         if let change = pendingGoalChange {
             planBuffer.invalidate(reason: change)
             pendingGoalChange = nil
         }
 
-        let fresh = plannedSequence.map { PlanStep(action: $0, description: "\($0)") }
+        let fresh: [PlanStep] = plannedSequence.map { action in
+            guard let p, !p.obstructionName.isEmpty else {
+                return PlanStep(action: action, description: "\(action)")
+            }
+            if action == p.obstructionAction {
+                return PlanStep(
+                    action: action,
+                    description: "\(action): clear \(p.obstructionName) out of the path"
+                )
+            }
+            return PlanStep(
+                action: action,
+                description: "\(action): toward \(p.obstructionName) (in the way)"
+            )
+        }
 
         var headRegret: Float = 0
         if let head = planBuffer.currentStep,
@@ -867,7 +907,7 @@ final class FrankensteinCA: ObservableObject {
             plan = [:]
         }
 
-        updatePlanBuffer(plan: plan, allowed: allowedActions)
+        updatePlanBuffer(plan: plan, allowed: allowedActions, perception: p)
 
         var best = allowedActions[0]
         var bestParts = scoreParts(for: best, perception: p, terrain: terrain, plan: plan)
@@ -966,10 +1006,10 @@ final class FrankensteinCA: ObservableObject {
         case .placeObject: return (2, 4)
         case .throwObject: return (2, 12)
         case .pushObject:  return (14, 10)
+        case .kickObject:  return (10, 10) // Fixed: Added grid coordinates for kickObject
         default:           return nil
         }
     }
-
     private func countLiveNeighbors(x: Int, y: Int) -> Int {
         var count = 0
         for dy in -1...1 {

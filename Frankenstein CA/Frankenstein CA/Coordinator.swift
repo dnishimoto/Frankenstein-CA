@@ -1879,9 +1879,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private func updatePlanSpline(character: SCNNode, time: TimeInterval) {
-        // Destination: the station while recharging, else the letter slot.
-        let destinationNode = needsRecharge ? rechargeStationNode : letterSlotTarget
-        guard let station = destinationNode else {
+        // 1. Target goalNode directly so spline routing matches the planner's dynamic target
+        guard let destinationNode = goalNode else {
             planSpline.update(
                 time: time,
                 character: character.presentation.worldPosition,
@@ -1890,13 +1889,14 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             )
             return
         }
+
         let queue = ca?.planBuffer.pendingActions ?? []
         let planMovesObject = queue.contains(.pushObject) ||
             queue.contains(.liftObject) ||
             queue.contains(.placeObject)
         var objectPosition: SCNVector3?
+
         if !needsRecharge {
-            // The block that goes into the slot (not while it is carried).
             if !carryingLetterBlock, let block = letterBlockTarget, block.parent != nil {
                 objectPosition = block.presentation.worldPosition
             }
@@ -1908,11 +1908,12 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 .min(by: { $0.distance < $1.distance })?
                 .worldPosition
         }
+
         planSpline.update(
             time: time,
             character: character.presentation.worldPosition,
             object: objectPosition,
-            destination: station.presentation.worldPosition
+            destination: destinationNode.presentation.worldPosition
         )
     }
 
@@ -3347,8 +3348,14 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         var current: SCNNode? = node
         while let candidate = current {
             let name = candidate.name?.lowercased() ?? ""
+
+            // Explicitly forbid picking up tables
+            if name.contains("table") {
+                return nil
+            }
+
             if name.contains("pickup") || name.contains("movable") || name.contains("carryable") ||
-               name.contains("crate") || name.contains("box") || name.contains("letterblock") || name == "table" {
+               name.contains("crate") || name.contains("box") || name.contains("letterblock") {
                 return candidate
             }
             current = candidate.parent
