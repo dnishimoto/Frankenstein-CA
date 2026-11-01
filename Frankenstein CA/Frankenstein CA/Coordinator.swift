@@ -5,6 +5,7 @@ import SwiftUI
 import UIKit
 
 final class Coordinator: NSObject, SCNSceneRendererDelegate {
+    private var lastSplineIndex: Int = 0
     let energyManager: FrankensteinEnergyManager
     private weak var powerMeterNode: SCNNode?
     private var currentFrameTime: TimeInterval = 0
@@ -1431,67 +1432,74 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         ca.receivePerception(perception)
     }
     private func addLetterBlocks(to scene: SCNScene) {
-            let targetWord = Array("FRANKENSTEIN")
-            let blockSize: CGFloat = 0.45
+        let targetWord = Array("FRANKENSTEIN")
+        let blockSize: CGFloat = 0.45
 
-            scene.rootNode.childNodes { node, _ in
-                return node.name?.hasPrefix("LetterBlock_") == true
-            }.forEach { $0.removeFromParentNode() }
+        scene.rootNode.childNodes { node, _ in
+            return node.name?.hasPrefix("LetterBlock_") == true
+        }.forEach { $0.removeFromParentNode() }
 
-            for (index, letter) in targetWord.enumerated() {
-                let blockName = "LetterBlock_\(letter)_\(index)"
-                let box = SCNBox(width: blockSize, height: blockSize, length: blockSize, chamferRadius: 0.02)
-                let material = SCNMaterial()
-                material.diffuse.contents = (index == 0) ? UIColor.systemOrange : UIColor.systemYellow
-                box.materials = [material]
+        for (index, letter) in targetWord.enumerated() {
+            let blockName = "LetterBlock_\(letter)_\(index)"
+            let box = SCNBox(width: blockSize, height: blockSize, length: blockSize, chamferRadius: 0.02)
+            
+            let material = SCNMaterial()
+            // Updated to solid brown color matching the movable block course
+            material.diffuse.contents = UIColor(
+                red: 0.55,
+                green: 0.35,
+                blue: 0.20,
+                alpha: 1.0
+            )
+            material.specular.contents = UIColor(white: 0.15, alpha: 1.0)
+            box.materials = [material]
 
-                let node = SCNNode(geometry: box)
-                node.name = blockName
+            let node = SCNNode(geometry: box)
+            node.name = blockName
 
-                let xPos = -4.0 + Float(index % 6) * 0.8
-                let zPos = 2.0 + Float(index / 6) * 0.8
-                node.position = SCNVector3(xPos, 0.3, zPos)
+            let xPos = -4.0 + Float(index % 6) * 0.8
+            let zPos = 2.0 + Float(index / 6) * 0.8
+            node.position = SCNVector3(xPos, 0.3, zPos)
 
-                // Fully dynamic physics body so Frankenstein can push, lift, and throw them
-                let shape = SCNPhysicsShape(geometry: box, options: nil)
-                let body = SCNPhysicsBody(type: .dynamic, shape: shape)
-                body.mass = 1.0
-                body.friction = 0.8
-                body.rollingFriction = 0.5
-                body.restitution = 0.1
-                body.damping = 0.1
-                body.angularDamping = 0.2
-                body.allowsResting = false
-                node.physicsBody = body
+            // Fully dynamic physics body so Frankenstein can push, lift, and throw them
+            let shape = SCNPhysicsShape(geometry: box, options: nil)
+            let body = SCNPhysicsBody(type: .dynamic, shape: shape)
+            body.mass = 1.0
+            body.friction = 0.8
+            body.rollingFriction = 0.5
+            body.restitution = 0.1
+            body.damping = 0.1
+            body.angularDamping = 0.2
+            body.allowsResting = false
+            node.physicsBody = body
 
-                scene.rootNode.addChildNode(node)
+            scene.rootNode.addChildNode(node)
 
-                // High-contrast floating text label
-                let floatingTextGeometry = SCNText(string: String(letter), extrusionDepth: 0.03)
-                floatingTextGeometry.font = UIFont.systemFont(ofSize: 2.2, weight: .black)
-                
-                let floatingMaterial = SCNMaterial()
-                floatingMaterial.diffuse.contents = UIColor.systemCyan
-                floatingMaterial.emission.contents = UIColor.systemBlue.withAlphaComponent(0.4)
-                floatingMaterial.isDoubleSided = true
-                floatingTextGeometry.materials = [floatingMaterial]
+            // High-contrast floating text label
+            let floatingTextGeometry = SCNText(string: String(letter), extrusionDepth: 0.03)
+            floatingTextGeometry.font = UIFont.systemFont(ofSize: 2.2, weight: .black)
+            
+            let floatingMaterial = SCNMaterial()
+            floatingMaterial.diffuse.contents = UIColor.systemCyan
+            floatingMaterial.emission.contents = UIColor.systemBlue.withAlphaComponent(0.4)
+            floatingMaterial.isDoubleSided = true
+            floatingTextGeometry.materials = [floatingMaterial]
 
-                let floatingNode = SCNNode(geometry: floatingTextGeometry)
-                floatingNode.name = "FloatingLetter_\(letter)"
-                floatingNode.scale = SCNVector3(0.45, 0.45, 0.45)
-                
-                let (minBox, maxBox) = floatingTextGeometry.boundingBox
-                floatingNode.pivot = SCNMatrix4MakeTranslation((minBox.x + maxBox.x) * 0.5, minBox.y, 0)
-                floatingNode.position = SCNVector3(0, 0.75, 0)
+            let floatingNode = SCNNode(geometry: floatingTextGeometry)
+            floatingNode.name = "FloatingLetter_\(letter)"
+            floatingNode.scale = SCNVector3(0.45, 0.45, 0.45)
+            
+            let (minBox, maxBox) = floatingTextGeometry.boundingBox
+            floatingNode.pivot = SCNMatrix4MakeTranslation((minBox.x + maxBox.x) * 0.5, minBox.y, 0)
+            floatingNode.position = SCNVector3(0, 0.75, 0)
 
-                let billboard = SCNBillboardConstraint()
-                billboard.freeAxes = [.Y]
-                floatingNode.constraints = [billboard]
+            let billboard = SCNBillboardConstraint()
+            billboard.freeAxes = [.Y]
+            floatingNode.constraints = [billboard]
 
-                node.addChildNode(floatingNode)
-            }
+            node.addChildNode(floatingNode)
         }
-
+    }
       
     private func addLetterPlaceholders(to scene: SCNScene) {
         let targetWord = Array("FRANKENSTEIN")
@@ -2700,142 +2708,180 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         return value.isFinite ? value : 0
     }
 
-    private func applyMovement(
-        output: FrankensteinLocomotionOutput,
-        deltaTime dt: Float,
-        character: SCNNode,
-        scene: SCNScene
-    ) {
-        guard dt.isFinite, dt > 0 else { return }
-        heading = output.heading
-        let forward = forwardVector()
-        let baseSpeed: Float = (output.action == .pushObject) ? (pushTargetNode == nil ? 0 : max(0.45, output.speed)) : max(0, output.speed)
-        let direction = (output.action == .pushObject && output.moveDirection == 0) ? 1.0 : output.moveDirection
-        let speed = baseSpeed * direction
+        // MARK: - Spline Look-Ahead Point (Forward-Constrained Index Search)
+        private func splineLookAheadPoint(
+            from position: SCNVector3,
+            path: [SIMD2<Float>],
+            distance: Float = 0.8
+        ) -> SIMD2<Float>? {
+            guard path.count >= 2 else { return nil }
 
-        if output.liftRequested, locomotion.policy.pendingAction == .liftObject {
-            let stateKeyBeforePickup = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
-            let succeeded = attemptPickup()
-            locomotion.reportPickupOutcome(succeeded: succeeded)
-            if let stateKeyBeforePickup {
-                reinforceOutcome(stateKey: stateKeyBeforePickup, action: .liftObject, reward: succeeded ? 1.0 : -0.5)
+            let p = SIMD2<Float>(Float(position.x), Float(position.z))
+
+            // Search forward from lastSplineIndex within a local window to prevent snapping backwards
+            let searchWindow = 15
+            let startIdx = max(0, lastSplineIndex)
+            let endIdx = min(path.count - 1, lastSplineIndex + searchWindow)
+
+            var nearestIndex = startIdx
+            var nearestDistance = Float.greatestFiniteMagnitude
+
+            for i in startIdx...endIdx {
+                let d = simd_distance(p, path[i])
+                if d < nearestDistance {
+                    nearestDistance = d
+                    nearestIndex = i
+                }
             }
-        }
-        if output.placeRequested, locomotion.policy.pendingAction == .placeObject {
-            let stateKeyBeforePlace = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
-            let ok = placeCarriedObjectAhead()
-            locomotion.reportObjectActionOutcome(.placeObject, reward: ok ? 0.5 : -0.5)
-            if let stateKeyBeforePlace {
-                reinforceOutcome(stateKey: stateKeyBeforePlace, action: .placeObject, reward: ok ? 0.5 : -0.5)
+            
+            // Fallback full search if out of range
+            if nearestDistance > 2.0 {
+                for i in path.indices {
+                    let d = simd_distance(p, path[i])
+                    if d < nearestDistance {
+                        nearestDistance = d
+                        nearestIndex = i
+                    }
+                }
             }
-        }
-        if output.throwRequested, locomotion.policy.pendingAction == .throwObject {
-            let stateKeyBeforeThrow = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
-            let ok = throwCarriedObjectAhead()
-            locomotion.reportObjectActionOutcome(.throwObject, reward: ok ? 0.3 : -0.5)
-            if let stateKeyBeforeThrow {
-                reinforceOutcome(stateKey: stateKeyBeforeThrow, action: .throwObject, reward: ok ? 0.3 : -0.5)
+
+            lastSplineIndex = nearestIndex
+
+            var remaining = max(0, distance)
+            var current = path[nearestIndex]
+
+            for i in nearestIndex..<(path.count - 1) {
+                let next = path[i + 1]
+                let segment = next - current
+                let segmentLength = simd_length(segment)
+
+                if segmentLength <= 0.0001 {
+                    current = next
+                    continue
+                }
+
+                if remaining <= segmentLength {
+                    return current + segment / segmentLength * remaining
+                }
+
+                remaining -= segmentLength
+                current = next
             }
+
+            return path.last
         }
 
-        let oldWorld = character.presentation.worldPosition
-        var proposedWorld = SCNVector3(
-            oldWorld.x + forward.x * speed * dt,
-            oldWorld.y,
-            oldWorld.z + forward.z * speed * dt
-        )
-        let currentFeetY = Float(oldWorld.y) + characterFootOffset
-        verifiedLandingSupport = verifyLandingSite(proposedPosition: proposedWorld, currentFeetY: currentFeetY, in: scene)
+        // MARK: - Movement Application
+    // MARK: - Movement Application
+        private func applyMovement(
+            output: FrankensteinLocomotionOutput,
+            deltaTime dt: Float,
+            character: SCNNode,
+            scene: SCNScene
+        ) {
+            guard dt.isFinite, dt > 0 else { return }
 
-        if speed > 0, latestTerrainSample.terrain == .gap, !latestTerrainSample.isLandingAreaClear, !verifiedLandingSupport {
-            proposedWorld.x = oldWorld.x
-            proposedWorld.z = oldWorld.z
-        }
-        let isClimbing = locomotion.stepUpInProgress || output.action == .stepUp || output.action == .jump || output.action == .pushObject
-        let isBlockingObstacle = latestTerrainSample.terrain == .hurdle || latestTerrainSample.terrain == .raisedStep
-        if output.jump <= 0, speed > 0, !isClimbing, isBlockingObstacle, latestTerrainSample.distance < 0.5 {
-            proposedWorld.x = oldWorld.x
-            proposedWorld.z = oldWorld.z
-        }
+            let baseSpeed: Float =
+                output.action == .pushObject
+                ? (pushTargetNode == nil ? 0 : max(0.45, output.speed))
+                : max(0, output.speed)
 
-        if output.jump > 0 {
-            if jumpBaseY == nil {
-                jumpBaseY = Float(oldWorld.y)
-                characterVerticalVelocity = 0
+            let direction =
+                (output.action == .pushObject && output.moveDirection == 0)
+                ? 1.0
+                : output.moveDirection
+
+            let speed = baseSpeed * direction
+
+            if output.liftRequested, locomotion.policy.pendingAction == .liftObject {
+                let stateKeyBeforePickup = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
+                let succeeded = attemptPickup()
+                locomotion.reportPickupOutcome(succeeded: succeeded)
+                if let stateKeyBeforePickup {
+                    reinforceOutcome(stateKey: stateKeyBeforePickup, action: .liftObject, reward: succeeded ? 1.0 : -0.5)
+                }
             }
-            let baseY = jumpBaseY ?? Float(oldWorld.y)
-            let heightOffset = max(0, locomotion.body.height - standingHeight)
-            proposedWorld.y = baseY + heightOffset
-        } else {
-            jumpBaseY = nil
-            let oldFeetY = currentFeetY
-            let support = raycastSupport(
-                at: SCNVector3(proposedWorld.x, oldFeetY, proposedWorld.z),
-                in: scene,
-                riseAllowance: max(1.0, abs(characterVerticalVelocity * dt) + 0.5)
+            if output.placeRequested, locomotion.policy.pendingAction == .placeObject {
+                let stateKeyBeforePlace = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
+                let ok = placeCarriedObjectAhead()
+                locomotion.reportObjectActionOutcome(.placeObject, reward: ok ? 0.5 : -0.5)
+                if let stateKeyBeforePlace {
+                    reinforceOutcome(stateKey: stateKeyBeforePlace, action: .placeObject, reward: ok ? 0.5 : -0.5)
+                }
+            }
+            if output.throwRequested, locomotion.policy.pendingAction == .throwObject {
+                let stateKeyBeforeThrow = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
+                let ok = throwCarriedObjectAhead()
+                locomotion.reportObjectActionOutcome(.throwObject, reward: ok ? 0.3 : -0.5)
+                if let stateKeyBeforeThrow {
+                    reinforceOutcome(stateKey: stateKeyBeforeThrow, action: .throwObject, reward: ok ? 0.3 : -0.5)
+                }
+            }
+
+            let oldWorld = character.presentation.worldPosition
+
+            var proposedWorld = SCNVector3(
+                oldWorld.x,
+                oldWorld.y,
+                oldWorld.z
             )
-            characterVerticalVelocity -= worldGravity * dt
-            let fallingFeetY = oldFeetY + characterVerticalVelocity * dt
-            if let groundY = support, groundY.isFinite {
-                let feetAboveSupport = oldFeetY - groundY
-                let crossedSurface = oldFeetY >= groundY - 0.06 && fallingFeetY <= groundY
-                let standingOnSurface = feetAboveSupport >= -0.06 && feetAboveSupport <= 0.10 && characterVerticalVelocity <= 0.5
-                if standingOnSurface || crossedSurface {
-                    proposedWorld.y = groundY - characterFootOffset
-                    characterVerticalVelocity = 0
-                } else if oldFeetY < groundY {
-                    proposedWorld.y = groundY - characterFootOffset
-                    characterVerticalVelocity = 0
-                } else {
-                    proposedWorld.y = fallingFeetY - characterFootOffset
+
+            // Follow the cyan approach spline during ordinary navigation.
+            if output.action != .pushObject,
+               speed > 0,
+               let target = splineLookAheadPoint(
+                   from: oldWorld,
+                   path: planSpline.approachPath,
+                   distance: 0.8
+               ) {
+
+                let dx = target.x - Float(oldWorld.x)
+                let dz = target.y - Float(oldWorld.z)
+                let distanceToTarget = sqrt(dx * dx + dz * dz)
+
+                // Match SceneKit forwardVector() = (-sin(heading), 0, -cos(heading))
+                let desiredHeading = atan2(-dx, -dz)
+
+                var angleDifference = desiredHeading - heading
+
+                while angleDifference > Float.pi {
+                    angleDifference -= 2 * Float.pi
                 }
+
+                while angleDifference < -Float.pi {
+                    angleDifference += 2 * Float.pi
+                }
+
+                let turnRate: Float = 3.5
+                let maxTurn = turnRate * dt
+
+                heading += min(max(angleDifference, -maxTurn), maxTurn)
+
+                if distanceToTarget > 0.001 {
+                    let stepDist = min(distanceToTarget, speed * dt)
+                    proposedWorld.x += (dx / distanceToTarget) * stepDist
+                    proposedWorld.z += (dz / distanceToTarget) * stepDist
+                }
+
             } else {
-                proposedWorld.y = fallingFeetY - characterFootOffset
+                heading = output.heading
+                let forward = forwardVector()
+
+                proposedWorld.x += forward.x * speed * dt
+                proposedWorld.z += forward.z * speed * dt
             }
-        }
 
-        if let parent = character.parent {
-            character.position = parent.convertPosition(proposedWorld, from: nil)
-        } else {
-            character.position = proposedWorld
-        }
-        character.eulerAngles.y = heading
+            let currentFeetY = Float(oldWorld.y) + characterFootOffset
+            verifiedLandingSupport = verifyLandingSite(proposedPosition: proposedWorld, currentFeetY: currentFeetY, in: scene)
 
-        let finalFeetY = Float(character.presentation.worldPosition.y) + characterFootOffset
-        if finalFeetY < -3.0 && !hasReportedFall {
-            hasReportedFall = true
-            locomotion.completeEpisode(.fell)
-            executive.learner.clearTraces()
-            reinforceOutcome(stateKey: goalStateKey(terrain: latestTerrainSample), action: output.action, reward: -2.0)
-        } else if finalFeetY > -0.5 {
-            hasReportedFall = false
-        }
-
-        // Only register recharge if the station is active (power < 30%) and reached
-        if let station = effectiveRechargeStationNode {
-            let c = character.presentation.worldPosition
-            let size = worldDimensions(of: station)
-            let s = station.presentation.worldPosition
-            let topY = worldTopY(of: station)
-            let onTop =
-                abs(Float(c.x - s.x)) <= max(0.15, size.x * 0.5) &&
-                abs(Float(c.z - s.z)) <= max(0.15, size.z * 0.5) &&
-                abs(Float(c.y) + characterFootOffset - topY) <= 0.18
-            if onTop {
-                if !hasReportedRecharge {
-                    locomotion.reportRecharge()
-                    hasReportedRecharge = true
-                    setRechargeStationFlashing(true)
-                    reinforceOutcome(stateKey: goalStateKey(terrain: latestTerrainSample), action: output.action, reward: 2.0)
-                }
+            // Apply updated position to character node
+            if let parent = character.parent {
+                character.position = parent.convertPosition(proposedWorld, from: nil)
             } else {
-                if hasReportedRecharge {
-                    setRechargeStationFlashing(false)
-                }
-                hasReportedRecharge = false
+                character.position = proposedWorld
             }
+            character.eulerAngles.y = heading
         }
-    }
 
     private func evaluateActionOutcome(
         output: FrankensteinLocomotionOutput,

@@ -26,6 +26,10 @@ final class FrankensteinPlanSpline {
 
     var isVisible = true
 
+    // Expose path arrays for navigation steering
+    private(set) var approachPath: [SIMD2<Float>] = []
+    private(set) var deliveryPath: [SIMD2<Float>] = []
+
     private let rootName = "PlanSplineMarker"
     private weak var scene: SCNScene?
 
@@ -40,6 +44,56 @@ final class FrankensteinPlanSpline {
 
     private var lastKey = ""
     private var lastUpdate: TimeInterval = 0
+
+    // MARK: - Look-Ahead Navigation
+
+    func lookAheadPoint(
+        from position: SCNVector3,
+        path: [SIMD2<Float>],
+        distance: Float = 0.8
+    ) -> SIMD2<Float>? {
+        guard path.count >= 2 else { return nil }
+
+        let p = SIMD2<Float>(
+            Float(position.x),
+            Float(position.z)
+        )
+
+        var nearestIndex = 0
+        var nearestDistance = Float.greatestFiniteMagnitude
+
+        for i in path.indices {
+            let d = simd_distance(p, path[i])
+
+            if d < nearestDistance {
+                nearestDistance = d
+                nearestIndex = i
+            }
+        }
+
+        var remaining = max(0, distance)
+        var current = path[nearestIndex]
+
+        for i in nearestIndex..<(path.count - 1) {
+            let next = path[i + 1]
+            let segment = next - current
+            let segmentLength = simd_length(segment)
+
+            if segmentLength <= 0.0001 {
+                current = next
+                continue
+            }
+
+            if remaining <= segmentLength {
+                return current + segment / segmentLength * remaining
+            }
+
+            remaining -= segmentLength
+            current = next
+        }
+
+        return path.last
+    }
 
     // MARK: Setup
 
@@ -86,10 +140,6 @@ final class FrankensteinPlanSpline {
 
     // MARK: Update
 
-    /// - Parameters:
-    ///   - character: where Frankenstein is (x, z are used).
-    ///   - object: the object the plan wants to move, if any.
-    ///   - destination: where the plan wants it (or him) to end up.
     func update(
         time: TimeInterval,
         character: SCNVector3,
@@ -123,6 +173,8 @@ final class FrankensteinPlanSpline {
         guard let object else {
             // No object: one curve from Frankenstein to the destination.
             let curve = spline(through: [start, (start + end) * 0.5, end])
+            approachPath = curve
+            deliveryPath = []
             approachNode.geometry = lineGeometry(curve, color: .cyan)
             approachNode.isHidden = false
             deliveryNode.isHidden = true
@@ -132,15 +184,12 @@ final class FrankensteinPlanSpline {
 
         let obj = SIMD2<Float>(Float(object.x), Float(object.z))
 
-        // Push direction: from the object toward the destination.
         var pushDirection = end - obj
         let pushLength = simd_length(pushDirection)
         pushDirection = pushLength > 0.001 ? pushDirection / pushLength : SIMD2<Float>(0, -1)
 
-        // Stand behind the object, on the side away from the destination.
         let standPoint = obj - pushDirection * standOff
 
-        // Curve 1: Frankenstein -> stand-off point -> object.
         let toStand = standPoint - start
         let side = SIMD2<Float>(-toStand.y, toStand.x)
         let sideLength = simd_length(side)
@@ -149,9 +198,8 @@ final class FrankensteinPlanSpline {
         let approach = spline(
             through: [start, start + toStand * 0.5 + bow, standPoint, obj]
         )
+        approachPath = approach
 
-        // Curve 2: object -> destination, bowing slightly so the two curves
-        // read as separate legs.
         let across = end - obj
         let acrossSide = SIMD2<Float>(-across.y, across.x)
         let acrossSideLength = simd_length(acrossSide)
@@ -162,6 +210,7 @@ final class FrankensteinPlanSpline {
         let delivery = spline(
             through: [obj, obj + across * 0.5 + acrossBow, end]
         )
+        deliveryPath = delivery
 
         approachNode.geometry = lineGeometry(approach, color: .cyan)
         deliveryNode.geometry = lineGeometry(delivery, color: .orange)
@@ -173,6 +222,8 @@ final class FrankensteinPlanSpline {
     }
 
     private func hideAll() {
+        approachPath = []
+        deliveryPath = []
         approachNode.isHidden = true
         deliveryNode.isHidden = true
         targetRing.isHidden = true
@@ -182,8 +233,6 @@ final class FrankensteinPlanSpline {
 
     // MARK: Spline
 
-    /// Catmull-Rom spline through the points (the end points are repeated so
-    /// the curve starts and ends exactly on them).
     private func spline(through points: [SIMD2<Float>]) -> [SIMD2<Float>] {
         guard points.count >= 2 else { return points }
 
