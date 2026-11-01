@@ -59,7 +59,6 @@ struct ContentView: View {
                 planText: $planText,
                 qCells: $qCells
             )
-            LetterCubesPlacementPanel(placedLetters: energyManager.placedLetters)
             
             QNetworkGridPanel(cells: qCells)
 
@@ -86,14 +85,6 @@ struct ContentView: View {
                         .monospacedDigit()
                 }
 
-                Spacer()
-
-                VStack(alignment: .trailing, spacing: 4) {
-                    Label("Walking", systemImage: "figure.walk")
-                    Text("Obstacle navigation")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
             }
             .padding()
         }

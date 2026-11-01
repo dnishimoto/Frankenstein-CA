@@ -5,6 +5,7 @@ import SwiftUI
 import UIKit
 
 final class Coordinator: NSObject, SCNSceneRendererDelegate {
+    private var movableObjectNodes: [SCNNode] = []
     private var lastSplineIndex: Int = 0
     let energyManager: FrankensteinEnergyManager
     private weak var powerMeterNode: SCNNode?
@@ -102,35 +103,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         guard let carriedNode else { return false }
         return letter(ofBlock: carriedNode) != nil
     }
-
-    /// What the path field, spline and outcome reward aim at right now: the
-    /// recharge station when power is low, otherwise the letter mission's
-    /// block (to fetch) or slot (to fill).
-    private var goalNode: SCNNode? {
-            if needsRecharge { return rechargeStationNode }
-            if carryingDog { return nil }
-            if carriedNode == nil, let dog = dogTarget { return dog }
-            
-            // If a movable block is blocking his path and within pushing/clearing range, target it first!
-            if let pushBlock = pushTargetNode, pushBlock.parent != nil, carriedNode == nil {
-                let c = characterNode?.presentation.worldPosition ?? SCNVector3Zero
-                let p = pushBlock.presentation.worldPosition
-                let dx = Float(p.x - c.x)
-                let dz = Float(p.z - c.z)
-                if sqrt(dx * dx + dz * dz) <= 2.3 {
-                    return pushBlock
-                }
-            }
-            
-            guard let index = letterTargetIndex else { return nil }
-            
-            // Target the letter block directly until it is picked up
-            if carryingLetterBlock {
-                return letterSlotTarget
-            } else {
-                return letterBlockTarget
-            }
-        }
     // MARK: - Simulation
     private let locomotion: FrankensteinLocomotion
     private let qFloorGrid = FrankensteinQFloorGrid()
@@ -246,6 +218,214 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private let manipulationDistance: Float = 1.0
     private let minimumManipulationAlignment: Float = 0.7
 
+    /// What the path field, spline and outcome reward aim at right now: the
+    /// recharge station when power is low, otherwise the letter mission's
+    /// block (to fetch) or slot (to fill).
+    private var missionGoalNode: SCNNode? {
+        if needsRecharge {
+            return rechargeStationNode
+        }
+
+        if carryingDog {
+            return nil
+        }
+
+        if carriedNode == nil, let dog = dogTarget {
+            return dog
+        }
+
+        guard letterTargetIndex != nil else {
+            return nil
+        }
+
+        if carryingLetterBlock {
+            return letterSlotTarget
+        }
+
+        return letterBlockTarget
+    }
+
+    private var goalNode: SCNNode? {
+        // Recharge and active carrying operations retain priority.
+        if needsRecharge {
+            return rechargeStationNode
+        }
+
+        if carryingDog {
+            return nil
+        }
+
+        if carriedNode != nil {
+            return missionGoalNode
+        }
+
+        guard let missionGoal = missionGoalNode else {
+            return nil
+        }
+
+        // Find an object that should be manipulated before
+        // continuing toward the mission destination.
+        if let interactionTarget = bestInteractionTarget(
+            toward: missionGoal
+        ) {
+            return interactionTarget
+        }
+
+        return missionGoal
+    }
+    private func bestInteractionTarget(
+        toward missionGoal: SCNNode
+    ) -> SCNNode? {
+
+        guard
+            let character = characterNode,
+            carriedNode == nil
+        else {
+            return nil
+        }
+
+        let characterPosition = character.presentation.worldPosition
+        let goalPosition = missionGoal.presentation.worldPosition
+
+        let cx = Float(characterPosition.x)
+        let cz = Float(characterPosition.z)
+
+        let gx = Float(goalPosition.x)
+        let gz = Float(goalPosition.z)
+
+        let routeX = gx - cx
+        let routeZ = gz - cz
+
+        let routeLengthSquared =
+            routeX * routeX + routeZ * routeZ
+
+        guard routeLengthSquared > 0.01 else {
+            return nil
+        }
+
+        let routeLength = sqrt(routeLengthSquared)
+
+        let routeDirection = SIMD2<Float>(
+            routeX / routeLength,
+            routeZ / routeLength
+        )
+
+        var bestNode: SCNNode?
+        var bestScore: Float = 0.0
+
+        for node in movableObjectNodes {
+
+            guard
+                node.parent != nil,
+                node !== missionGoal,
+                node !== character
+            else {
+                continue
+            }
+
+            let position = node.presentation.worldPosition
+
+            let ox = Float(position.x)
+            let oz = Float(position.z)
+
+            let objectOffset = SIMD2<Float>(
+                ox - cx,
+                oz - cz
+            )
+
+            let objectDistance = simd_length(objectOffset)
+
+            // Do not consider objects that are too far away.
+            guard objectDistance < 5.0 else {
+                continue
+            }
+
+            // Position along the direct mission route.
+            let alongRoute = simd_dot(
+                objectOffset,
+                routeDirection
+            )
+
+            guard alongRoute > 0,
+                  alongRoute < routeLength else {
+                continue
+            }
+
+            // Distance from the object to the mission route.
+            let perpendicularVector =
+                objectOffset - routeDirection * alongRoute
+
+            let perpendicularDistance =
+                simd_length(perpendicularVector)
+
+            let (minBounds, maxBounds) = node.boundingBox
+
+            let width = Float(maxBounds.x - minBounds.x)
+            let height = Float(maxBounds.y - minBounds.y)
+            let depth = Float(maxBounds.z - minBounds.z)
+
+            let objectRadius = max(
+                0.25,
+                max(width, depth) * 0.5
+            )
+
+            // Estimate whether the object intersects the route.
+            let blocksRoute =
+                perpendicularDistance < objectRadius + 0.55
+
+            // Estimate whether the object could be a useful step.
+            let usefulStepHeight =
+                height >= 0.25 &&
+                height <= 1.0
+
+            let accessible =
+                objectDistance <= 3.0
+
+            guard blocksRoute || usefulStepHeight else {
+                continue
+            }
+
+            // Route obstruction score.
+            let obstructionScore: Float =
+                blocksRoute
+                ? max(0, 1.0 - perpendicularDistance /
+                    max(0.1, objectRadius + 0.55))
+                : 0
+
+            // Prefer objects that are close enough to interact with.
+            let accessibilityScore = max(
+                0,
+                1.0 - objectDistance / 5.0
+            )
+
+            // A useful stepping object receives a smaller bonus.
+            let stepScore: Float =
+                usefulStepHeight && accessible ? 0.25 : 0
+
+            // Penalize objects that require substantial travel.
+            let distancePenalty = objectDistance * 0.08
+
+            let score =
+                obstructionScore * 0.60 +
+                accessibilityScore * 0.25 +
+                stepScore -
+                distancePenalty
+
+            if score > bestScore {
+                bestScore = score
+                bestNode = node
+            }
+        }
+
+        // Do not interrupt the mission for an insignificant obstruction.
+        guard bestScore >= 0.35 else {
+            return nil
+        }
+
+        return bestNode
+    }
+    
+ 
     private func canManipulate(_ target: SCNNode, from character: SCNNode) -> Bool {
         guard target.parent != nil, target !== carriedNode,
               !isCharacterPart(target) else { return false }
@@ -2709,68 +2889,74 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
         // MARK: - Spline Look-Ahead Point (Forward-Constrained Index Search)
-        private func splineLookAheadPoint(
-            from position: SCNVector3,
-            path: [SIMD2<Float>],
-            distance: Float = 0.8
-        ) -> SIMD2<Float>? {
-            guard path.count >= 2 else { return nil }
+    private func splineLookAheadPoint(
+                from position: SCNVector3,
+                path: [SIMD2<Float>],
+                distance: Float = 0.8
+            ) -> SIMD2<Float>? {
+                guard path.count >= 2 else { return nil }
 
-            let p = SIMD2<Float>(Float(position.x), Float(position.z))
+                let p = SIMD2<Float>(Float(position.x), Float(position.z))
 
-            // Search forward from lastSplineIndex within a local window to prevent snapping backwards
-            let searchWindow = 15
-            let startIdx = max(0, lastSplineIndex)
-            let endIdx = min(path.count - 1, lastSplineIndex + searchWindow)
-
-            var nearestIndex = startIdx
-            var nearestDistance = Float.greatestFiniteMagnitude
-
-            for i in startIdx...endIdx {
-                let d = simd_distance(p, path[i])
-                if d < nearestDistance {
-                    nearestDistance = d
-                    nearestIndex = i
+                // Ensure lastSplineIndex is within valid bounds before using it
+                if lastSplineIndex < 0 || lastSplineIndex >= path.count {
+                    lastSplineIndex = 0
                 }
-            }
-            
-            // Fallback full search if out of range
-            if nearestDistance > 2.0 {
-                for i in path.indices {
+
+                // Search forward from lastSplineIndex within a local window to prevent snapping backwards
+                let searchWindow = 15
+                let startIdx = max(0, lastSplineIndex)
+                let endIdx = min(path.count - 1, lastSplineIndex + searchWindow)
+
+                var nearestIndex = startIdx
+                var nearestDistance = Float.greatestFiniteMagnitude
+
+                for i in startIdx...endIdx {
                     let d = simd_distance(p, path[i])
                     if d < nearestDistance {
                         nearestDistance = d
                         nearestIndex = i
                     }
                 }
-            }
+                
+                // Fallback full search if out of range
+                if nearestDistance > 2.0 {
+                    for i in path.indices {
+                        let d = simd_distance(p, path[i])
+                        if d < nearestDistance {
+                            nearestDistance = d
+                            nearestIndex = i
+                        }
+                    }
+                }
 
-            lastSplineIndex = nearestIndex
+                // Final safeguard clamp
+                nearestIndex = max(0, min(nearestIndex, path.count - 1))
+                lastSplineIndex = nearestIndex
 
-            var remaining = max(0, distance)
-            var current = path[nearestIndex]
+                var remaining = max(0, distance)
+                var current = path[nearestIndex]
 
-            for i in nearestIndex..<(path.count - 1) {
-                let next = path[i + 1]
-                let segment = next - current
-                let segmentLength = simd_length(segment)
+                for i in nearestIndex..<(path.count - 1) {
+                    let next = path[i + 1]
+                    let segment = next - current
+                    let segmentLength = simd_length(segment)
 
-                if segmentLength <= 0.0001 {
+                    if segmentLength <= 0.0001 {
+                        current = next
+                        continue
+                    }
+
+                    if remaining <= segmentLength {
+                        return current + segment / segmentLength * remaining
+                    }
+
+                    remaining -= segmentLength
                     current = next
-                    continue
                 }
 
-                if remaining <= segmentLength {
-                    return current + segment / segmentLength * remaining
-                }
-
-                remaining -= segmentLength
-                current = next
+                return path.last
             }
-
-            return path.last
-        }
-
         // MARK: - Movement Application
     // MARK: - Movement Application
         private func applyMovement(
