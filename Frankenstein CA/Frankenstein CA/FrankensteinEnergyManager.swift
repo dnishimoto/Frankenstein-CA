@@ -8,26 +8,6 @@
 import Foundation
 import Combine
 
-//
-//  File.swift
-//  Frankenstein CA
-//
-//  Created by David Nishimoto on 10/31/26.
-//
-
-import Foundation
-import Combine
-
-//
-//  FrankensteinEnergyManager.swift
-//  Frankenstein CA
-//
-//  Created by David Nishimoto on 10/31/26.
-//
-
-import Foundation
-import Combine
-
 final class FrankensteinEnergyManager: ObservableObject {
     @Published var powerLevel: Float = 100.0
     @Published var maxPower: Float = 100.0
@@ -69,3 +49,4 @@ final class FrankensteinEnergyManager: ObservableObject {
         placedLetters = Array(repeating: nil, count: 12)
     }
 }
+

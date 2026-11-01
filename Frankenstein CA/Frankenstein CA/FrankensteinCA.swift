@@ -363,45 +363,50 @@ final class FrankensteinCA: ObservableObject {
     }
 
     private func predictedGoalScore(
-        for action: FrankensteinAction,
-        perception p: FrankensteinCAPerception
-    ) -> Float {
-        var score: Float = 0
-        let alignment = max(0, cosf(p.headingError))
-        let objectName = p.nearestObjectName.lowercased()
-        
-        // If he sees a target letter block, make reaching/fetching it a top priority
-        let isTargetLetter = objectName.contains("letterblock") || objectName.contains("floatingletter")
-        
-        switch action {
-        case .pushObject:
-            if p.nearestObjectMovable, p.nearestObjectDistance <= 2.0 {
-                score += 6.0 // High priority to clear any obstructing blocks in front of the letters
-            } else {
-                score -= 0.5
+            for action: FrankensteinAction,
+            perception p: FrankensteinCAPerception
+        ) -> Float {
+            var score: Float = 0
+            let alignment = max(0, cosf(p.headingError))
+            let objectName = p.nearestObjectName.lowercased()
+            
+            let isTargetLetter = objectName.contains("letterblock") || objectName.contains("floatingletter")
+            
+            switch action {
+            case .pushObject:
+                // If there's a movable block ahead blocking his route, prioritize pushing it aggressively
+                if p.nearestObjectMovable, p.nearestObjectDistance <= 2.2 {
+                    score += 12.0
+                } else {
+                    score -= 0.5
+                }
+                
+            case .throwObject:
+                if p.nearestObjectMovable || objectName.contains("block") {
+                    score += 4.5
+                } else {
+                    score -= 0.2
+                }
+                
+            case .liftObject:
+                if p.nearestObjectPickupable && (isTargetLetter || p.nearestObjectDistance <= 1.25) {
+                    score += 8.0
+                }
+                
+            case .walk, .run:
+                // If a movable obstacle is directly ahead, penalize walking into it
+                if p.nearestObjectMovable && p.nearestObjectDistance <= 1.5 {
+                    score -= 4.0
+                } else {
+                    score += (isTargetLetter ? 1.5 : 0.4) * alignment
+                }
+                
+            default:
+                break
             }
-            
-        case .throwObject:
-            if p.nearestObjectMovable || objectName.contains("block") {
-                score += 4.5 // Throw obstacles out of the way if they block the path to the letters
-            } else {
-                score -= 0.2
-            }
-            
-        case .liftObject:
-            if p.nearestObjectPickupable && (isTargetLetter || p.nearestObjectDistance <= 1.25) {
-                score += 8.0 // Strongly favor picking up the letter block once reached
-            }
-            
-        case .walk, .run:
-            score += (isTargetLetter ? 1.5 : 0.4) * alignment
-            
-        default:
-            break
-        }
 
-        return score
-    }
+            return score
+        }
 
     private let planHorizon = 3
     private let planActionSeconds: Float = 0.35

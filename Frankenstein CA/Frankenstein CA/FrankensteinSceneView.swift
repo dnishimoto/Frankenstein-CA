@@ -13,6 +13,7 @@ struct FrankensteinSceneView: UIViewRepresentable {
     @Binding var seenText: String
     @Binding var planText: String
     @Binding var qCells: [FrankensteinQDisplayCell]
+    @Binding var animateSpeed: Double
 
     // Keep one CA instance for the lifetime of this view value.
     private let ca = FrankensteinCA()
@@ -33,7 +34,7 @@ struct FrankensteinSceneView: UIViewRepresentable {
                 locomotion: locomotion,
                 energyManager: energyManager
             )
-
+            
             coordinator.onStats = { (stats: String) in
                 print("[Frankenstein Stats]\n\(stats)")
             }
@@ -296,6 +297,9 @@ struct FrankensteinSceneView: UIViewRepresentable {
         liveCells = ca.liveCellCount
 
         context.coordinator.start()
+
+        // Note: Removed any usage of `animationSpeed` on SCNScene or SCNView here because it is not a valid property.
+        // TODO: If animation speed control is needed, consider applying it on SCNNode or SCNAnimationPlayer instances.
 
         return view
     }

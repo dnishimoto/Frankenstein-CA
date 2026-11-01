@@ -16,14 +16,15 @@ import SceneKit
 import UIKit
 
 struct ContentView: View {
-    @StateObject private var energyManager = FrankensteinEnergyManager() // Add this definition
+    @StateObject private var energyManager = FrankensteinEnergyManager()
     @State private var generation = 0
     @State private var liveCells = 0
     @State private var resetRequested = false
     @State private var seenText = "I have not looked around yet."
     @State private var planText = "I have not made a plan yet."
     @State private var qCells: [FrankensteinQDisplayCell] = []
- 
+    @State private var animationSpeed: Double = 1.0 // Added speed control state
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -57,12 +58,28 @@ struct ContentView: View {
                 resetRequested: $resetRequested,
                 seenText: $seenText,
                 planText: $planText,
-                qCells: $qCells
+                qCells: $qCells,
+                animateSpeed: $animationSpeed
             )
             
-            QNetworkGridPanel(cells: qCells)
+            //QNetworkGridPanel(cells: qCells)
 
             RobotMindPanel(seen: seenText, plan: planText)
+
+            // Animation Speed Slider Control Row
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Label("Animation Speed", systemImage: "speedometer")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(String(format: "%.1fx", animationSpeed))
+                        .font(.caption.bold().monospacedDigit())
+                }
+                Slider(value: $animationSpeed, in: 0.5...5.0, step: 0.25)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 4)
 
             HStack(spacing: 24) {
                 VStack {
@@ -84,7 +101,6 @@ struct ContentView: View {
                         .font(.title3.bold())
                         .monospacedDigit()
                 }
-
             }
             .padding()
         }
@@ -265,3 +281,4 @@ struct RobotMindPanel: View {
 #Preview {
     ContentView()
 }
+
