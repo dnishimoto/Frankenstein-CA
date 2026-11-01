@@ -1192,6 +1192,13 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                     continue
                 }
                 if hit.worldNormal.y > 0.85 { continue }
+                // The block he is fetching is the destination, not a wall:
+                // it must not shrink his clearance or penalise walking to it.
+                if !needsRecharge, carriedNode == nil,
+                   let fetch = letterBlockTarget,
+                   fetch === node || fetch === node.parent || fetch === meaningfulDetectionParent(for: node) {
+                    continue
+                }
                 let hx = Float(hit.worldCoordinates.x - origin.x)
                 let hz = Float(hit.worldCoordinates.z - origin.z)
                 let hitDistance = sqrt(hx * hx + hz * hz)
@@ -1278,8 +1285,22 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             perception.subGoal = "no letter block to place"
         }
 
-        let routedHeading = pathSteering?.heading ?? heading
-        perception.headingError = pathSteering == nil ? 0 : wrappedAngle(routedHeading - heading)
+        // If the path field has no route (no gradient from his cell), turn
+        // straight toward the goal rather than reporting "no error".
+        var routedHeading = pathSteering?.heading ?? heading
+        var hasHeadingTarget = pathSteering != nil
+        if pathSteering == nil, let node = goalNode, !carryingDog {
+            let known = knownPosition(of: node)
+            if let c = characterNode?.presentation.worldPosition {
+                let dx = known.x - Float(c.x)
+                let dz = known.z - Float(c.z)
+                if sqrt(dx * dx + dz * dz) > 0.35 {
+                    routedHeading = atan2(-dx, -dz)
+                    hasHeadingTarget = true
+                }
+            }
+        }
+        perception.headingError = hasHeadingTarget ? wrappedAngle(routedHeading - heading) : 0
         perception.pathDistance = pathGoalDistance
         perception.isDetouring = pathSteering?.isDetouring ?? false
         perception.goalProgressRate = goalProgressRate
@@ -1912,7 +1933,16 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         // before going back to the letters.
         dogTarget = nil
 
+        // Letters are the primary goal: the dog is only greeted when no
+        // loose letter block is left to fetch, so the path field, spline
+        // and plan all keep pointing at the same block.
+        let letterBlockRemains = letterWord.indices.contains { index in
+            energyManager.placedLetters[index] == nil &&
+                looseLetterBlocks(letterWord[index]).contains { $0.parent != nil }
+        }
+
         if carriedNode == nil,
+           !letterBlockRemains,
            currentFrameTime >= dogCooldownUntil,
            let dog = scene.rootNode.childNode(withName: dogName, recursively: true),
            dog.parent != nil {
