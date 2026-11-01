@@ -106,18 +106,30 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     /// recharge station when power is low, otherwise the letter mission's
     /// block (to fetch) or slot (to fill).
     private var goalNode: SCNNode? {
-        if needsRecharge { return rechargeStationNode }
-        if carryingDog { return nil }
-        if carriedNode == nil, let dog = dogTarget { return dog }
-        guard let index = letterTargetIndex else { return nil }
-        
-        // Target the letter block directly until it is picked up
-        if carryingLetterBlock {
-            return letterSlotTarget
-        } else {
-            return letterBlockTarget
+            if needsRecharge { return rechargeStationNode }
+            if carryingDog { return nil }
+            if carriedNode == nil, let dog = dogTarget { return dog }
+            
+            // If a movable block is blocking his path and within pushing/clearing range, target it first!
+            if let pushBlock = pushTargetNode, pushBlock.parent != nil, carriedNode == nil {
+                let c = characterNode?.presentation.worldPosition ?? SCNVector3Zero
+                let p = pushBlock.presentation.worldPosition
+                let dx = Float(p.x - c.x)
+                let dz = Float(p.z - c.z)
+                if sqrt(dx * dx + dz * dz) <= 2.3 {
+                    return pushBlock
+                }
+            }
+            
+            guard let index = letterTargetIndex else { return nil }
+            
+            // Target the letter block directly until it is picked up
+            if carryingLetterBlock {
+                return letterSlotTarget
+            } else {
+                return letterBlockTarget
+            }
         }
-    }
     // MARK: - Simulation
     private let locomotion: FrankensteinLocomotion
     private let qFloorGrid = FrankensteinQFloorGrid()
@@ -498,13 +510,14 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 chamferRadius: 0.035
             )
             let material = SCNMaterial()
+            // Updated to solid brown color as requested
             material.diffuse.contents = UIColor(
-                hue: CGFloat((placements.firstIndex(where: { $0.name == placement.name }) ?? 0)) / CGFloat(placements.count),
-                saturation: 0.55,
-                brightness: 0.82,
-                alpha: 1
+                red: 0.55,
+                green: 0.35,
+                blue: 0.20,
+                alpha: 1.0
             )
-            material.specular.contents = UIColor(white: 0.22, alpha: 1)
+            material.specular.contents = UIColor(white: 0.15, alpha: 1.0)
             box.materials = [material]
             let node = SCNNode(geometry: box)
             node.name = placement.name
@@ -1548,80 +1561,80 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private func makeAdvisoryActionValues(
-        baseValues: [FrankensteinAction: Float],
-        allowedActions: [FrankensteinAction]
-    ) -> [FrankensteinAction: Float] {
-        var merged = baseValues
-        let goalKey = goalStateKey(terrain: latestTerrainSample)
-        let goalValues = executive.learner.values(for: goalKey)
-        let objectKey = latestDetection.map {
-            objectStateKey(for: $0, terrain: latestTerrainSample)
-        }
-        let objectValues = objectKey.map {
-            executive.learner.values(for: $0)
-        } ?? [:]
-        for action in allowedActions {
-            let actionName = String(describing: action)
-            let goalValue = goalValues[actionName] ?? 0
-            let objectValue = objectValues[actionName] ?? 0
-            merged[action, default: 0] +=
-                0.35 * goalValue +
-                0.20 * objectValue
-        }
-        if allowedActions.contains(.liftObject), canLiftNow {
-            merged[.liftObject, default: 0] += 5.0
-            merged[.jump, default: 0] -= 5.0
-        }
-        // Letter mission: put the carried block down when its slot is in
-        // reach, and keep hold of it until then.
-        if carryingDog {
-            // Hold the dog long enough to get love, then put it down.
-            merged[.placeObject, default: 0] += dogHoldSeconds >= dogLoveSeconds ? 8.0 : -4.0
-            merged[.throwObject, default: 0] -= 6.0
-        }
-        if !needsRecharge,
-           carryingLetterBlock,
-           let character = characterNode,
-           let slot = letterSlotTarget {
-            let c = character.presentation.worldPosition
-            let t = slot.presentation.worldPosition
-            let dx = Float(t.x - c.x)
-            let dz = Float(t.z - c.z)
-            let distance = sqrt(dx * dx + dz * dz)
-            if distance <= letterPlaceReach {
-                merged[.placeObject, default: 0] += 8.0
-            } else {
-                merged[.placeObject, default: 0] -= 3.0
-                merged[.throwObject, default: 0] -= 3.0
+            baseValues: [FrankensteinAction: Float],
+            allowedActions: [FrankensteinAction]
+        ) -> [FrankensteinAction: Float] {
+            var merged = baseValues
+            let goalKey = goalStateKey(terrain: latestTerrainSample)
+            let goalValues = executive.learner.values(for: goalKey)
+            let objectKey = latestDetection.map {
+                objectStateKey(for: $0, terrain: latestTerrainSample)
             }
-        }
-        if let target = pushTargetNode,
-           target.parent != nil,
-           allowedActions.contains(.pushObject),
-           let character = characterNode {
-            let c = character.presentation.worldPosition
-            let n = target.presentation.worldPosition
-            let dx = Float(n.x - c.x)
-            let dz = Float(n.z - c.z)
-            let distance = sqrt(dx * dx + dz * dz)
-            let forward = forwardVector()
-            let ahead = dx * forward.x + dz * forward.z
-            let sideways = abs(dx * forward.z - dz * forward.x)
-            let alignment = distance > 0.001 ? ahead / distance : 0
-            let routeBlocked = clearanceAhead < 1.0 ||
-                latestTerrainSample.terrain == .hurdle ||
-                latestTerrainSample.terrain == .raisedStep ||
-                (pathSteering?.isDetouring ?? false)
-            if distance.isFinite, distance <= 1.0,
-               ahead > 0.05, alignment > 0.7,
-               (routeBlocked || stuckSeconds > stuckThreshold) {
-                merged[.pushObject, default: 0] += 7.0
-            } else {
-                merged[.pushObject, default: 0] -= 1.0
+            let objectValues = objectKey.map {
+                executive.learner.values(for: $0)
+            } ?? [:]
+            for action in allowedActions {
+                let actionName = String(describing: action)
+                let goalValue = goalValues[actionName] ?? 0
+                let objectValue = objectValues[actionName] ?? 0
+                merged[action, default: 0] +=
+                    0.35 * goalValue +
+                    0.20 * objectValue
             }
+            if allowedActions.contains(.liftObject), canLiftNow {
+                merged[.liftObject, default: 0] += 5.0
+                merged[.jump, default: 0] -= 5.0
+            }
+            // Letter mission: put the carried block down when its slot is in
+            // reach, and keep hold of it until then.
+            if carryingDog {
+                // Hold the dog long enough to get love, then put it down.
+                merged[.placeObject, default: 0] += dogHoldSeconds >= dogLoveSeconds ? 8.0 : -4.0
+                merged[.throwObject, default: 0] -= 6.0
+            }
+            if !needsRecharge,
+               carryingLetterBlock,
+               let character = characterNode,
+               let slot = letterSlotTarget {
+                let c = character.presentation.worldPosition
+                let t = slot.presentation.worldPosition
+                let dx = Float(t.x - c.x)
+                let dz = Float(t.z - c.z)
+                let distance = sqrt(dx * dx + dz * dz)
+                if distance <= letterPlaceReach {
+                    merged[.placeObject, default: 0] += 8.0
+                } else {
+                    merged[.placeObject, default: 0] -= 3.0
+                    merged[.throwObject, default: 0] -= 3.0
+                }
+            }
+            if let target = pushTargetNode,
+               target.parent != nil,
+               allowedActions.contains(.pushObject),
+               let character = characterNode {
+                let c = character.presentation.worldPosition
+                let n = target.presentation.worldPosition
+                let dx = Float(n.x - c.x)
+                let dz = Float(n.z - c.z)
+                let distance = sqrt(dx * dx + dz * dz)
+                let forward = forwardVector()
+                let ahead = dx * forward.x + dz * forward.z
+                let sideways = abs(dx * forward.z - dz * forward.x)
+                let alignment = distance > 0.001 ? ahead / distance : 0
+                let routeBlocked = clearanceAhead < 1.0 ||
+                    latestTerrainSample.terrain == .hurdle ||
+                    latestTerrainSample.terrain == .raisedStep ||
+                    (pathSteering?.isDetouring ?? false)
+                if distance.isFinite, distance <= 1.8,
+                   ahead > 0.05, alignment > 0.5,
+                   (routeBlocked || stuckSeconds > stuckThreshold) {
+                    merged[.pushObject, default: 0] += 12.0
+                } else {
+                    merged[.pushObject, default: 0] -= 1.0
+                }
+            }
+            return merged
         }
-        return merged
-    }
 
     private func findPushTargetNode(
         character: SCNNode,
@@ -2004,15 +2017,17 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 if let slot = letterSlotTarget, planarDistance(to: slot) <= letterPlaceReach {
                     _ = placeCarriedObjectAhead()
                 }
+            } else if let pushTarget = pushTargetNode, pushTarget.parent != nil, canManipulate(pushTarget, from: character) {
+                // If there's a movable block right in front of him, prioritize pushing it out of the way
+                let dist = planarDistance(to: pushTarget)
+                if dist <= 1.8 {
+                    // The applyPush logic will take over when action is .pushObject
+                    return
+                }
             } else if let node = letterBlockTarget ?? dogTarget, node.parent != nil {
                 let dist = planarDistance(to: node)
                 if dist <= 1.25 {
                     _ = attemptPickup()
-                } else if dist <= 2.5, let pushTarget = pushTargetNode {
-                    // If an object is blocking the path to the letter, throw it or push it
-                    if canManipulate(pushTarget, from: character) {
-                        _ = throwCarriedObjectAhead()
-                    }
                 }
             }
         }
