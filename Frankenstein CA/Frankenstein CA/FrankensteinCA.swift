@@ -363,42 +363,37 @@ final class FrankensteinCA: ObservableObject {
         perception p: FrankensteinCAPerception
     ) -> Float {
         var score: Float = 0
-
         let alignment = max(0, cosf(p.headingError))
-        let nearGoal = p.pathDistance.isFinite && p.pathDistance < 1.2
-
+        let objectName = p.nearestObjectName.lowercased()
+        
+        // If he sees a target letter block, make reaching/fetching it a top priority
+        let isTargetLetter = objectName.contains("letterblock") || objectName.contains("floatingletter")
+        
         switch action {
-        case .walk:
-            score += 0.25 * 1.0 * alignment
-        case .run:
-            score += 0.25 * 2.2 * alignment
-            if nearGoal { score -= 0.8 }
-            if p.clearanceAhead < 2.0 { score -= 0.4 }
-        case .stepForward:
-            score += 0.25 * 0.5 * alignment
-        case .jump:
-            if p.clearanceAhead < 0.8 || p.nearestObjectClass == "rechargeStation" || p.nearestObjectName.lowercased().contains("recharge") {
-                score += 0.6
-            } else {
-                score -= 0.3
-            }
-            if consecutiveJumpCount > 3 {
-                score -= 2.0
-            }
-         
-        default:
-            break
-        }
-
-        if action == .pushObject {
-            if p.nearestObjectMovable, p.nearestObjectDistance <= 1.2 {
-                score += alignment > 0.5 ? 1.5 : 0.35
-                if stuckSeconds > stuckThreshold {
-                    score += 0.8
-                }
+        case .pushObject:
+            if p.nearestObjectMovable, p.nearestObjectDistance <= 2.0 {
+                score += 6.0 // High priority to clear any obstructing blocks in front of the letters
             } else {
                 score -= 0.5
             }
+            
+        case .throwObject:
+            if p.nearestObjectMovable || objectName.contains("block") {
+                score += 4.5 // Throw obstacles out of the way if they block the path to the letters
+            } else {
+                score -= 0.2
+            }
+            
+        case .liftObject:
+            if p.nearestObjectPickupable && (isTargetLetter || p.nearestObjectDistance <= 1.25) {
+                score += 8.0 // Strongly favor picking up the letter block once reached
+            }
+            
+        case .walk, .run:
+            score += (isTargetLetter ? 1.5 : 0.4) * alignment
+            
+        default:
+            break
         }
 
         return score

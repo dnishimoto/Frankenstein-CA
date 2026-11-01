@@ -109,10 +109,15 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         if needsRecharge { return rechargeStationNode }
         if carryingDog { return nil }
         if carriedNode == nil, let dog = dogTarget { return dog }
-        guard letterTargetIndex != nil else { return nil }
-        return carryingLetterBlock ? letterSlotTarget : letterBlockTarget
+        guard let index = letterTargetIndex else { return nil }
+        
+        // Target the letter block directly until it is picked up
+        if carryingLetterBlock {
+            return letterSlotTarget
+        } else {
+            return letterBlockTarget
+        }
     }
-
     // MARK: - Simulation
     private let locomotion: FrankensteinLocomotion
     private let qFloorGrid = FrankensteinQFloorGrid()
@@ -1413,17 +1418,23 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 let zPos = 2.0 + Float(index / 6) * 0.8
                 node.position = SCNVector3(xPos, 0.3, zPos)
 
+                // Fully dynamic physics body so Frankenstein can push, lift, and throw them
                 let shape = SCNPhysicsShape(geometry: box, options: nil)
                 let body = SCNPhysicsBody(type: .dynamic, shape: shape)
                 body.mass = 1.0
                 body.friction = 0.8
+                body.rollingFriction = 0.5
+                body.restitution = 0.1
+                body.damping = 0.1
+                body.angularDamping = 0.2
+                body.allowsResting = false
                 node.physicsBody = body
 
                 scene.rootNode.addChildNode(node)
 
-                // High-contrast, large floating indicator label strictly above the block for clear object & visual detection
+                // High-contrast floating text label
                 let floatingTextGeometry = SCNText(string: String(letter), extrusionDepth: 0.03)
-                floatingTextGeometry.font = UIFont.systemFont(ofSize: 1.2, weight: .black)
+                floatingTextGeometry.font = UIFont.systemFont(ofSize: 2.2, weight: .black)
                 
                 let floatingMaterial = SCNMaterial()
                 floatingMaterial.diffuse.contents = UIColor.systemCyan
@@ -1435,14 +1446,10 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 floatingNode.name = "FloatingLetter_\(letter)"
                 floatingNode.scale = SCNVector3(0.45, 0.45, 0.45)
                 
-                // Center pivot for clean rotation & alignment
                 let (minBox, maxBox) = floatingTextGeometry.boundingBox
                 floatingNode.pivot = SCNMatrix4MakeTranslation((minBox.x + maxBox.x) * 0.5, minBox.y, 0)
-                
-                // Positioned distinctly above the block
                 floatingNode.position = SCNVector3(0, 0.75, 0)
 
-                // Billboard constraint so the letter always faces the camera cleanly from any angle
                 let billboard = SCNBillboardConstraint()
                 billboard.freeAxes = [.Y]
                 floatingNode.constraints = [billboard]
@@ -1450,6 +1457,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 node.addChildNode(floatingNode)
             }
         }
+
+      
     private func addLetterPlaceholders(to scene: SCNScene) {
         let targetWord = Array("FRANKENSTEIN")
         let slotSize: CGFloat = 0.45
@@ -1473,7 +1482,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             scene.rootNode.addChildNode(node)
 
             let textGeometry = SCNText(string: String(letter), extrusionDepth: 0.02)
-            textGeometry.font = UIFont.systemFont(ofSize: 0.32, weight: .bold)
+            textGeometry.font = UIFont.systemFont(ofSize: 1.92, weight: .bold)
 
             let textMaterial = SCNMaterial()
             textMaterial.diffuse.contents = UIColor.white
@@ -1948,45 +1957,35 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         runAssist(character: character)
     }
 
-    /// If the CA has not lifted/placed on its own after a short time, do it
-    /// for him, so a block that is in reach always gets picked up and a block
-    /// held at its slot always gets set down.
     private func runAssist(character: SCNNode) {
-        let c = character.presentation.worldPosition
-        func planarDistance(to node: SCNNode) -> Float {
-            let p = knownPosition(of: node)
-            let dx = p.x - Float(c.x)
-            let dz = p.z - Float(c.z)
-            return sqrt(dx * dx + dz * dz)
+            let c = character.presentation.worldPosition
+            func planarDistance(to node: SCNNode) -> Float {
+                let p = knownPosition(of: node)
+                let dx = p.x - Float(c.x)
+                let dz = p.z - Float(c.z)
+                return sqrt(dx * dx + dz * dz)
+            }
+            
+            if carryingDog {
+                if dogHoldSeconds >= dogLoveSeconds + 0.5 {
+                    _ = placeCarriedObjectAhead()
+                }
+            } else if carryingLetterBlock {
+                if let slot = letterSlotTarget, planarDistance(to: slot) <= letterPlaceReach {
+                    _ = placeCarriedObjectAhead()
+                }
+            } else if let node = letterBlockTarget ?? dogTarget, node.parent != nil {
+                let dist = planarDistance(to: node)
+                if dist <= 1.25 {
+                    _ = attemptPickup()
+                } else if dist <= 2.5, let pushTarget = pushTargetNode {
+                    // If an object is blocking the path to the letter, throw it or push it
+                    if canManipulate(pushTarget, from: character) {
+                        _ = throwCarriedObjectAhead()
+                    }
+                }
+            }
         }
-        var shouldAct = false
-        var action: () -> Void = {}
-        if carryingDog {
-            if dogHoldSeconds >= dogLoveSeconds + 0.5 {
-                shouldAct = true
-                action = { _ = self.placeCarriedObjectAhead() }
-            }
-        } else if carryingLetterBlock {
-            if let slot = letterSlotTarget, planarDistance(to: slot) <= letterPlaceReach {
-                shouldAct = true
-                action = { _ = self.placeCarriedObjectAhead() }
-            }
-        } else if let node = dogTarget ?? letterBlockTarget, node.parent != nil {
-            if planarDistance(to: node) <= 1.0 {
-                shouldAct = true
-                action = { _ = self.attemptPickup() }
-            }
-        }
-        if shouldAct {
-            assistTimer += dtFromLastFrame
-            if assistTimer >= 2.5 {
-                assistTimer = 0
-                action()
-            }
-        } else {
-            assistTimer = 0
-        }
-    }
 
     // MARK: Dog
     /// Holding the dog gives love. Putting it down starts a cooldown so he
@@ -2966,8 +2965,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             return
         }
         if isCharacterPart(node) || isQGridNode(node) { return }
-        let movableTokens = ["table", "crate", "box", "movable", "pickup", "chair", "stool", "block", "object"]
-        let supportTokens = ["floor", "ground", "platform", "stair", "step", "terrain", "wall", "doorframe"]
+        let movableTokens = ["table", "crate", "box", "movable", "pickup", "chair", "stool", "block", "object","stair","step"]
+        let supportTokens = ["floor", "ground", "platform", "terrain", "wall", "doorframe"]
         let shouldBeDynamic = forceDynamic || movableTokens.contains(where: { name.contains($0) })
         let shouldBeStatic = supportTokens.contains(where: { name.contains($0) })
 
@@ -3092,59 +3091,66 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private func applyPush(
-        output: FrankensteinLocomotionOutput,
-        deltaTime dt: Float,
-        character: SCNNode
-    ) {
-        let pushIsExecuting = output.pushRequested || output.action == .pushObject
-        guard pushIsExecuting else {
-            pushLastNodePosition = nil
-            pushTrackedNodeID = nil
-            pushAccumulatedMeters = 0
-            return
-        }
-        guard let node = pushTargetNode, node.parent != nil else {
-            pushLastNodePosition = nil
-            pushTrackedNodeID = nil
-            pushAccumulatedMeters = 0
-            return
-        }
-        guard carriedNode == nil, canManipulate(node, from: character) else {
-            pushLastNodePosition = nil
-            pushTrackedNodeID = nil
-            pushAccumulatedMeters = 0
-            return
-        }
-        let targetID = ObjectIdentifier(node)
-        if pushTrackedNodeID != targetID {
-            pushTrackedNodeID = targetID
-            pushLastNodePosition = nil
-            pushAccumulatedMeters = 0
-        }
-        let forward = forwardVector()
-        let c = character.presentation.worldPosition
-        let n = node.presentation.worldPosition
-        let dx = Float(n.x - c.x)
-        let dz = Float(n.z - c.z)
-        let ahead = dx * forward.x + dz * forward.z
-        let sideways = abs(dx * forward.z - dz * forward.x)
-        guard ahead > 0.05, ahead < 1.8, sideways < 0.85 else {
-            pushLastNodePosition = nil
-            return
-        }
-        configurePhysicsBody(for: node, forceDynamic: true)
-        guard let body = node.physicsBody else { return }
-        body.velocity = SCNVector3(forward.x * pushBlockSpeed, body.velocity.y, forward.z * pushBlockSpeed)
-        body.angularVelocity = SCNVector4Zero
+            output: FrankensteinLocomotionOutput,
+            deltaTime dt: Float,
+            character: SCNNode
+        ) {
+            let pushIsExecuting = output.pushRequested || output.action == .pushObject
+            guard pushIsExecuting else {
+                pushLastNodePosition = nil
+                pushTrackedNodeID = nil
+                pushAccumulatedMeters = 0
+                return
+            }
+            guard let node = pushTargetNode, node.parent != nil else {
+                pushLastNodePosition = nil
+                pushTrackedNodeID = nil
+                pushAccumulatedMeters = 0
+                return
+            }
+            guard carriedNode == nil, canManipulate(node, from: character) else {
+                pushLastNodePosition = nil
+                pushTrackedNodeID = nil
+                pushAccumulatedMeters = 0
+                return
+            }
+            
+            let targetID = ObjectIdentifier(node)
+            if pushTrackedNodeID != targetID {
+                pushTrackedNodeID = targetID
+                pushLastNodePosition = nil
+                pushAccumulatedMeters = 0
+            }
+            
+            let forward = forwardVector()
+            let c = character.presentation.worldPosition
+            let n = node.presentation.worldPosition
+            
+            let dx = Float(n.x - c.x)
+            let dz = Float(n.z - c.z)
+            let ahead = dx * forward.x + dz * forward.z
+            let sideways = abs(dx * forward.z - dz * forward.x)
+            
+            guard ahead > 0.05, ahead < 1.8, sideways < 0.85 else {
+                pushLastNodePosition = nil
+                return
+            }
+            
+            configurePhysicsBody(for: node, forceDynamic: true)
+            guard let body = node.physicsBody else { return }
+            
+            body.velocity = SCNVector3(forward.x * pushBlockSpeed, body.velocity.y, forward.z * pushBlockSpeed)
+            body.angularVelocity = SCNVector4Zero
 
-        let current = SIMD2<Float>(Float(n.x), Float(n.z))
-        if let last = pushLastNodePosition {
-            let moved = current - last
-            pushAccumulatedMeters += moved.x * forward.x + moved.y * forward.z
+            let current = SIMD2<Float>(Float(n.x), Float(n.z))
+            if let last = pushLastNodePosition {
+                let moved = current - last
+                pushAccumulatedMeters += moved.x * forward.x + moved.y * forward.z
+            }
+            pushLastNodePosition = current
+            
+            locomotion.reportPushProgress(pushAccumulatedMeters)
         }
-        pushLastNodePosition = current
-        locomotion.reportPushProgress(pushAccumulatedMeters)
-    }
 
     @discardableResult
     private func dropCarriedObject(distance: Float, thrown: Bool) -> Bool {
