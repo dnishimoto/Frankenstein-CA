@@ -37,6 +37,7 @@ enum FrankensteinAction: Int, CaseIterable {
     case placeObject
     case throwObject
     case pushObject
+    case kickObject
 }
 
 enum FrankensteinPosture: Equatable {

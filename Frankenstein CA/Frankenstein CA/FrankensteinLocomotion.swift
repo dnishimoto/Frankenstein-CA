@@ -715,6 +715,9 @@ final class FrankensteinLocomotion {
 
         case .pushObject:
             requestedSpeed = pushWalkSpeed
+            
+        case .kickObject:
+            requestedSpeed = pushWalkSpeed
 
         case .recover,
              .liftObject,

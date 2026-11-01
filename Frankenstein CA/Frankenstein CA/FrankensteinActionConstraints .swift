@@ -118,14 +118,12 @@ enum FrankensteinActionConstraints {
             actions.append(.stepDown)
         }
 
-        // A movable block in contact can be shoved forward.
-        if terrain.objectMovable,
-           !terrain.carryingObject,
-           terrain.distance.isFinite,
-           terrain.distance <= 1.0 {
-            actions.append(.pushObject)
-        }
-
+          if terrain.objectMovable,
+                   !terrain.carryingObject,
+                   terrain.distance.isFinite,
+                   terrain.distance <= 1.2 {
+                    actions.append(contentsOf: [.pushObject, .kickObject])
+                }
         // Lifting needs a liftable object within reach and free hands.
         if terrain.objectPickupable, !terrain.carryingObject {
             actions.append(.liftObject)

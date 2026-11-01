@@ -3215,7 +3215,20 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             outcomeWindowGoalProgress = 0
             outcomeWindowPathProgress = 0
         }
+    func randomFloat(in range: ClosedRange<Float> = 0.0...1.0) -> Float {
+        return Float.random(in: range)
+    }
+    private func applyKick(output: FrankensteinLocomotionOutput, character: SCNNode) {
+        guard output.action == .kickObject, let node = pushTargetNode, let body = node.physicsBody else { return }
+        let forward = forwardVector()
 
+        // Convert to dynamic and apply a sharp impulse forward
+        body.type = .dynamic
+        body.velocity = SCNVector3(forward.x * 5.0, 2.0, forward.z * 5.0)
+        body.angularVelocity = SCNVector4(randomFloat(), randomFloat(), randomFloat(), 1.0)
+
+        locomotion.reportObjectActionOutcome(.throwObject, reward: 2.0)
+    }
     private func animateCharacter(character: SCNNode) {
         let swing = locomotion.gaitSwing
         let phase = locomotion.gaitPhase
