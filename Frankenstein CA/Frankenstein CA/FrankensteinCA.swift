@@ -953,27 +953,28 @@ final class FrankensteinCA: ObservableObject {
     }
 
     private func actionNeuronPosition(for action: FrankensteinAction) -> (x: Int, y: Int)? {
-        switch action {
-        case .walk:        return (8, 8)
-        case .run:         return (8, 4)
-        case .turnLeft:    return (4, 8)
-        case .turnRight:   return (12, 8)
-        case .jump:        return (8, 2)
-        case .crouch:      return (4, 4)
-        case .recover:     return (12, 4)
-        case .stepUp:      return (4, 12)
-        case .stepDown:    return (12, 12)
-        case .crawl:       return (6, 14)
-        case .roll:        return (10, 14)
-        case .backward:    return (8, 6)
-        case .stepForward: return (14, 6)
-        case .liftObject:  return (2, 8)
-        case .placeObject: return (2, 4)
-        case .throwObject: return (2, 12)
-        case .pushObject:  return (14, 10)
-        default:           return nil
+            switch action {
+            case .walk:        return (8, 8)
+            case .run:         return (8, 4)
+            case .turnLeft:    return (4, 8)
+            case .turnRight:   return (12, 8)
+            case .jump:        return (8, 2)
+            case .crouch:      return (4, 4)
+            case .recover:     return (12, 4)
+            case .stepUp:      return (4, 12)
+            case .stepDown:    return (12, 12)
+            case .crawl:       return (6, 14)
+            case .roll:        return (10, 14)
+            case .backward:    return (8, 6)
+            case .stepForward: return (14, 6)
+            case .liftObject:  return (2, 8)
+            case .placeObject: return (2, 4)
+            case .throwObject: return (2, 12)
+            case .pushObject:  return (14, 10)
+            case .kickObject:  return (10, 10) // Added Q-grid neuron coordinate
+            default:           return nil
+            }
         }
-    }
 
     private func countLiveNeighbors(x: Int, y: Int) -> Int {
         var count = 0

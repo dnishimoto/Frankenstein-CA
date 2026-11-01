@@ -5,6 +5,7 @@ import SwiftUI
 import UIKit
 
 final class Coordinator: NSObject, SCNSceneRendererDelegate {
+    private let pushBlockSpeed: Float = 1.4
     var animationSpeed: Double = 0
     private var blockConnectionStartGeneration: Int?
         private var trackedBlockID: ObjectIdentifier?
@@ -172,7 +173,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private var pushLastNodePosition: SIMD2<Float>?
     private var pushTrackedNodeID: ObjectIdentifier?
     private var pushAccumulatedMeters: Float = 0
-    private let pushBlockSpeed: Float = 0.6
 
     var onPlanText: ((String) -> Void)?
     var onQGrid: (([FrankensteinQDisplayCell]) -> Void)?
@@ -675,59 +675,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         publishDebug("Coordinator attached to displayed scene.")
     }
 
-    private func addMovableBlockCourse(to scene: SCNScene) {
-        guard !spawnedMovableBlocks else { return }
-        spawnedMovableBlocks = true
-        let existing = scene.rootNode.childNodes(passingTest: { node, _ in
-            let name = node.name?.lowercased() ?? ""
-            return name.contains("movableblock_") || name.contains("stackblock_")
-        })
-        guard existing.isEmpty else { return }
-        let blockSize: CGFloat = 0.8
-        let placements: [(name: String, x: Float, y: Float, z: Float)] = [
-            ("MovableBlock_01", 3.7, 0.4, 4.6),
-            ("MovableBlock_02", 4.6, 0.4, 4.6),
-            ("MovableBlock_03", 3.7, 0.4, 3.7),
-            ("StackBlock_04", -3.8, 0.4, 2.8),
-            ("StackBlock_05", -4.7, 0.4, 2.8),
-            ("StackBlock_06", -3.8, 1.2, 2.8),
-            ("MovableBlock_07", 3.8, 0.4, -1.8),
-            ("MovableBlock_08", 4.7, 0.4, -1.8),
-            ("MovableBlock_09", -3.8, 0.4, -4.5),
-            ("MovableBlock_10", -4.7, 0.4, -4.5)
-        ]
-        for placement in placements {
-            let box = SCNBox(
-                width: blockSize,
-                height: blockSize,
-                length: blockSize,
-                chamferRadius: 0.035
-            )
-            let material = SCNMaterial()
-            // Updated to solid brown color as requested
-            material.diffuse.contents = UIColor(
-                red: 0.55,
-                green: 0.35,
-                blue: 0.20,
-                alpha: 1.0
-            )
-            material.specular.contents = UIColor(white: 0.15, alpha: 1.0)
-            box.materials = [material]
-            let node = SCNNode(geometry: box)
-            node.name = placement.name
-            node.position = SCNVector3(placement.x, placement.y, placement.z)
-            node.physicsBody = SCNPhysicsBody(type: .dynamic, shape: SCNPhysicsShape(geometry: box, options: nil))
-            node.physicsBody?.mass = 1.5
-            node.physicsBody?.friction = 0.9
-            node.physicsBody?.rollingFriction = 0.9
-            node.physicsBody?.restitution = 0.02
-            node.physicsBody?.damping = 0.15
-            node.physicsBody?.angularDamping = 0.3
-            node.physicsBody?.allowsResting = true
-            scene.rootNode.addChildNode(node)
-        }
-        publishDebug("Added 10 movable blocks.")
-    }
+   
 
     private func updateStuckDuration(position: SCNVector3, deltaTime: Float) {
         guard deltaTime.isFinite, deltaTime > 0 else { return }
@@ -1605,13 +1553,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             advisory[.jump, default: 0] += 4.0
             advisory[.walk, default: 0] -= 1.0
         }
-        if let target = pushTargetNode, target.parent != nil {
-            perception.subGoal = "Approach and interact with movable block"
-        } else if let detection = latestDetection, detection.distance < 3.0 {
-            perception.subGoal = "Approach \(detection.name)"
-        } else {
-            perception.subGoal = ""
-        }
+        
         perception.advisoryValues = advisory
         perception.stateKey = [
             String(describing: terrain.terrain),
@@ -2309,15 +2251,70 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         dog.physicsBody = body
         scene.rootNode.addChildNode(dog)
     }
-
-    private func isMovableName(_ name: String) -> Bool {
-        let value = name.lowercased()
-        return value.contains("movable") ||
-            value.contains("block") ||
-            value.contains("crate") ||
-            value.contains("box") ||
-            value.contains("pickup")
+    private func addMovableBlockCourse(to scene: SCNScene) {
+            guard !spawnedMovableBlocks else { return }
+            spawnedMovableBlocks = true
+            let existing = scene.rootNode.childNodes(passingTest: { node, _ in
+                let name = node.name?.lowercased() ?? ""
+                return name.contains("movableblock_") || name.contains("stackblock_")
+            })
+            guard existing.isEmpty else { return }
+            let blockSize: CGFloat = 0.8
+            let placements: [(name: String, x: Float, y: Float, z: Float)] = [
+                ("MovableBlock_01", 3.7, 0.4, 4.6),
+                ("MovableBlock_02", 4.6, 0.4, 4.6),
+                ("MovableBlock_03", 3.7, 0.4, 3.7),
+                ("StackBlock_04", -3.8, 0.4, 2.8),
+                ("StackBlock_05", -4.7, 0.4, 2.8),
+                ("StackBlock_06", -3.8, 1.2, 2.8),
+                ("MovableBlock_07", 3.8, 0.4, -1.8),
+                ("MovableBlock_08", 4.7, 0.4, -1.8),
+                ("MovableBlock_09", -3.8, 0.4, -4.5),
+                ("MovableBlock_10", -4.7, 0.4, -4.5)
+            ]
+            for placement in placements {
+                let box = SCNBox(
+                    width: blockSize,
+                    height: blockSize,
+                    length: blockSize,
+                    chamferRadius: 0.035
+                )
+                let material = SCNMaterial()
+                material.diffuse.contents = UIColor(
+                    red: 0.55,
+                    green: 0.35,
+                    blue: 0.20,
+                    alpha: 1.0
+                )
+                material.specular.contents = UIColor(white: 0.15, alpha: 1.0)
+                box.materials = [material]
+                let node = SCNNode(geometry: box)
+                node.name = placement.name
+                node.position = SCNVector3(placement.x, placement.y, placement.z)
+                node.physicsBody = SCNPhysicsBody(type: .dynamic, shape: SCNPhysicsShape(geometry: box, options: nil))
+                node.physicsBody?.mass = 1.2                  // Slightly reduced mass
+                node.physicsBody?.friction = 0.3              // Lowered from 0.9 to prevent locking
+                node.physicsBody?.rollingFriction = 0.3       // Lowered from 0.9
+                node.physicsBody?.restitution = 0.02
+                node.physicsBody?.damping = 0.15
+                node.physicsBody?.angularDamping = 0.3
+                node.physicsBody?.allowsResting = true
+                scene.rootNode.addChildNode(node)
+            }
+            publishDebug("Added 10 movable blocks.")
+        }
+private func isMovableName(_ name: String) -> Bool {
+    let value = name.lowercased()
+    if value.hasPrefix("letterblock_") || value.hasPrefix("placedletter_") {
+        return false
     }
+    return value.contains("movable") ||
+        value.contains("block") ||
+        value.contains("crate") ||
+        value.contains("box") ||
+        value.contains("pickup") ||
+        value.contains("stackblock") // Added explicit stack block recognition
+}
 
     private func annotateBearing(
         _ info: DetectedObjectInfo,
@@ -2957,117 +2954,115 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
                 return path.last
             }
-        // MARK: - Movement Application
-    // MARK: - Movement Application
-        private func applyMovement(
-            output: FrankensteinLocomotionOutput,
-            deltaTime dt: Float,
-            character: SCNNode,
-            scene: SCNScene
-        ) {
-            guard dt.isFinite, dt > 0 else { return }
+    private func applyMovement(
+                output: FrankensteinLocomotionOutput,
+                deltaTime dt: Float,
+                character: SCNNode,
+                scene: SCNScene
+            ) {
+                guard dt.isFinite, dt > 0 else { return }
 
-            let baseSpeed: Float =
-                output.action == .pushObject
-                ? (pushTargetNode == nil ? 0 : max(0.45, output.speed))
-                : max(0, output.speed)
+                let baseSpeed: Float =
+                    output.action == .pushObject
+                    ? (pushTargetNode == nil ? 0 : max(0.45, output.speed))
+                    : max(0, output.speed)
 
-            let direction =
-                (output.action == .pushObject && output.moveDirection == 0)
-                ? 1.0
-                : output.moveDirection
+                let direction =
+                    (output.action == .pushObject && output.moveDirection == 0)
+                    ? 1.0
+                    : output.moveDirection
 
-            let speed = baseSpeed * direction
+                let speed = baseSpeed * direction
 
-            if output.liftRequested, locomotion.policy.pendingAction == .liftObject {
-                let stateKeyBeforePickup = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
-                let succeeded = attemptPickup()
-                locomotion.reportPickupOutcome(succeeded: succeeded)
-                if let stateKeyBeforePickup {
-                    reinforceOutcome(stateKey: stateKeyBeforePickup, action: .liftObject, reward: succeeded ? 1.0 : -0.5)
+                if output.liftRequested, locomotion.policy.pendingAction == .liftObject {
+                    let stateKeyBeforePickup = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
+                    let succeeded = attemptPickup()
+                    locomotion.reportPickupOutcome(succeeded: succeeded)
+                    if let stateKeyBeforePickup {
+                        reinforceOutcome(stateKey: stateKeyBeforePickup, action: .liftObject, reward: succeeded ? 1.0 : -0.5)
+                    }
                 }
+                if output.placeRequested, locomotion.policy.pendingAction == .placeObject {
+                    let stateKeyBeforePlace = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
+                    let ok = placeCarriedObjectAhead()
+                    locomotion.reportObjectActionOutcome(.placeObject, reward: ok ? 0.5 : -0.5)
+                    if let stateKeyBeforePlace {
+                        reinforceOutcome(stateKey: stateKeyBeforePlace, action: .placeObject, reward: ok ? 0.5 : -0.5)
+                    }
+                }
+                if output.throwRequested, locomotion.policy.pendingAction == .throwObject {
+                    let stateKeyBeforeThrow = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
+                    let ok = throwCarriedObjectAhead()
+                    locomotion.reportObjectActionOutcome(.throwObject, reward: ok ? 0.3 : -0.5)
+                    if let stateKeyBeforeThrow {
+                        reinforceOutcome(stateKey: stateKeyBeforeThrow, action: .throwObject, reward: ok ? 0.3 : -0.5)
+                    }
+                }
+
+                let oldWorld = character.presentation.worldPosition
+
+                var proposedWorld = SCNVector3(
+                    oldWorld.x,
+                    oldWorld.y,
+                    oldWorld.z
+                )
+
+                // Follow the cyan approach spline during ordinary navigation.
+                if output.action != .pushObject,
+                   speed > 0,
+                   let target = splineLookAheadPoint(
+                       from: oldWorld,
+                       path: planSpline.approachPath,
+                       distance: 0.8
+                   ) {
+
+                    let dx = target.x - Float(oldWorld.x)
+                    let dz = target.y - Float(oldWorld.z)
+                    let distanceToTarget = sqrt(dx * dx + dz * dz)
+
+                    // Match SceneKit forwardVector() = (-sin(heading), 0, -cos(heading))
+                    let desiredHeading = atan2(-dx, -dz)
+
+                    var angleDifference = desiredHeading - heading
+
+                    while angleDifference > Float.pi {
+                        angleDifference -= 2 * Float.pi
+                    }
+
+                    while angleDifference < -Float.pi {
+                        angleDifference += 2 * Float.pi
+                    }
+
+                    let turnRate: Float = 3.5
+                    let maxTurn = turnRate * dt
+
+                    heading += min(max(angleDifference, -maxTurn), maxTurn)
+
+                    if distanceToTarget > 0.001 {
+                        let stepDist = min(distanceToTarget, speed * dt)
+                        proposedWorld.x += (dx / distanceToTarget) * stepDist
+                        proposedWorld.z += (dz / distanceToTarget) * stepDist
+                    }
+
+                } else {
+                    heading = output.heading
+                    let forward = forwardVector()
+
+                    proposedWorld.x += forward.x * speed * dt
+                    proposedWorld.z += forward.z * speed * dt
+                }
+
+                let currentFeetY = Float(oldWorld.y) + characterFootOffset
+                verifiedLandingSupport = verifyLandingSite(proposedPosition: proposedWorld, currentFeetY: currentFeetY, in: scene)
+
+                // Apply updated position to character node
+                if let parent = character.parent {
+                    character.position = parent.convertPosition(proposedWorld, from: nil)
+                } else {
+                    character.position = proposedWorld
+                }
+                character.eulerAngles.y = heading
             }
-            if output.placeRequested, locomotion.policy.pendingAction == .placeObject {
-                let stateKeyBeforePlace = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
-                let ok = placeCarriedObjectAhead()
-                locomotion.reportObjectActionOutcome(.placeObject, reward: ok ? 0.5 : -0.5)
-                if let stateKeyBeforePlace {
-                    reinforceOutcome(stateKey: stateKeyBeforePlace, action: .placeObject, reward: ok ? 0.5 : -0.5)
-                }
-            }
-            if output.throwRequested, locomotion.policy.pendingAction == .throwObject {
-                let stateKeyBeforeThrow = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
-                let ok = throwCarriedObjectAhead()
-                locomotion.reportObjectActionOutcome(.throwObject, reward: ok ? 0.3 : -0.5)
-                if let stateKeyBeforeThrow {
-                    reinforceOutcome(stateKey: stateKeyBeforeThrow, action: .throwObject, reward: ok ? 0.3 : -0.5)
-                }
-            }
-
-            let oldWorld = character.presentation.worldPosition
-
-            var proposedWorld = SCNVector3(
-                oldWorld.x,
-                oldWorld.y,
-                oldWorld.z
-            )
-
-            // Follow the cyan approach spline during ordinary navigation.
-            if output.action != .pushObject,
-               speed > 0,
-               let target = splineLookAheadPoint(
-                   from: oldWorld,
-                   path: planSpline.approachPath,
-                   distance: 0.8
-               ) {
-
-                let dx = target.x - Float(oldWorld.x)
-                let dz = target.y - Float(oldWorld.z)
-                let distanceToTarget = sqrt(dx * dx + dz * dz)
-
-                // Match SceneKit forwardVector() = (-sin(heading), 0, -cos(heading))
-                let desiredHeading = atan2(-dx, -dz)
-
-                var angleDifference = desiredHeading - heading
-
-                while angleDifference > Float.pi {
-                    angleDifference -= 2 * Float.pi
-                }
-
-                while angleDifference < -Float.pi {
-                    angleDifference += 2 * Float.pi
-                }
-
-                let turnRate: Float = 3.5
-                let maxTurn = turnRate * dt
-
-                heading += min(max(angleDifference, -maxTurn), maxTurn)
-
-                if distanceToTarget > 0.001 {
-                    let stepDist = min(distanceToTarget, speed * dt)
-                    proposedWorld.x += (dx / distanceToTarget) * stepDist
-                    proposedWorld.z += (dz / distanceToTarget) * stepDist
-                }
-
-            } else {
-                heading = output.heading
-                let forward = forwardVector()
-
-                proposedWorld.x += forward.x * speed * dt
-                proposedWorld.z += forward.z * speed * dt
-            }
-
-            let currentFeetY = Float(oldWorld.y) + characterFootOffset
-            verifiedLandingSupport = verifyLandingSite(proposedPosition: proposedWorld, currentFeetY: currentFeetY, in: scene)
-
-            // Apply updated position to character node
-            if let parent = character.parent {
-                character.position = parent.convertPosition(proposedWorld, from: nil)
-            } else {
-                character.position = proposedWorld
-            }
-            character.eulerAngles.y = heading
-        }
 
     private func evaluateActionOutcome(
             output: FrankensteinLocomotionOutput,
@@ -3393,88 +3388,88 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
 
 
-        private func applyPush(
-            output: FrankensteinLocomotionOutput,
-            deltaTime dt: Float,
-            character: SCNNode
-        ) {
-            let pushIsExecuting = output.pushRequested || output.action == .pushObject
-            guard pushIsExecuting else {
-                blockConnectionStartGeneration = nil
-                trackedBlockID = nil
-                pushLastNodePosition = nil
-                pushTrackedNodeID = nil
-                pushAccumulatedMeters = 0
-                return
+    private func applyPush(
+                output: FrankensteinLocomotionOutput,
+                deltaTime dt: Float,
+                character: SCNNode
+            ) {
+                let pushIsExecuting = output.pushRequested || output.action == .pushObject
+                guard pushIsExecuting else {
+                    blockConnectionStartGeneration = nil
+                    trackedBlockID = nil
+                    pushLastNodePosition = nil
+                    pushTrackedNodeID = nil
+                    pushAccumulatedMeters = 0
+                    return
+                }
+                guard let node = pushTargetNode, node.parent != nil else {
+                    blockConnectionStartGeneration = nil
+                    trackedBlockID = nil
+                    pushLastNodePosition = nil
+                    pushTrackedNodeID = nil
+                    pushAccumulatedMeters = 0
+                    return
+                }
+                guard carriedNode == nil, canManipulate(node, from: character) else {
+                    blockConnectionStartGeneration = nil
+                    trackedBlockID = nil
+                    pushLastNodePosition = nil
+                    pushTrackedNodeID = nil
+                    pushAccumulatedMeters = 0
+                    return
+                }
+
+                let targetID = ObjectIdentifier(node)
+                if trackedBlockID != targetID {
+                    trackedBlockID = targetID
+                    blockConnectionStartGeneration = ca?.generation ?? 0
+                }
+
+                // If connected/pushing this same block for too long, kick it away to prevent stalling
+                if let startGen = blockConnectionStartGeneration, let currentGen = ca?.generation, currentGen - startGen > 600 {
+                    publishDebug("Block push stalled. Kicking away!")
+                    applyKick(output: FrankensteinLocomotionOutput(action: .kickObject), character: character)
+                    blockConnectionStartGeneration = nil
+                    trackedBlockID = nil
+                    return
+                }
+
+                if pushTrackedNodeID != targetID {
+                    pushTrackedNodeID = targetID
+                    pushLastNodePosition = nil
+                    pushAccumulatedMeters = 0
+                }
+
+                let forward = forwardVector()
+                let c = character.presentation.worldPosition
+                let n = node.presentation.worldPosition
+
+                let dx = Float(n.x - c.x)
+                let dz = Float(n.z - c.z)
+                let ahead = dx * forward.x + dz * forward.z
+                let sideways = abs(dx * forward.z - dz * forward.x)
+
+                guard ahead > 0.05, ahead < 1.8, sideways < 0.85 else {
+                    pushLastNodePosition = nil
+                    return
+                }
+
+                configurePhysicsBody(for: node, forceDynamic: true)
+                guard let body = node.physicsBody else { return }
+
+                // Apply forward velocity using the increased push speed
+                body.velocity = SCNVector3(forward.x * pushBlockSpeed, body.velocity.y, forward.z * pushBlockSpeed)
+                body.angularVelocity = SCNVector4Zero
+
+                let current = SIMD2<Float>(Float(n.x), Float(n.z))
+                if let last = pushLastNodePosition {
+                    let moved = current - last
+                    pushAccumulatedMeters += moved.x * forward.x + moved.y * forward.z
+                }
+                pushLastNodePosition = current
+
+                locomotion.reportPushProgress(pushAccumulatedMeters)
             }
-            guard let node = pushTargetNode, node.parent != nil else {
-                blockConnectionStartGeneration = nil
-                trackedBlockID = nil
-                pushLastNodePosition = nil
-                pushTrackedNodeID = nil
-                pushAccumulatedMeters = 0
-                return
-            }
-            guard carriedNode == nil, canManipulate(node, from: character) else {
-                blockConnectionStartGeneration = nil
-                trackedBlockID = nil
-                pushLastNodePosition = nil
-                pushTrackedNodeID = nil
-                pushAccumulatedMeters = 0
-                return
-            }
-
-            let targetID = ObjectIdentifier(node)
-            if trackedBlockID != targetID {
-                trackedBlockID = targetID
-                blockConnectionStartGeneration = ca?.generation ?? 0
-            }
-
-            // If connected / pushing this same block for over 1000 generations, kick it away!
-            if let startGen = blockConnectionStartGeneration, let currentGen = ca?.generation, currentGen - startGen > 1000 {
-                publishDebug("Block connected for >1000 generations. Kicking away!")
-                applyKick(output: FrankensteinLocomotionOutput(action: .kickObject), character: character)
-                blockConnectionStartGeneration = nil
-                trackedBlockID = nil
-                return
-            }
-
-            if pushTrackedNodeID != targetID {
-                pushTrackedNodeID = targetID
-                pushLastNodePosition = nil
-                pushAccumulatedMeters = 0
-            }
-
-            let forward = forwardVector()
-            let c = character.presentation.worldPosition
-            let n = node.presentation.worldPosition
-
-            let dx = Float(n.x - c.x)
-            let dz = Float(n.z - c.z)
-            let ahead = dx * forward.x + dz * forward.z
-            let sideways = abs(dx * forward.z - dz * forward.x)
-
-            guard ahead > 0.05, ahead < 1.8, sideways < 0.85 else {
-                pushLastNodePosition = nil
-                return
-            }
-
-            configurePhysicsBody(for: node, forceDynamic: true)
-            guard let body = node.physicsBody else { return }
-
-            body.velocity = SCNVector3(forward.x * pushBlockSpeed, body.velocity.y, forward.z * pushBlockSpeed)
-            body.angularVelocity = SCNVector4Zero
-
-            let current = SIMD2<Float>(Float(n.x), Float(n.z))
-            if let last = pushLastNodePosition {
-                let moved = current - last
-                pushAccumulatedMeters += moved.x * forward.x + moved.y * forward.z
-            }
-            pushLastNodePosition = current
-
-            locomotion.reportPushProgress(pushAccumulatedMeters)
-        }
-
     @discardableResult
     private func dropCarriedObject(distance: Float, thrown: Bool) -> Bool {
         guard let carriedNode, let character = characterNode, let scene else { return false }

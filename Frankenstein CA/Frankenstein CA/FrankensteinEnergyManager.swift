@@ -31,7 +31,7 @@ final class FrankensteinEnergyManager: ObservableObject {
             case .turnLeft, .turnRight, .stepForward, .backward: costPerSecond = 0.1 / 100.0
             case .recover: costPerSecond = 0.05 / 100.0
             case .placeObject: costPerSecond = 0.2 / 100.0
-            case .kickObject: costPerSecond = 0.85
+            case .kickObject: costPerSecond = 0.85 / 100.0
             }
              
             powerLevel = max(0.0, powerLevel - (costPerSecond * dt))
