@@ -1724,79 +1724,78 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private func makeAdvisoryActionValues(
-                    baseValues: [FrankensteinAction: Float],
-                    allowedActions: [FrankensteinAction]
-                ) -> [FrankensteinAction: Float] {
-                    var merged = baseValues
-                    let goalKey = goalStateKey(terrain: latestTerrainSample)
-                    let goalValues = executive.learner.values(for: goalKey)
-                    let objectKey = latestDetection.map {
-                        objectStateKey(for: $0, terrain: latestTerrainSample)
-                    }
-                    let objectValues = objectKey.map {
-                        executive.learner.values(for: $0)
-                    } ?? [:]
-                    for action in allowedActions {
-                        let actionName = String(describing: action)
-                        let goalValue = goalValues[actionName] ?? 0
-                        let objectValue = objectValues[actionName] ?? 0
-                        merged[action, default: 0] +=
-                            0.35 * goalValue +
-                            0.20 * objectValue
-                    }
-                    if allowedActions.contains(.liftObject), canLiftNow {
-                        merged[.liftObject, default: 0] += 5.0
-                        merged[.jump, default: 0] -= 5.0
-                    }
-                    
-                    if carryingDog {
-                        merged[.placeObject, default: 0] += dogHoldSeconds >= dogLoveSeconds ? 8.0 : -4.0
-                        merged[.throwObject, default: 0] -= 6.0
-                    }
-                    if !needsRecharge,
-                       carryingLetterBlock,
-                       let character = characterNode,
-                       let slot = letterSlotTarget {
-                        let c = character.presentation.worldPosition
-                        let t = slot.presentation.worldPosition
-                        let dx = Float(t.x - c.x)
-                        let dz = Float(t.z - c.z)
-                        let distance = sqrt(dx * dx + dz * dz)
-                        if distance <= letterPlaceReach {
-                            merged[.placeObject, default: 0] += 8.0
-                        } else {
-                            merged[.placeObject, default: 0] -= 3.0
-                            merged[.throwObject, default: 0] -= 3.0
-                        }
-                    }
-                    
-                    // INCREASED PUSH ADVISORY WEIGHT: If a push target is in front of him, heavily favor pushing
-                    if let target = pushTargetNode,
-                       target.parent != nil,
-                       allowedActions.contains(.pushObject),
-                       let character = characterNode {
-                        let c = character.presentation.worldPosition
-                        let n = target.presentation.worldPosition
-                        let dx = Float(n.x - c.x)
-                        let dz = Float(n.z - c.z)
-                        let distance = sqrt(dx * dx + dz * dz)
-                        let forward = forwardVector()
-                        let ahead = dx * forward.x + dz * forward.z
-                        let sideways = abs(dx * forward.z - dz * forward.x)
-                        let alignment = distance > 0.001 ? ahead / distance : 0
-                        
-                        if distance.isFinite, distance <= 2.0,
-                           ahead > 0.05, alignment > 0.4 {
-                            merged[.pushObject, default: 0] += 18.0 // Boosted to override walking into it
-                            merged[.walk, default: 0] -= 5.0      // Penalize walking directly into it
-                            merged[.run, default: 0] -= 5.0
-                        } else {
-                            merged[.pushObject, default: 0] -= 1.0
-                        }
-                    }
-                    return merged
+                baseValues: [FrankensteinAction: Float],
+                allowedActions: [FrankensteinAction]
+            ) -> [FrankensteinAction: Float] {
+                var merged = baseValues
+                let goalKey = goalStateKey(terrain: latestTerrainSample)
+                let goalValues = executive.learner.values(for: goalKey)
+                let objectKey = latestDetection.map {
+                    objectStateKey(for: $0, terrain: latestTerrainSample)
                 }
-
+                let objectValues = objectKey.map {
+                    executive.learner.values(for: $0)
+                } ?? [:]
+                for action in allowedActions {
+                    let actionName = String(describing: action)
+                    let goalValue = goalValues[actionName] ?? 0
+                    let objectValue = objectValues[actionName] ?? 0
+                    merged[action, default: 0] +=
+                        0.35 * goalValue +
+                        0.20 * objectValue
+                }
+                if allowedActions.contains(.liftObject), canLiftNow {
+                    merged[.liftObject, default: 0] += 5.0
+                    merged[.jump, default: 0] -= 5.0
+                }
+                
+                if carryingDog {
+                    merged[.placeObject, default: 0] += dogHoldSeconds >= dogLoveSeconds ? 8.0 : -4.0
+                    merged[.throwObject, default: 0] -= 6.0
+                }
+                if !needsRecharge,
+                   carryingLetterBlock,
+                   let character = characterNode,
+                   let slot = letterSlotTarget {
+                    let c = character.presentation.worldPosition
+                    let t = slot.presentation.worldPosition
+                    let dx = Float(t.x - c.x)
+                    let dz = Float(t.z - c.z)
+                    let distance = sqrt(dx * dx + dz * dz)
+                    if distance <= letterPlaceReach {
+                        merged[.placeObject, default: 0] += 8.0
+                    } else {
+                        merged[.placeObject, default: 0] -= 3.0
+                        merged[.throwObject, default: 0] -= 3.0
+                    }
+                }
+                
+                // INCREASED PUSH ADVISORY WEIGHT: If a push target is in front of him, heavily favor pushing
+                if let target = pushTargetNode,
+                   target.parent != nil,
+                   allowedActions.contains(.pushObject),
+                   let character = characterNode {
+                    let c = character.presentation.worldPosition
+                    let n = target.presentation.worldPosition
+                    let dx = Float(n.x - c.x)
+                    let dz = Float(n.z - c.z)
+                    let distance = sqrt(dx * dx + dz * dz)
+                    let forward = forwardVector()
+                    let ahead = dx * forward.x + dz * forward.z
+                    let sideways = abs(dx * forward.z - dz * forward.x)
+                    let alignment = distance > 0.001 ? ahead / distance : 0
+                    
+                    if distance.isFinite, distance <= 2.0,
+                       ahead > 0.05, alignment > 0.4 {
+                        merged[.pushObject, default: 0] += 18.0 // Boosted to override walking into it
+                        merged[.walk, default: 0] -= 5.0      // Penalize walking directly into it
+                        merged[.run, default: 0] -= 5.0
+                    } else {
+                        merged[.pushObject, default: 0] -= 1.0
+                    }
+                }
+                return merged
+            }
 
     private func findPushTargetNode(
         character: SCNNode,
@@ -2037,7 +2036,12 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 node.name == "LetterBlock_\(letter)_\(index)"
             }.first
         }
-       private func updateLetterMission() {
+
+    /// Chooses the block and slot to work on, and sets a block into its slot
+    /// when it has been put down on it.
+    /// Chooses the block and slot to work on, and sets a block into its slot
+        /// when it has been put down on it.
+        private func updateLetterMission() {
                 guard let scene, let character = characterNode else { return }
                 guard !needsRecharge else { return }
 
