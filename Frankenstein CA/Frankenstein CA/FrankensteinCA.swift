@@ -35,25 +35,29 @@ final class FrankensteinCA: ObservableObject {
     /// before the CA's own scoring vetoes the plan.
     private let planCommitmentMargin: Float = 0.35
 
-    // MARK: - Stagnation Detection
+    // MARK: - Stagnation Detection & Plan Abandonment
     @Published private(set) var isStagnant: Bool = false
     @Published var stagnationStatus = "Moving normally"
     
     private var lastKnownPosition: SIMD3<Float> = .zero
     private var stagnationTimeAccumulator: TimeInterval = 0
-    private let stagnationTimeLimit: TimeInterval = 1.5
+    private let stagnationTimeLimit: TimeInterval = 1.2
 
     func checkStagnation(currentPosition: SIMD3<Float>, deltaTime: TimeInterval) {
         let dx = currentPosition.x - lastKnownPosition.x
         let dz = currentPosition.z - lastKnownPosition.z
         let movedDistance = sqrt(dx * dx + dz * dz)
 
-        if movedDistance < 0.01 {
+        if movedDistance < 0.015 {
             stagnationTimeAccumulator += deltaTime
             if stagnationTimeAccumulator >= stagnationTimeLimit {
                 isStagnant = true
                 futilityCount += 1
-                stagnationStatus = "Stagnation detected: Frankenstein has not moved for \(String(format: "%.1f", stagnationTimeAccumulator))s"
+                stagnationStatus = "Stagnation detected: Plan abandoned, replanning..."
+                
+                // Abandon current plan and force immediate replan/reroute
+                planBuffer.invalidate(reason: "Stagnation blockage detected; abandoning plan")
+                plannedSequence.removeAll()
             }
         } else {
             stagnationTimeAccumulator = 0
