@@ -252,6 +252,12 @@ final class FrankensteinLocomotion {
         )
     }
 
+    /// The Coordinator steers him along the plan spline and tells locomotion
+    /// his new facing, so the next frame does not overwrite it.
+    func setHeading(_ value: Float) {
+        output.heading = value
+    }
+
     func reportRecharge() {
         guard policy.isAwaitingOutcome else { return }
         _ = policy.learn(
@@ -1276,4 +1282,3 @@ final class FrankensteinLocomotion {
         lastCACommand = .walk
     }
 }
-

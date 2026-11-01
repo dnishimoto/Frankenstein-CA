@@ -191,6 +191,14 @@ struct FrankensteinCAPerception {
     var nearestObjectMovable = false
     var nearestObjectName = ""
 
+    /// A letterless block or the table that sits on the route to the goal.
+    /// The plan clears it (kick the table, lift a block) before continuing.
+    var obstructionName = ""
+    var obstructionDistance: Float = .infinity
+    var obstructionAction: FrankensteinAction?
+    /// He is walking but not displacing himself: clearing it is urgent.
+    var obstructionBlocked = false
+
     var distantObjectSummary = ""
     var routeRelativeHeadings: [Float] = []
     var advisoryValues: [FrankensteinAction: Float] = [:]

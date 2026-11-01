@@ -60,37 +60,21 @@ enum FrankensteinActionConstraints {
             }
 
         case .hurdle:
-                    let canClearOver =
-                        terrain.obstacleHeight > 0 &&
-                        terrain.obstacleHeight <= 0.75 &&
-                        terrain.isLandingAreaClear
+            let canClearOver =
+                terrain.obstacleHeight > 0 &&
+                terrain.obstacleHeight <= 0.75 &&
+                terrain.isLandingAreaClear
 
-                    let canJumpOnto =
-                        terrain.canLandOnObject &&
-                        terrain.obstacleHeight > 0 &&
-                        terrain.obstacleHeight <= 1.5
+            let canJumpOnto =
+                terrain.canLandOnObject &&
+                terrain.obstacleHeight > 0 &&
+                terrain.obstacleHeight <= 1.5
 
-                    if canClearOver || canJumpOnto || terrain.objectName.lowercased().contains("recharge") {
-                        actions = [.jump, .stepUp, .turnLeft, .turnRight, .backward]
-                    } else {
-                        actions = [.turnLeft, .turnRight, .backward]
-                    }
-
-                case .raisedStep:
-                    if terrain.obstacleHeight > 0,
-                       terrain.obstacleHeight <= 0.45,
-                       terrain.isGroundAhead {
-                        actions = [.stepUp, .jump, .turnLeft, .turnRight, .backward]
-                    } else if terrain.obstacleHeight > 0,
-                              terrain.obstacleHeight <= 1.5,
-                              (terrain.isLandingAreaClear || terrain.canLandOnObject || terrain.objectName.lowercased().contains("recharge")) {
-                        actions = [.jump, .stepUp, .turnLeft, .turnRight, .backward]
-                    } else {
-                        actions = [.turnLeft, .turnRight, .backward]
-                    }
-
-        case .lowCeiling:
-            actions = [.crouch, .crawl, .roll, .turnLeft, .turnRight, .backward]
+            if canClearOver || canJumpOnto || terrain.objectName.lowercased().contains("recharge") {
+                actions = [.jump, .stepUp, .turnLeft, .turnRight, .backward]
+            } else {
+                actions = [.turnLeft, .turnRight, .backward]
+            }
 
         case .raisedStep:
             if terrain.obstacleHeight > 0,
@@ -98,12 +82,15 @@ enum FrankensteinActionConstraints {
                terrain.isGroundAhead {
                 actions = [.stepUp, .jump, .turnLeft, .turnRight, .backward]
             } else if terrain.obstacleHeight > 0,
-                      terrain.obstacleHeight <= 0.75,
-                      terrain.isLandingAreaClear {
-                actions = [.jump, .turnLeft, .turnRight, .backward]
+                      terrain.obstacleHeight <= 1.5,
+                      (terrain.isLandingAreaClear || terrain.canLandOnObject || terrain.objectName.lowercased().contains("recharge")) {
+                actions = [.jump, .stepUp, .turnLeft, .turnRight, .backward]
             } else {
                 actions = [.turnLeft, .turnRight, .backward]
             }
+
+        case .lowCeiling:
+            actions = [.crouch, .crawl, .roll, .turnLeft, .turnRight, .backward]
 
         case .flat, .slope, .uneven:
             actions = [.walk, .run, .stepForward, .roll, .turnLeft, .turnRight, .backward]
@@ -118,12 +105,27 @@ enum FrankensteinActionConstraints {
             actions.append(.stepDown)
         }
 
-          if terrain.objectMovable,
-                   !terrain.carryingObject,
-                   terrain.distance.isFinite,
-                   terrain.distance <= 1.2 {
-                    actions.append(contentsOf: [.pushObject, .kickObject])
-                }
+        func add(_ extra: [FrankensteinAction]) {
+            for action in extra where !actions.contains(action) {
+                actions.append(action)
+            }
+        }
+
+        if terrain.objectMovable,
+           !terrain.carryingObject,
+           terrain.distance.isFinite,
+           terrain.distance <= 1.2 {
+            add([.pushObject, .kickObject])
+        }
+
+        // A table in the way (it reads as a hurdle) can be pushed or kicked
+        // out of the path, or crawled under, as well as jumped or stepped on.
+        if terrain.objectName.lowercased() == "table",
+           !terrain.carryingObject,
+           terrain.distance.isFinite,
+           terrain.distance <= 1.5 {
+            add([.pushObject, .kickObject, .crawl])
+        }
         // Lifting needs a liftable object within reach and free hands.
         if terrain.objectPickupable, !terrain.carryingObject {
             actions.append(.liftObject)
