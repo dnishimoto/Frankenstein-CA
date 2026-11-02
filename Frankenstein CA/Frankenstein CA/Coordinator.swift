@@ -3260,47 +3260,49 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private func configurePhysicsBody(for node: SCNNode, forceDynamic: Bool) {
-        let hasOwnGeometry = node.geometry != nil
-        let hasDescendantGeometry = node.childNodes.contains { child in
-            child.geometry != nil || child.childNodes.contains(where: { $0.geometry != nil })
-        }
-        guard hasOwnGeometry || hasDescendantGeometry else { return }
-        let name = (node.name ?? "").lowercased()
-        if name.contains("chasm") || name.contains("void") || name.contains("gap") ||
-           name.contains("qfloorgrid") || name.contains("marker") || name.contains("camera") || name.contains("light") {
-            return
-        }
-        if isCharacterPart(node) || isQGridNode(node) { return }
-        let movableTokens = ["table", "crate", "box", "movable", "pickup", "chair", "stool", "block", "object","stair","step"]
-        let supportTokens = ["floor", "ground", "platform", "terrain", "wall", "doorframe"]
-        let shouldBeDynamic = forceDynamic || movableTokens.contains(where: { name.contains($0) })
-        let shouldBeStatic = supportTokens.contains(where: { name.contains($0) })
+            let hasOwnGeometry = node.geometry != nil
+            let hasDescendantGeometry = node.childNodes.contains { child in
+                child.geometry != nil || child.childNodes.contains(where: { $0.geometry != nil })
+            }
+            guard hasOwnGeometry || hasDescendantGeometry else { return }
+            
+            let name = (node.name ?? "").lowercased()
+            if name.contains("chasm") || name.contains("void") || name.contains("gap") ||
+               name.contains("qfloorgrid") || name.contains("marker") || name.contains("camera") || name.contains("light") {
+                return
+            }
+            if isCharacterPart(node) || isQGridNode(node) { return }
+            
+            let movableTokens = ["table", "crate", "box", "movable", "pickup", "chair", "stool", "block", "object", "stair", "step"]
+            let supportTokens = ["floor", "ground", "platform", "terrain", "wall", "doorframe"]
+            let shouldBeDynamic = forceDynamic || movableTokens.contains(where: { name.contains($0) })
+            let shouldBeStatic = supportTokens.contains(where: { name.contains($0) })
 
-        if shouldBeDynamic {
-            if node.physicsBody == nil || node.physicsBody?.type != .dynamic {
-                let shape = SCNPhysicsShape(node: node, options: nil)
-                let body = SCNPhysicsBody(type: .dynamic, shape: shape)
-                let size = worldDimensions(of: node)
-                let volume = max(0.01, size.x * size.y * size.z)
-                body.mass = CGFloat(min(30, max(0.5, volume * 3.0)))
-                body.friction = 0.8
-                body.rollingFriction = 0.8
-                body.restitution = 0.02
-                body.damping = 0.12
-                body.angularDamping = 0.2
-                body.allowsResting = true
-                node.physicsBody = body
-            }
-        } else if shouldBeStatic {
-            if node.physicsBody == nil || node.physicsBody?.type != .static {
-                let shape = SCNPhysicsShape(node: node, options: nil)
-                let body = SCNPhysicsBody(type: .static, shape: shape)
-                body.friction = 0.9
-                body.restitution = 0
-                node.physicsBody = body
+            if shouldBeDynamic {
+                if node.physicsBody == nil || node.physicsBody?.type != .dynamic {
+                    let shape = SCNPhysicsShape(node: node, options: nil)
+                    let body = SCNPhysicsBody(type: .dynamic, shape: shape)
+                    let size = worldDimensions(of: node)
+                    let volume = max(0.01, size.x * size.y * size.z)
+                    body.mass = CGFloat(min(30, max(0.5, volume * 3.0)))
+                    body.friction = 0.8
+                    body.rollingFriction = 0.8
+                    body.restitution = 0.02
+                    body.damping = 0.12
+                    body.angularDamping = 0.2
+                    body.allowsResting = true
+                    node.physicsBody = body
+                }
+            } else if shouldBeStatic {
+                if node.physicsBody == nil || node.physicsBody?.type != .static {
+                    let shape = SCNPhysicsShape(node: node, options: nil)
+                    let body = SCNPhysicsBody(type: .static, shape: shape)
+                    body.friction = 0.9
+                    body.restitution = 0
+                    node.physicsBody = body
+                }
             }
         }
-    }
 
     private func worldDimensions(of node: SCNNode) -> SCNVector3 {
         let (minimum, maximum) = node.boundingBox

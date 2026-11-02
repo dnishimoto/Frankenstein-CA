@@ -453,6 +453,7 @@ final class FrankensteinCA: ObservableObject {
         case .jump:        return (1.2, false)
         case .stepUp:      return (0.6, false)
         case .pushObject:  return (0.5, false)
+        case .kickObject:  return (2.5, false)
         default:           return nil
         }
     }
