@@ -460,14 +460,13 @@ final class FrankensteinCA: ObservableObject {
     }
 
     private func routeHeading(
-        atProgress progress: Float,
-        perception p: FrankensteinCAPerception
-    ) -> Float {
-        let route = p.routeRelativeHeadings
-        guard !route.isEmpty else { return p.headingError }
-        let cell = max(0, Int(progress / planCellLength))
-        return route[min(cell, route.count - 1)]
-    }
+            atProgress progress: Float,
+            perception p: FrankensteinCAPerception
+        ) -> Float {
+            let route = p.routeRelativeHeadings.isEmpty ? [p.headingError] : p.routeRelativeHeadings
+            let cell = max(0, Int(progress / planCellLength))
+            return route[min(cell, route.count - 1)]
+        }
 
     private func clearance(
         forHeading heading: Float,
@@ -593,37 +592,35 @@ final class FrankensteinCA: ObservableObject {
         }
 
     private func planValues(
-        for actions: [FrankensteinAction],
-        perception p: FrankensteinCAPerception
-    ) -> [FrankensteinAction: Float] {
-        guard !p.routeRelativeHeadings.isEmpty else {
-            plannedSequence = []
-            return [:]
-        }
+            for actions: [FrankensteinAction],
+            perception p: FrankensteinCAPerception
+        ) -> [FrankensteinAction: Float] {
+            // Fallback to heading error if path field headings are temporarily empty
+            let activeHeadings = p.routeRelativeHeadings.isEmpty ? [p.headingError] : p.routeRelativeHeadings
 
-        var values: [FrankensteinAction: Float] = [:]
-        var bestValue: Float = -.infinity
-        var bestSequence: [FrankensteinAction] = []
+            var values: [FrankensteinAction: Float] = [:]
+            var bestValue: Float = -.infinity
+            var bestSequence: [FrankensteinAction] = []
 
-        for action in actions {
-            let first = planStep(action, from: Rollout(), perception: p)
-            let rest = bestContinuation(from: first, depth: planHorizon - 1, perception: p)
-            values[action] = rest.value
+            for action in actions {
+                let first = planStep(action, from: Rollout(), perception: p)
+                let rest = bestContinuation(from: first, depth: planHorizon - 1, perception: p)
+                values[action] = rest.value
 
-            if rest.value > bestValue {
-                bestValue = rest.value
-                bestSequence = [action] + rest.sequence
+                if rest.value > bestValue {
+                    bestValue = rest.value
+                    bestSequence = [action] + rest.sequence
+                }
             }
+
+            plannedSequence = bestSequence
+
+            for (action, value) in values {
+                values[action] = planGain * (value - bestValue)
+            }
+
+            return values
         }
-
-        plannedSequence = bestSequence
-
-        for (action, value) in values {
-            values[action] = planGain * (value - bestValue)
-        }
-
-        return values
-    }
 
     @Published private(set) var futilityCount: Int = 0
     @Published private(set) var futilityStatus = "No loop detected"
