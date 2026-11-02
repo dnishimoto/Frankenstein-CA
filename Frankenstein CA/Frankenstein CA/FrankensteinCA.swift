@@ -5,7 +5,13 @@ import SceneKit
 import UIKit
 
 final class FrankensteinCA: ObservableObject {
-
+     private var previousRouteHeadings: [Float] = []
+    private let routeChangeThreshold: Float = 0.30
+    private let planHorizon = 5
+        private let planActionSeconds: Float = 0.35
+        private let planTurnPerAction: Float = 0.9 * 0.35
+        private let planCellLength: Float = 0.5
+        private let planGain: Float = 1.5
     let size = 18
     // MARK: - Dirty Q-Values Field of Vision Tracking
     @Published private(set) var dirtyQCells: [[Bool]]
@@ -86,6 +92,7 @@ final class FrankensteinCA: ObservableObject {
     private let steeringGain: Float = 1.2
     private let alignedHeadingTolerance: Float = 0.2
     private let steeringDeadband: Float = 0.12
+    private(set) var plannedSequence: [FrankensteinAction] = []
 
     private var noveltyScale: Float {
         max(0.08, 0.5 * powf(0.9997, Float(totalDecisions)))
@@ -363,6 +370,8 @@ final class FrankensteinCA: ObservableObject {
         }
     }
 
+    // FrankensteinCA_6.swift
+
     private func predictedGoalScore(
         for action: FrankensteinAction,
         perception p: FrankensteinCAPerception
@@ -371,31 +380,44 @@ final class FrankensteinCA: ObservableObject {
         let alignment = max(0, cosf(p.headingError))
         let objectName = p.nearestObjectName.lowercased()
         
-        // If he sees a target letter block, make reaching/fetching it a top priority
+        // ---> ADD THIS HAZARD EVASION OVERRIDE <---
+        // If clearance ahead is critically low (e.g., edge of a gap or wall),
+        // heavily favor backing up and turning to immediately break buffer inertia.
+        if p.clearanceAhead < 0.8 {
+            if action == .backward {
+                score += 6.0 // Instantly overrides the 0.35 commitment margin
+            } else if action == .turnLeft || action == .turnRight {
+                score += 3.0
+            } else if action == .walk || action == .run || action == .pushObject {
+                score -= 5.0 // Heavily penalize pushing forward into the hazard
+            }
+        }
+        // ------------------------------------------
+
         let isTargetLetter = objectName.contains("letterblock") || objectName.contains("floatingletter")
         
         switch action {
         case .pushObject:
             if p.nearestObjectMovable, p.nearestObjectDistance <= 2.0 {
-                score += 6.0 // High priority to clear any obstructing blocks in front of the letters
+                score += 6.0
             } else {
                 score -= 0.5
             }
             
         case .throwObject:
             if p.nearestObjectMovable || objectName.contains("block") {
-                score += 4.5 // Throw obstacles out of the way if they block the path to the letters
+                score += 4.5
             } else {
                 score -= 0.2
             }
             
         case .liftObject:
             if p.nearestObjectPickupable && (isTargetLetter || p.nearestObjectDistance <= 1.25) {
-                score += 8.0 // Strongly favor picking up the letter block once reached
+                score += 8.0
             }
         case .backward:
             if p.carryingLetterBlock {
-                score += 6.0 // High priority to retreat safely away from hazards when holding a letter block
+                score += 6.0
             } else {
                 score += 0.1
             }
@@ -409,13 +431,7 @@ final class FrankensteinCA: ObservableObject {
         return score
     }
 
-    private let planHorizon = 3
-    private let planActionSeconds: Float = 0.35
-    private let planTurnPerAction: Float = 0.9 * 0.35
-    private let planCellLength: Float = 0.5
-    private let planGain: Float = 1.5
 
-    private(set) var plannedSequence: [FrankensteinAction] = []
 
     private struct Rollout {
         var heading: Float = 0
@@ -601,32 +617,40 @@ final class FrankensteinCA: ObservableObject {
     }
 
     private func bestContinuation(
-            from state: Rollout,
-            depth: Int,
-            perception p: FrankensteinCAPerception
-        ) -> (value: Float, sequence: [FrankensteinAction]) {
-            guard depth > 0 else {
-                return (terminalPlanValue(state, perception: p), [])
-            }
-
-            var best: (value: Float, sequence: [FrankensteinAction]) = (-.infinity, [])
-
-            // Fix: Added .kickObject to the rollout action set
-            for action in [FrankensteinAction.walk, .run, .turnLeft, .turnRight, .pushObject, .kickObject] {
-                let result = bestContinuation(
-                    from: planStep(action, from: state, perception: p),
-                    depth: depth - 1,
-                    perception: p
-                )
-
-                if result.value > best.value {
-                    best = (result.value, [action] + result.sequence)
-                }
-            }
-
-            return best
+        from state: Rollout,
+        depth: Int,
+        perception p: FrankensteinCAPerception
+    ) -> (value: Float, sequence: [FrankensteinAction]) {
+        guard depth > 0 else {
+            return (terminalPlanValue(state, perception: p), [])
         }
 
+        var best: (value: Float, sequence: [FrankensteinAction]) = (-.infinity, [])
+
+        // Expanded rollout action set including backward movement for retreat maneuvers
+        for action in [
+            FrankensteinAction.walk,
+            .run,
+            .turnLeft,
+            .turnRight,
+            .stepForward,
+            .backward,
+            .pushObject,
+            .kickObject
+        ] {
+            let result = bestContinuation(
+                from: planStep(action, from: state, perception: p),
+                depth: depth - 1,
+                perception: p
+            )
+
+            if result.value > best.value {
+                best = (result.value, [action] + result.sequence)
+            }
+        }
+
+        return best
+    }
    
 
     @Published private(set) var futilityCount: Int = 0
@@ -904,9 +928,21 @@ final class FrankensteinCA: ObservableObject {
         planQValues = qValues
 
         let p = currentPerception()
+        
+        // Reconcile plan when route changes[cite: 29]
+        if let p,
+           routeHasChanged(p.routeRelativeHeadings) {
+
+            planBuffer.invalidate(
+                reason: "Pathfield changed: reconsidering route around obstruction"
+            )
+
+            plannedSequence.removeAll()
+        }
+
         let stateKey = p?.stateKey ?? "none"
 
-        let plan: [FrankensteinAction: Float]
+        var plan: [FrankensteinAction: Float]
         if let p {
             plan = planValues(for: allowedActions, perception: p)
         } else {
@@ -914,7 +950,20 @@ final class FrankensteinCA: ObservableObject {
             plan = [:]
         }
 
-        updatePlanBuffer(plan: plan, allowed: allowedActions, perception: p)
+        // Activate obstruction planning[cite: 29]
+        if let p {
+            applyObstructionToPlan(
+                &plan,
+                allowed: allowedActions,
+                perception: p
+            )
+        }
+
+        updatePlanBuffer(
+            plan: plan,
+            allowed: allowedActions,
+            perception: p
+        )
 
         var best = allowedActions[0]
         var bestParts = scoreParts(for: best, perception: p, terrain: terrain, plan: plan)
@@ -1030,6 +1079,39 @@ final class FrankensteinCA: ObservableObject {
         return count
     }
 
+
+    private func routeHasChanged(
+        _ headings: [Float]
+    ) -> Bool {
+        guard !previousRouteHeadings.isEmpty,
+              !headings.isEmpty else {
+            previousRouteHeadings = headings
+            return false
+        }
+
+        let count = min(
+            headings.count,
+            previousRouteHeadings.count
+        )
+
+        var maximumChange: Float = 0
+
+        for index in 0..<count {
+            let difference = abs(
+                wrapped(headings[index] - previousRouteHeadings[index])
+            )
+
+            maximumChange = max(maximumChange, difference)
+        }
+
+        let changed =
+            maximumChange >= routeChangeThreshold ||
+            headings.count != previousRouteHeadings.count
+
+        previousRouteHeadings = headings
+
+        return changed
+    }
     private func countLiveCells() -> Int {
         grid.reduce(0) { $0 + $1.filter { $0 }.count }
     }
