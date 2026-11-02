@@ -6,6 +6,7 @@ import SwiftUI
 import UIKit
 
 final class Coordinator: NSObject, SCNSceneRendererDelegate {
+    private weak var currentObstructionTarget: SCNNode?
     private var movableObjectNodes: [SCNNode] = []
     private var lastSplineIndex: Int = 0
     let energyManager: FrankensteinEnergyManager
@@ -247,42 +248,66 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private var goalNode: SCNNode? {
-            if needsRecharge { return rechargeStationNode }
-            if carryingDog { return nil }
-            if carriedNode == nil, let dog = dogTarget { return dog }
+        if needsRecharge { return rechargeStationNode }
+        if carryingDog { return nil }
+        if carriedNode == nil, let dog = dogTarget { return dog }
+        
+        // 1. STRICT PRESERVATION: While carrying a letter block, never let local
+        // obstructions hijack the goal. Lock firmly onto the letter slot destination.
+        if carryingLetterBlock {
+            currentObstructionTarget = nil // Clear any lingering obstruction sub-goals
+            return letterSlotTarget
+        }
+        
+        // 2. STICKY SUB-GOAL: If we are already dealing with an obstruction sub-goal,
+        // maintain focus on it until it is cleared or out of range, preventing frame-by-frame jitter.
+        if let obstruction = currentObstructionTarget, obstruction.parent != nil {
+            let characterPos = characterNode?.presentation.worldPosition ?? SCNVector3Zero
+            let pos = obstruction.presentation.worldPosition
+            let dx = Float(pos.x - characterPos.x)
+            let dz = Float(pos.z - characterPos.z)
+            let dist = sqrt(dx * dx + dz * dz)
             
-            // Smart Obstacle Clearance: Check if any movable block or table blocks the direct route
-            if carriedNode == nil, let missionGoal = missionGoalNode {
-                let characterPos = characterNode?.presentation.worldPosition ?? SCNVector3Zero
-                let goalPos = missionGoal.presentation.worldPosition
+            // Keep targeting the obstruction as a sub-goal if close and path is tight
+            if dist < 3.0 && clearanceAhead < 1.5 {
+                return obstruction
+            } else {
+                currentObstructionTarget = nil // Release sub-goal once cleared
+            }
+        }
+        
+        // 3. OBSTRUCTION EVALUATION: Only evaluate new obstacles as sub-goals
+        // when Frankenstein's forward clearance is actively blocked.
+        if carriedNode == nil, let missionGoal = missionGoalNode {
+            let characterPos = characterNode?.presentation.worldPosition ?? SCNVector3Zero
+            let goalPos = missionGoal.presentation.worldPosition
+            
+            for node in movableObjectNodes {
+                guard node.parent != nil, node !== missionGoal else { continue }
+                let pos = node.presentation.worldPosition
                 
-                // Find any movable obstacle between Frankenstein and his goal
-                for node in movableObjectNodes {
-                    guard node.parent != nil, node !== missionGoal else { continue }
-                    let pos = node.presentation.worldPosition
-                    
-                    // Vector math: Is this node directly between character and goal?
-                    let toGoalX = goalPos.x - characterPos.x
-                    let toGoalZ = goalPos.z - characterPos.z
-                    let toObjX = pos.x - characterPos.x
-                    let toObjZ = pos.z - characterPos.z
-                    
-                    let distToObj = sqrt(toObjX * toObjX + toObjZ * toObjZ)
-                    let distToGoal = sqrt(toGoalX * toGoalX + toGoalZ * toGoalZ)
-                    
-                    // If the object is ahead of him and closer than the goal
-                    if distToObj < distToGoal && distToObj < 3.5 {
-                        let dot = (toObjX * toGoalX + toObjZ * toGoalZ) / (distToObj * distToGoal)
-                        if dot > 0.75 { // Narrow cone alignment toward goal
-                            return node // Target this obstruction to push/clear it first!
-                        }
+                let toGoalX = goalPos.x - characterPos.x
+                let toGoalZ = goalPos.z - characterPos.z
+                let toObjX = pos.x - characterPos.x
+                let toObjZ = pos.z - characterPos.z
+                
+                let distToObj = sqrt(toObjX * toObjX + toObjZ * toObjZ)
+                let distToGoal = sqrt(toGoalX * toGoalX + toGoalZ * toGoalZ)
+                
+                if distToObj < distToGoal && distToObj < 3.5 {
+                    let dot = (toObjX * toGoalX + toObjZ * toGoalZ) / (distToObj * distToGoal)
+                    // Require narrow alignment AND low clearance before locking onto it as a sub-goal
+                    if dot > 0.75 && clearanceAhead < 1.0 {
+                        currentObstructionTarget = node
+                        return node
                     }
                 }
             }
-            
-            guard let index = letterTargetIndex else { return nil }
-            return carryingLetterBlock ? letterSlotTarget : letterBlockTarget
         }
+        
+        guard let index = letterTargetIndex else { return nil }
+        return carryingLetterBlock ? letterSlotTarget : letterBlockTarget
+    }
     private func bestInteractionTarget(
         toward missionGoal: SCNNode
     ) -> SCNNode? {
@@ -2977,73 +3002,72 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         // MARK: - Spline Look-Ahead Point (Forward-Constrained Index Search)
     private func splineLookAheadPoint(
-                from position: SCNVector3,
-                path: [SIMD2<Float>],
-                distance: Float = 0.8
-            ) -> SIMD2<Float>? {
-                guard path.count >= 2 else { return nil }
+        from position: SCNVector3,
+        path: [SIMD2<Float>],
+        distance: Float = 0.8
+    ) -> SIMD2<Float>? {
+        guard path.count >= 2 else { return nil }
 
-                let p = SIMD2<Float>(Float(position.x), Float(position.z))
+        let p = SIMD2<Float>(Float(position.x), Float(position.z))
 
-                // Ensure lastSplineIndex is within valid bounds before using it
-                if lastSplineIndex < 0 || lastSplineIndex >= path.count {
-                    lastSplineIndex = 0
-                }
+        if lastSplineIndex < 0 || lastSplineIndex >= path.count {
+            lastSplineIndex = 0
+        }
 
-                // Search forward from lastSplineIndex within a local window to prevent snapping backwards
-                let searchWindow = 15
-                let startIdx = max(0, lastSplineIndex)
-                let endIdx = min(path.count - 1, lastSplineIndex + searchWindow)
+        // Bidirectional window: look slightly behind (-5) to recover from drift, and further ahead (+25)
+        let searchBack = 5
+        let searchForward = 25
+        let startIdx = max(0, lastSplineIndex - searchBack)
+        let endIdx = min(path.count - 1, lastSplineIndex + searchForward)
 
-                var nearestIndex = startIdx
-                var nearestDistance = Float.greatestFiniteMagnitude
+        var nearestIndex = startIdx
+        var nearestDistance = Float.greatestFiniteMagnitude
 
-                for i in startIdx...endIdx {
-                    let d = simd_distance(p, path[i])
-                    if d < nearestDistance {
-                        nearestDistance = d
-                        nearestIndex = i
-                    }
-                }
-                
-                // Fallback full search if out of range
-                if nearestDistance > 2.0 {
-                    for i in path.indices {
-                        let d = simd_distance(p, path[i])
-                        if d < nearestDistance {
-                            nearestDistance = d
-                            nearestIndex = i
-                        }
-                    }
-                }
-
-                // Final safeguard clamp
-                nearestIndex = max(0, min(nearestIndex, path.count - 1))
-                lastSplineIndex = nearestIndex
-
-                var remaining = max(0, distance)
-                var current = path[nearestIndex]
-
-                for i in nearestIndex..<(path.count - 1) {
-                    let next = path[i + 1]
-                    let segment = next - current
-                    let segmentLength = simd_length(segment)
-
-                    if segmentLength <= 0.0001 {
-                        current = next
-                        continue
-                    }
-
-                    if remaining <= segmentLength {
-                        return current + segment / segmentLength * remaining
-                    }
-
-                    remaining -= segmentLength
-                    current = next
-                }
-
-                return path.last
+        for i in startIdx...endIdx {
+            let d = simd_distance(p, path[i])
+            if d < nearestDistance {
+                nearestDistance = d
+                nearestIndex = i
             }
+        }
+        
+        // Fallback full search if out of local range
+        if nearestDistance > 2.5 {
+            for i in path.indices {
+                let d = simd_distance(p, path[i])
+                if d < nearestDistance {
+                    nearestDistance = d
+                    nearestIndex = i
+                }
+            }
+        }
+
+        nearestIndex = max(0, min(nearestIndex, path.count - 1))
+        lastSplineIndex = nearestIndex
+
+        var remaining = max(0, distance)
+        var current = path[nearestIndex]
+
+        for i in nearestIndex..<(path.count - 1) {
+            let next = path[i + 1]
+            let segment = next - current
+            let segmentLength = simd_length(segment)
+
+            if segmentLength <= 0.0001 {
+                current = next
+                continue
+            }
+
+            if remaining <= segmentLength {
+                return current + segment / segmentLength * remaining
+            }
+
+            remaining -= segmentLength
+            current = next
+        }
+
+        return path.last
+    }
         // MARK: - Movement Application
     // MARK: - Movement Application
         private func applyMovement(
