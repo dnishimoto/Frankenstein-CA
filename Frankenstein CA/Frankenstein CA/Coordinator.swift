@@ -2176,8 +2176,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         }
     }
 
-    /// Chooses the block and slot to work on, and sets a block into its slot
-    /// when it has been put down on it.
+    
     private func updateLetterMission() {
         guard let scene, let character = characterNode else { return }
         guard !needsRecharge else { return }
@@ -2299,7 +2298,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         runAssist(character: character)
     }
-
+ 
     private func runAssist(character: SCNNode) {
             let c = character.presentation.worldPosition
             func planarDistance(to node: SCNNode) -> Float {
