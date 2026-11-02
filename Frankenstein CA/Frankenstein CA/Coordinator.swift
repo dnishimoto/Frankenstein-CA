@@ -248,102 +248,90 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private var goalNode: SCNNode? {
-        // Highest-priority objectives
-        if needsRecharge {
-            return rechargeStationNode
-        }
-
-        if carryingDog {
-            return nil
-        }
-
-        if carriedNode == nil, let dog = dogTarget {
-            return dog
-        }
-
-        // 1. STRICT PRESERVATION:
-        // While carrying a letter block, lock onto the letter slot destination.
-        if carryingLetterBlock {
-            currentObstructionTarget = nil
-            return letterSlotTarget
-        }
-
-        // 2. STICKY SUB-GOAL:
-        // Keep pursuing an active obstruction until it is cleared or out of range.
-        if let obstruction = currentObstructionTarget, obstruction.parent != nil {
-            if let characterNode = characterNode,
-               distance(from: characterNode.presentation.worldPosition,
-                        to: obstruction.presentation.worldPosition) < 3.0,
-               clearanceAhead < 1.5 {
-                return obstruction
+            // Highest-priority objectives
+            if needsRecharge {
+                return rechargeStationNode ?? scene?.rootNode
             }
 
-            currentObstructionTarget = nil
-        }
-
-        // 3. OBSTRUCTION EVALUATION:
-        // Consider a movable object as a sub-goal only when it lies roughly between
-        // Frankenstein and the mission goal, and forward clearance is limited.
-        if carriedNode == nil,
-           let missionGoal = missionGoalNode,
-           let characterNode = characterNode {
-
-            let characterPosition = characterNode.presentation.worldPosition
-            let goalPosition = missionGoal.presentation.worldPosition
-
-            let toGoal = simd_float2(goalPosition.x - characterPosition.x,
-                                     goalPosition.z - characterPosition.z)
-            let distanceToGoal = simd_length(toGoal)
-
-            guard distanceToGoal > 0.001 else {
-                return missionGoal
+            if carryingDog {
+                return rechargeStationNode ?? tableNode ?? scene?.rootNode
             }
 
-            for node in movableObjectNodes {
-                guard node.parent != nil,
-                      node !== missionGoal,
-                      node !== characterNode else {
-                    continue
+            if carriedNode == nil, let dog = dogTarget {
+                return dog
+            }
+
+            // 1. STRICT PRESERVATION:
+            // While carrying a letter block, lock onto the letter slot destination.
+            if carryingLetterBlock {
+                currentObstructionTarget = nil
+                return letterSlotTarget ?? rechargeStationNode ?? tableNode ?? scene?.rootNode
+            }
+
+            // 2. STICKY SUB-GOAL:
+            if let obstruction = currentObstructionTarget, obstruction.parent != nil {
+                if let characterNode = characterNode,
+                   distance(from: characterNode.presentation.worldPosition,
+                            to: obstruction.presentation.worldPosition) < 3.0,
+                   clearanceAhead < 1.5 {
+                    return obstruction
                 }
 
-                let objectPosition = node.presentation.worldPosition
-                let toObject = simd_float2(objectPosition.x - characterPosition.x,
-                                           objectPosition.z - characterPosition.z)
-                let distanceToObject = simd_length(toObject)
+                currentObstructionTarget = nil
+            }
 
-                guard distanceToObject > 0.001 else {
-                    continue
+            // 3. OBSTRUCTION EVALUATION:
+            if carriedNode == nil,
+               let missionGoal = missionGoalNode,
+               let characterNode = characterNode {
+
+                let characterPosition = characterNode.presentation.worldPosition
+                let goalPosition = missionGoal.presentation.worldPosition
+
+                let toGoal = simd_float2(goalPosition.x - characterPosition.x,
+                                         goalPosition.z - characterPosition.z)
+                let distanceToGoal = simd_length(toGoal)
+
+                guard distanceToGoal > 0.001 else {
+                    return missionGoal
                 }
 
-                let isCloserThanGoal = distanceToObject < distanceToGoal
-                let isNearby = distanceToObject < 3.5
+                for node in movableObjectNodes {
+                    guard node.parent != nil,
+                          node !== missionGoal,
+                          node !== characterNode else {
+                        continue
+                    }
 
-                guard isCloserThanGoal, isNearby else {
-                    continue
-                }
+                    let objectPosition = node.presentation.worldPosition
+                    let toObject = simd_float2(objectPosition.x - characterPosition.x,
+                                               objectPosition.z - characterPosition.z)
+                    let distanceToObject = simd_length(toObject)
 
-                let alignment = simd_dot(toObject, toGoal) /
-                    (distanceToObject * distanceToGoal)
+                    guard distanceToObject > 0.001 else {
+                        continue
+                    }
 
-                if alignment > 0.75, clearanceAhead < 1.0 {
-                    currentObstructionTarget = node
-                    return node
+                    let isCloserThanGoal = distanceToObject < distanceToGoal
+                    let isNearby = distanceToObject < 3.5
+
+                    guard isCloserThanGoal, isNearby else {
+                        continue
+                    }
+
+                    let alignment = simd_dot(toObject, toGoal) /
+                        (distanceToObject * distanceToGoal)
+
+                    if alignment > 0.75, clearanceAhead < 1.0 {
+                        currentObstructionTarget = node
+                        return node
+                    }
                 }
             }
-        }
 
-        // 4. FALLBACK:
-        // Keep navigation active when no specific letter target is available.
-        guard let index = letterTargetIndex else {
-            return rechargeStationNode ?? tableNode
+            // 4. ROBUST FALLBACK: Never return nil; default to active block, slot, station, or root.
+            return letterBlockTarget ?? letterSlotTarget ?? rechargeStationNode ?? tableNode ?? scene?.rootNode
         }
-
-        if carryingLetterBlock {
-            return letterSlotTarget
-        }
-
-        return letterBlockTarget
-    }
 
     private func distance(from source: SCNVector3,
                           to destination: SCNVector3) -> Float {
