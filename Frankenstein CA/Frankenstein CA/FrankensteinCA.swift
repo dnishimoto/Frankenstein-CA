@@ -393,7 +393,12 @@ final class FrankensteinCA: ObservableObject {
             if p.nearestObjectPickupable && (isTargetLetter || p.nearestObjectDistance <= 1.25) {
                 score += 8.0 // Strongly favor picking up the letter block once reached
             }
-            
+        case .backward:
+            if p.carryingLetterBlock {
+                score += 6.0 // High priority to retreat safely away from hazards when holding a letter block
+            } else {
+                score += 0.1
+            }
         case .walk, .run:
             score += (isTargetLetter ? 1.5 : 0.4) * alignment
             
@@ -466,6 +471,37 @@ final class FrankensteinCA: ObservableObject {
             let route = p.routeRelativeHeadings.isEmpty ? [p.headingError] : p.routeRelativeHeadings
             let cell = max(0, Int(progress / planCellLength))
             return route[min(cell, route.count - 1)]
+        }
+
+        private func planValues(
+            for actions: [FrankensteinAction],
+            perception p: FrankensteinCAPerception
+        ) -> [FrankensteinAction: Float] {
+            // Fallback to heading error if path field headings are temporarily empty
+            let activeHeadings = p.routeRelativeHeadings.isEmpty ? [p.headingError] : p.routeRelativeHeadings
+
+            var values: [FrankensteinAction: Float] = [:]
+            var bestValue: Float = -.infinity
+            var bestSequence: [FrankensteinAction] = []
+
+            for action in actions {
+                let first = planStep(action, from: Rollout(), perception: p)
+                let rest = bestContinuation(from: first, depth: planHorizon - 1, perception: p)
+                values[action] = rest.value
+
+                if rest.value > bestValue {
+                    bestValue = rest.value
+                    bestSequence = [action] + rest.sequence
+                }
+            }
+
+            plannedSequence = bestSequence
+
+            for (action, value) in values {
+                values[action] = planGain * (value - bestValue)
+            }
+
+            return values
         }
 
     private func clearance(
@@ -591,36 +627,7 @@ final class FrankensteinCA: ObservableObject {
             return best
         }
 
-    private func planValues(
-            for actions: [FrankensteinAction],
-            perception p: FrankensteinCAPerception
-        ) -> [FrankensteinAction: Float] {
-            // Fallback to heading error if path field headings are temporarily empty
-            let activeHeadings = p.routeRelativeHeadings.isEmpty ? [p.headingError] : p.routeRelativeHeadings
-
-            var values: [FrankensteinAction: Float] = [:]
-            var bestValue: Float = -.infinity
-            var bestSequence: [FrankensteinAction] = []
-
-            for action in actions {
-                let first = planStep(action, from: Rollout(), perception: p)
-                let rest = bestContinuation(from: first, depth: planHorizon - 1, perception: p)
-                values[action] = rest.value
-
-                if rest.value > bestValue {
-                    bestValue = rest.value
-                    bestSequence = [action] + rest.sequence
-                }
-            }
-
-            plannedSequence = bestSequence
-
-            for (action, value) in values {
-                values[action] = planGain * (value - bestValue)
-            }
-
-            return values
-        }
+   
 
     @Published private(set) var futilityCount: Int = 0
     @Published private(set) var futilityStatus = "No loop detected"

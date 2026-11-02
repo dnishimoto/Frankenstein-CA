@@ -190,6 +190,7 @@ struct FrankensteinCAPerception {
     var nearestObjectPickupable = false
     var nearestObjectMovable = false
     var nearestObjectName = ""
+    var carryingLetterBlock = false
 
     /// A letterless block or the table that sits on the route to the goal.
     /// The plan clears it (kick the table, lift a block) before continuing.

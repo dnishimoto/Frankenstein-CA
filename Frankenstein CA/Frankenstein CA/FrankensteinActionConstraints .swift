@@ -109,8 +109,15 @@ enum FrankensteinActionConstraints {
         switch terrain.terrain {
 
         case .gap:
-
-            if terrain.gapWidth > 0,
+            // If carrying an object/letter block near a gap, mandate backing away safely
+            if terrain.carryingObject {
+                actions = [
+                    .backward,
+                    .turnLeft,
+                    .turnRight,
+                    .recover
+                ]
+            } else if terrain.gapWidth > 0,
                terrain.gapWidth <= 1.8,
                terrain.isLandingAreaClear,
                terrain.hasValidGapEdges {

@@ -1592,167 +1592,171 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private func pushPerceptionToCA(
-        terrain: FrankensteinTerrainSample,
-        allowedActions: [FrankensteinAction],
-        time: TimeInterval
-    ) {
-        guard let ca else { return }
-        var perception = FrankensteinCAPerception()
-        // Recharge is the goal only while power is low (or a recharge is
-        // under way). Otherwise there is no station to seek.
-        if needsRecharge {
-            perception.goal = .recharge
-            perception.subGoal = ""
-        } else if carryingDog {
-            perception.goal = .completeInteraction("hug dog")
-            perception.subGoal = "give love"
-        } else if carriedNode == nil, dogTarget != nil {
-            perception.goal = .completeInteraction("hug dog")
-            perception.subGoal = "pick up dog"
-        } else if let index = letterTargetIndex {
-            // Power is OK: the primary goal is placing the letter blocks.
-            perception.goal = .placeLetterBlock(
-                letter: letterWord[index],
-                targetIndex: index
-            )
-            perception.subGoal = carryingLetterBlock ? "carry block to slot" : "fetch block"
-        } else {
-            perception.goal = .reachPosition
-            perception.subGoal = "no letter block to place"
-        }
+            terrain: FrankensteinTerrainSample,
+            allowedActions: [FrankensteinAction],
+            time: TimeInterval
+        ) {
+            guard let ca else { return }
+            var perception = FrankensteinCAPerception()
+            
+            // Include carryingLetterBlock status for CA awareness
+            perception.carryingLetterBlock = carryingLetterBlock
 
-        // If the path field has no route (no gradient from his cell), turn
-        // straight toward the goal rather than reporting "no error".
-        var routedHeading = pathSteering?.heading ?? heading
-        var hasHeadingTarget = pathSteering != nil
-        if pathSteering == nil, let node = goalNode, !carryingDog {
-            let known = knownPosition(of: node)
-            if let c = characterNode?.presentation.worldPosition {
-                let dx = known.x - Float(c.x)
-                let dz = known.z - Float(c.z)
-                if sqrt(dx * dx + dz * dz) > 0.35 {
-                    routedHeading = atan2(-dx, -dz)
-                    hasHeadingTarget = true
+            // Recharge is the goal only while power is low (or a recharge is
+            // under way). Otherwise there is no station to seek.
+            if needsRecharge {
+                perception.goal = .recharge
+                perception.subGoal = ""
+            } else if carryingDog {
+                perception.goal = .completeInteraction("hug dog")
+                perception.subGoal = "give love"
+            } else if carriedNode == nil, dogTarget != nil {
+                perception.goal = .completeInteraction("hug dog")
+                perception.subGoal = "pick up dog"
+            } else if let index = letterTargetIndex {
+                // Power is OK: the primary goal is placing the letter blocks.
+                perception.goal = .placeLetterBlock(
+                    letter: letterWord[index],
+                    targetIndex: index
+                )
+                perception.subGoal = carryingLetterBlock ? "carry block to slot" : "fetch block"
+            } else {
+                perception.goal = .reachPosition
+                perception.subGoal = "no letter block to place"
+            }
+
+            // If the path field has no route (no gradient from his cell), turn
+            // straight toward the goal rather than reporting "no error".
+            var routedHeading = pathSteering?.heading ?? heading
+            var hasHeadingTarget = pathSteering != nil
+            if pathSteering == nil, let node = goalNode, !carryingDog {
+                let known = knownPosition(of: node)
+                if let c = characterNode?.presentation.worldPosition {
+                    let dx = known.x - Float(c.x)
+                    let dz = known.z - Float(c.z)
+                    if sqrt(dx * dx + dz * dz) > 0.35 {
+                        routedHeading = atan2(-dx, -dz)
+                        hasHeadingTarget = true
+                    }
                 }
             }
-        }
-        perception.headingError = hasHeadingTarget ? wrappedAngle(routedHeading - heading) : 0
-        perception.pathDistance = pathGoalDistance
-        perception.isDetouring = pathSteering?.isDetouring ?? false
-        perception.goalProgressRate = goalProgressRate
-        perception.atGoal =
-            hasReportedRecharge ||
-            (pathGoalDistance.isFinite && pathGoalDistance < 0.35)
-        perception.clearanceAhead = clearanceAhead
-        perception.clearancePlus = clearancePlus
-        perception.clearanceMinus = clearanceMinus
+            perception.headingError = hasHeadingTarget ? wrappedAngle(routedHeading - heading) : 0
+            perception.pathDistance = pathGoalDistance
+            perception.isDetouring = pathSteering?.isDetouring ?? false
+            perception.goalProgressRate = goalProgressRate
+            perception.atGoal =
+                hasReportedRecharge ||
+                (pathGoalDistance.isFinite && pathGoalDistance < 0.35)
+            perception.clearanceAhead = clearanceAhead
+            perception.clearancePlus = clearancePlus
+            perception.clearanceMinus = clearanceMinus
 
-        if let detection = latestDetection {
-            perception.nearestObjectClass = objectClass(for: detection.name)
-            perception.nearestObjectDistance = detection.distance
-            perception.nearestObjectPickupable = detection.pickupable
-            perception.nearestObjectMovable = isMovableName(detection.name)
-            perception.nearestObjectName = detection.name
-        }
-        if let target = pushTargetNode,
-           target.parent != nil,
-           let character = characterNode {
-            let c = character.presentation.worldPosition
-            let n = target.presentation.worldPosition
-            let dx = Float(n.x - c.x)
-            let dz = Float(n.z - c.z)
-            let distance = sqrt(dx * dx + dz * dz)
-            if distance.isFinite && distance <= 2.3 {
+            if let detection = latestDetection {
+                perception.nearestObjectClass = objectClass(for: detection.name)
+                perception.nearestObjectDistance = detection.distance
+                perception.nearestObjectPickupable = detection.pickupable
+                perception.nearestObjectMovable = isMovableName(detection.name)
+                perception.nearestObjectName = detection.name
+            }
+            if let target = pushTargetNode,
+               target.parent != nil,
+               let character = characterNode {
+                let c = character.presentation.worldPosition
+                let n = target.presentation.worldPosition
+                let dx = Float(n.x - c.x)
+                let dz = Float(n.z - c.z)
+                let distance = sqrt(dx * dx + dz * dz)
+                if distance.isFinite && distance <= 2.3 {
+                    perception.nearestObjectClass = "movable"
+                    perception.nearestObjectDistance = distance
+                    perception.nearestObjectPickupable = pickupTarget(for: target) != nil
+                    perception.nearestObjectMovable = true
+                    perception.nearestObjectName = target.name ?? "MovableBlock"
+                }
+            }
+            if let planned = plannedTargetObservation() {
                 perception.nearestObjectClass = "movable"
-                perception.nearestObjectDistance = distance
-                perception.nearestObjectPickupable = pickupTarget(for: target) != nil
+                perception.nearestObjectDistance = planned.distance
+                perception.nearestObjectPickupable = planned.pickupable
                 perception.nearestObjectMovable = true
-                perception.nearestObjectName = target.name ?? "MovableBlock"
+                perception.nearestObjectName = planned.name
             }
-        }
-        if let planned = plannedTargetObservation() {
-            perception.nearestObjectClass = "movable"
-            perception.nearestObjectDistance = planned.distance
-            perception.nearestObjectPickupable = planned.pickupable
-            perception.nearestObjectMovable = true
-            perception.nearestObjectName = planned.name
-        }
 
-        let distant = visibleObjects.filter { $0.distance >= 3.0 }
-        perception.distantObjectSummary = distant.isEmpty ? "" : DetectedObjectInfo.summary(of: distant, limit: 3)
-        perception.routeRelativeHeadings = executive.field
-            .routePreview(maxCells: 8)
-            .map { wrappedAngle($0 - heading) }
+            let distant = visibleObjects.filter { $0.distance >= 3.0 }
+            perception.distantObjectSummary = distant.isEmpty ? "" : DetectedObjectInfo.summary(of: distant, limit: 3)
+            perception.routeRelativeHeadings = executive.field
+                .routePreview(maxCells: 8)
+                .map { wrappedAngle($0 - heading) }
 
-        let goalValues = executive.learner.values(for: goalStateKey(terrain: terrain))
-        let objectValues = latestDetection.map {
-            executive.learner.values(for: objectStateKey(for: $0, terrain: terrain))
-        } ?? [:]
-        var advisory: [FrankensteinAction: Float] = [:]
-        for action in FrankensteinAction.allCases {
-            let name = String(describing: action)
-            let goalVal = goalValues[name] ?? 0
-            let objVal = objectValues[name] ?? 0
-            advisory[action] = 0.35 * goalVal + 0.20 * objVal
-        }
-        if allowedActions.contains(.liftObject), canLiftNow {
-            advisory[.liftObject, default: 0] += 5.0
-            advisory[.jump, default: 0] -= 5.0
-        }
-        if let target = pushTargetNode,
-           target.parent != nil,
-           let character = characterNode {
-            let c = character.presentation.worldPosition
-            let n = target.presentation.worldPosition
-            let dx = Float(n.x - c.x)
-            let dz = Float(n.z - c.z)
-            let distance = sqrt(dx * dx + dz * dz)
-            let forward = forwardVector()
-            let ahead = dx * forward.x + dz * forward.z
-            let sideways = abs(dx * forward.z - dz * forward.x)
-            let alignment = distance > 0.001 ? ahead / distance : 0
-            let routeBlocked =
-                clearanceAhead < 1.0 ||
-                terrain.terrain == .hurdle ||
-                terrain.terrain == .raisedStep ||
-                (pathSteering?.isDetouring ?? false)
-            if distance.isFinite,
-               distance <= 1.0,
-               ahead > 0.05,
-               alignment > 0.7,
-               (routeBlocked || stuckSeconds > stuckThreshold) {
-                advisory[.pushObject, default: 0] += 7.0
-                advisory[.jump, default: 0] -= 1.0
+            let goalValues = executive.learner.values(for: goalStateKey(terrain: terrain))
+            let objectValues = latestDetection.map {
+                executive.learner.values(for: objectStateKey(for: $0, terrain: terrain))
+            } ?? [:]
+            var advisory: [FrankensteinAction: Float] = [:]
+            for action in FrankensteinAction.allCases {
+                let name = String(describing: action)
+                let goalVal = goalValues[name] ?? 0
+                let objVal = objectValues[name] ?? 0
+                advisory[action] = 0.35 * goalVal + 0.20 * objVal
+            }
+            if allowedActions.contains(.liftObject), canLiftNow {
+                advisory[.liftObject, default: 0] += 5.0
+                advisory[.jump, default: 0] -= 5.0
+            }
+            if let target = pushTargetNode,
+               target.parent != nil,
+               let character = characterNode {
+                let c = character.presentation.worldPosition
+                let n = target.presentation.worldPosition
+                let dx = Float(n.x - c.x)
+                let dz = Float(n.z - c.z)
+                let distance = sqrt(dx * dx + dz * dz)
+                let forward = forwardVector()
+                let ahead = dx * forward.x + dz * forward.z
+                let sideways = abs(dx * forward.z - dz * forward.x)
+                let alignment = distance > 0.001 ? ahead / distance : 0
+                let routeBlocked =
+                    clearanceAhead < 1.0 ||
+                    terrain.terrain == .hurdle ||
+                    terrain.terrain == .raisedStep ||
+                    (pathSteering?.isDetouring ?? false)
+                if distance.isFinite,
+                   distance <= 1.0,
+                   ahead > 0.05,
+                   alignment > 0.7,
+                   (routeBlocked || stuckSeconds > stuckThreshold) {
+                    advisory[.pushObject, default: 0] += 7.0
+                    advisory[.jump, default: 0] -= 1.0
+                } else {
+                    advisory[.pushObject, default: 0] -= 1.0
+                }
+            }
+            if let detection = latestDetection,
+               detection.distance <= 2.5,
+               (detection.name.lowercased().contains("recharge") ||
+                detection.name.lowercased().contains("platform")) {
+                advisory[.jump, default: 0] += 4.0
+                advisory[.walk, default: 0] -= 1.0
+            }
+            if let target = pushTargetNode, target.parent != nil {
+                perception.subGoal = "Approach and interact with movable block"
+            } else if let detection = latestDetection, detection.distance < 3.0 {
+                perception.subGoal = "Approach \(detection.name)"
             } else {
-                advisory[.pushObject, default: 0] -= 1.0
+                perception.subGoal = ""
             }
+            perception.advisoryValues = advisory
+            perception.stateKey = [
+                String(describing: terrain.terrain),
+                headingBand(perception.headingError),
+                clearanceBand(clearanceAhead),
+                perception.nearestObjectClass,
+                perception.nearestObjectDistance.isFinite ? distanceBand(perception.nearestObjectDistance) : "none",
+                carriedNode != nil ? "carrying" : "empty"
+            ].joined(separator: "|")
+            perception.timestamp = time
+            ca.receivePerception(perception)
         }
-        if let detection = latestDetection,
-           detection.distance <= 2.5,
-           (detection.name.lowercased().contains("recharge") ||
-            detection.name.lowercased().contains("platform")) {
-            advisory[.jump, default: 0] += 4.0
-            advisory[.walk, default: 0] -= 1.0
-        }
-        if let target = pushTargetNode, target.parent != nil {
-            perception.subGoal = "Approach and interact with movable block"
-        } else if let detection = latestDetection, detection.distance < 3.0 {
-            perception.subGoal = "Approach \(detection.name)"
-        } else {
-            perception.subGoal = ""
-        }
-        perception.advisoryValues = advisory
-        perception.stateKey = [
-            String(describing: terrain.terrain),
-            headingBand(perception.headingError),
-            clearanceBand(clearanceAhead),
-            perception.nearestObjectClass,
-            perception.nearestObjectDistance.isFinite ? distanceBand(perception.nearestObjectDistance) : "none",
-            carriedNode != nil ? "carrying" : "empty"
-        ].joined(separator: "|")
-        perception.timestamp = time
-        ca.receivePerception(perception)
-    }
     private func addLetterBlocks(to scene: SCNScene) {
         let targetWord = Array("FRANKENSTEIN")
         let blockSize: CGFloat = 0.45
