@@ -248,65 +248,108 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private var goalNode: SCNNode? {
-        if needsRecharge { return rechargeStationNode }
-        if carryingDog { return nil }
-        if carriedNode == nil, let dog = dogTarget { return dog }
-        
-        // 1. STRICT PRESERVATION: While carrying a letter block, never let local
-        // obstructions hijack the goal. Lock firmly onto the letter slot destination.
+        // Highest-priority objectives
+        if needsRecharge {
+            return rechargeStationNode
+        }
+
+        if carryingDog {
+            return nil
+        }
+
+        if carriedNode == nil, let dog = dogTarget {
+            return dog
+        }
+
+        // 1. STRICT PRESERVATION:
+        // While carrying a letter block, lock onto the letter slot destination.
         if carryingLetterBlock {
-            currentObstructionTarget = nil // Clear any lingering obstruction sub-goals
+            currentObstructionTarget = nil
             return letterSlotTarget
         }
-        
-        // 2. STICKY SUB-GOAL: If we are already dealing with an obstruction sub-goal,
-        // maintain focus on it until it is cleared or out of range, preventing frame-by-frame jitter.
+
+        // 2. STICKY SUB-GOAL:
+        // Keep pursuing an active obstruction until it is cleared or out of range.
         if let obstruction = currentObstructionTarget, obstruction.parent != nil {
-            let characterPos = characterNode?.presentation.worldPosition ?? SCNVector3Zero
-            let pos = obstruction.presentation.worldPosition
-            let dx = Float(pos.x - characterPos.x)
-            let dz = Float(pos.z - characterPos.z)
-            let dist = sqrt(dx * dx + dz * dz)
-            
-            // Keep targeting the obstruction as a sub-goal if close and path is tight
-            if dist < 3.0 && clearanceAhead < 1.5 {
+            if let characterNode = characterNode,
+               distance(from: characterNode.presentation.worldPosition,
+                        to: obstruction.presentation.worldPosition) < 3.0,
+               clearanceAhead < 1.5 {
                 return obstruction
-            } else {
-                currentObstructionTarget = nil // Release sub-goal once cleared
             }
+
+            currentObstructionTarget = nil
         }
-        
-        // 3. OBSTRUCTION EVALUATION: Only evaluate new obstacles as sub-goals
-        // when Frankenstein's forward clearance is actively blocked.
-        if carriedNode == nil, let missionGoal = missionGoalNode {
-            let characterPos = characterNode?.presentation.worldPosition ?? SCNVector3Zero
-            let goalPos = missionGoal.presentation.worldPosition
-            
+
+        // 3. OBSTRUCTION EVALUATION:
+        // Consider a movable object as a sub-goal only when it lies roughly between
+        // Frankenstein and the mission goal, and forward clearance is limited.
+        if carriedNode == nil,
+           let missionGoal = missionGoalNode,
+           let characterNode = characterNode {
+
+            let characterPosition = characterNode.presentation.worldPosition
+            let goalPosition = missionGoal.presentation.worldPosition
+
+            let toGoal = simd_float2(goalPosition.x - characterPosition.x,
+                                     goalPosition.z - characterPosition.z)
+            let distanceToGoal = simd_length(toGoal)
+
+            guard distanceToGoal > 0.001 else {
+                return missionGoal
+            }
+
             for node in movableObjectNodes {
-                guard node.parent != nil, node !== missionGoal else { continue }
-                let pos = node.presentation.worldPosition
-                
-                let toGoalX = goalPos.x - characterPos.x
-                let toGoalZ = goalPos.z - characterPos.z
-                let toObjX = pos.x - characterPos.x
-                let toObjZ = pos.z - characterPos.z
-                
-                let distToObj = sqrt(toObjX * toObjX + toObjZ * toObjZ)
-                let distToGoal = sqrt(toGoalX * toGoalX + toGoalZ * toGoalZ)
-                
-                if distToObj < distToGoal && distToObj < 3.5 {
-                    let dot = (toObjX * toGoalX + toObjZ * toGoalZ) / (distToObj * distToGoal)
-                    // Require narrow alignment AND low clearance before locking onto it as a sub-goal
-                    if dot > 0.75 && clearanceAhead < 1.0 {
-                        currentObstructionTarget = node
-                        return node
-                    }
+                guard node.parent != nil,
+                      node !== missionGoal,
+                      node !== characterNode else {
+                    continue
+                }
+
+                let objectPosition = node.presentation.worldPosition
+                let toObject = simd_float2(objectPosition.x - characterPosition.x,
+                                           objectPosition.z - characterPosition.z)
+                let distanceToObject = simd_length(toObject)
+
+                guard distanceToObject > 0.001 else {
+                    continue
+                }
+
+                let isCloserThanGoal = distanceToObject < distanceToGoal
+                let isNearby = distanceToObject < 3.5
+
+                guard isCloserThanGoal, isNearby else {
+                    continue
+                }
+
+                let alignment = simd_dot(toObject, toGoal) /
+                    (distanceToObject * distanceToGoal)
+
+                if alignment > 0.75, clearanceAhead < 1.0 {
+                    currentObstructionTarget = node
+                    return node
                 }
             }
         }
-        
-        guard let index = letterTargetIndex else { return nil }
-        return carryingLetterBlock ? letterSlotTarget : letterBlockTarget
+
+        // 4. FALLBACK:
+        // Keep navigation active when no specific letter target is available.
+        guard let index = letterTargetIndex else {
+            return rechargeStationNode ?? tableNode
+        }
+
+        if carryingLetterBlock {
+            return letterSlotTarget
+        }
+
+        return letterBlockTarget
+    }
+
+    private func distance(from source: SCNVector3,
+                          to destination: SCNVector3) -> Float {
+        let dx = destination.x - source.x
+        let dz = destination.z - source.z
+        return sqrt(dx * dx + dz * dz)
     }
     private func bestInteractionTarget(
         toward missionGoal: SCNNode
@@ -2423,13 +2466,16 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private func isMovableName(_ name: String) -> Bool {
-        let value = name.lowercased()
-        return value.contains("movable") ||
-            value.contains("block") ||
-            value.contains("crate") ||
-            value.contains("box") ||
-            value.contains("pickup")
-    }
+            let value = name.lowercased()
+            if value.contains("letter") || value.contains("letterblock") {
+                return false
+            }
+            return value.contains("movable") ||
+                value.contains("block") ||
+                value.contains("crate") ||
+                value.contains("box") ||
+                value.contains("pickup")
+        }
 
     private func annotateBearing(
         _ info: DetectedObjectInfo,
@@ -3465,28 +3511,29 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     @discardableResult
-    func attemptPickup() -> Bool {
-        guard let character = characterNode, let scene = scene,
-              let hand = handNode,
-              let target = reachablePickupTarget(character: character, scene: scene)
-        else { return false }
-        let depth = worldDimensions(of: target).z
-        carriedOriginalParent = target.parent
-        carriedOriginalPosition = target.position
-        if let body = target.physicsBody {
-            body.velocity = SCNVector3Zero
-            body.angularVelocity = SCNVector4Zero
-            body.type = .kinematic
+        func attemptPickup() -> Bool {
+            guard let character = characterNode, let scene = scene,
+                  let hand = handNode,
+                  let target = reachablePickupTarget(character: character, scene: scene)
+            else { return false }
+            let depth = worldDimensions(of: target).z
+            carriedOriginalParent = target.parent
+            carriedOriginalPosition = target.position
+            if let body = target.physicsBody {
+                body.velocity = SCNVector3Zero
+                body.angularVelocity = SCNVector4Zero
+                body.type = .kinematic
+                body.collisionBitMask = 0 // Prevent sticking or colliding with Frankenstein while carried
+            }
+            target.removeFromParentNode()
+            hand.addChildNode(target)
+            target.position = SCNVector3(0, -0.08, -(0.20 + depth * 0.5))
+            target.physicsBody?.resetTransform()
+            guard target.parent === hand else { return false }
+            carriedNode = target
+            publishDebug("Pickup confirmed.")
+            return true
         }
-        target.removeFromParentNode()
-        hand.addChildNode(target)
-        target.position = SCNVector3(0, -0.08, -(0.20 + depth * 0.5))
-        target.physicsBody?.resetTransform()
-        guard target.parent === hand else { return false }
-        carriedNode = target
-        publishDebug("Pickup confirmed.")
-        return true
-    }
 
     private func nearestPickupNode(from character: SCNNode, in scene: SCNScene) -> SCNNode? {
         let position = character.presentation.worldPosition

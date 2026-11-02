@@ -566,30 +566,31 @@ final class FrankensteinCA: ObservableObject {
     }
 
     private func bestContinuation(
-        from state: Rollout,
-        depth: Int,
-        perception p: FrankensteinCAPerception
-    ) -> (value: Float, sequence: [FrankensteinAction]) {
-        guard depth > 0 else {
-            return (terminalPlanValue(state, perception: p), [])
-        }
-
-        var best: (value: Float, sequence: [FrankensteinAction]) = (-.infinity, [])
-
-        for action in [FrankensteinAction.walk, .run, .turnLeft, .turnRight, .pushObject] {
-            let result = bestContinuation(
-                from: planStep(action, from: state, perception: p),
-                depth: depth - 1,
-                perception: p
-            )
-
-            if result.value > best.value {
-                best = (result.value, [action] + result.sequence)
+            from state: Rollout,
+            depth: Int,
+            perception p: FrankensteinCAPerception
+        ) -> (value: Float, sequence: [FrankensteinAction]) {
+            guard depth > 0 else {
+                return (terminalPlanValue(state, perception: p), [])
             }
-        }
 
-        return best
-    }
+            var best: (value: Float, sequence: [FrankensteinAction]) = (-.infinity, [])
+
+            // Fix: Added .kickObject to the rollout action set
+            for action in [FrankensteinAction.walk, .run, .turnLeft, .turnRight, .pushObject, .kickObject] {
+                let result = bestContinuation(
+                    from: planStep(action, from: state, perception: p),
+                    depth: depth - 1,
+                    perception: p
+                )
+
+                if result.value > best.value {
+                    best = (result.value, [action] + result.sequence)
+                }
+            }
+
+            return best
+        }
 
     private func planValues(
         for actions: [FrankensteinAction],
