@@ -34,7 +34,7 @@ enum FrankensteinActionConstraints {
         // jumping from several meters out would be pointless and unsafe.
         let obstacleAhead = terrain.terrain == .hurdle || terrain.terrain == .raisedStep
         if obstacleAhead, terrain.distance > 0.9 {
-            actions = [.walk, .stepForward, .turnLeft, .turnRight, .backward]
+            actions = [.walk, .run, .stepForward, .turnLeft, .turnRight, .backward]
             if terrain.objectPickupable, !terrain.carryingObject {
                 actions.append(.liftObject)
             }
@@ -126,14 +126,26 @@ enum FrankensteinActionConstraints {
            terrain.distance <= 1.5 {
             add([.pushObject, .kickObject, .crawl])
         }
+        
         // Lifting needs a liftable object within reach and free hands.
+        // Ensure walk and liftObject are always fully available when a pickupable object is present.
         if terrain.objectPickupable, !terrain.carryingObject {
-            actions.append(.liftObject)
+            if !actions.contains(.liftObject) {
+                actions.append(.liftObject)
+            }
+            if !actions.contains(.walk) {
+                actions.append(.walk)
+            }
+            if !actions.contains(.run) {
+                actions.append(.run)
+            }
         }
 
         // While carrying, he can set the object down or throw it.
         if terrain.carryingObject {
             actions.append(contentsOf: [.placeObject, .throwObject])
+            if !actions.contains(.walk) { actions.append(.walk) }
+            if !actions.contains(.run) { actions.append(.run) }
         }
 
         return actions
