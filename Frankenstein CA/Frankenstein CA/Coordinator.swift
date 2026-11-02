@@ -437,21 +437,93 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     
  
     private func canManipulate(_ target: SCNNode, from character: SCNNode) -> Bool {
-        guard target.parent != nil, target !== carriedNode,
-              !isCharacterPart(target) else { return false }
-        let c = character.presentation.worldPosition
-        let n = target.presentation.worldPosition
-        let dx = Float(n.x - c.x)
-        let dz = Float(n.z - c.z)
-        let distance = sqrt(dx * dx + dz * dz)
-        guard distance.isFinite, distance > 0.001,
-              distance < manipulationDistance else { return false }
-        let forward = forwardVector()
-        let length = sqrt(forward.x * forward.x + forward.z * forward.z)
-        guard length > 0.001 else { return false }
-        let ahead = dx * forward.x + dz * forward.z
-        return ahead > 0.05 && ahead / (distance * length) >= minimumManipulationAlignment
-    }
+            guard target.parent != nil, target !== carriedNode,
+                  !isCharacterPart(target) else { return false }
+            let c = character.presentation.worldPosition
+            let n = target.presentation.worldPosition
+            let dx = Float(n.x - c.x)
+            let dz = Float(n.z - c.z)
+            let distance = sqrt(dx * dx + dz * dz)
+            
+            // Allow push targets up to 1.8m; strict manipulation distance (1.0m) for pickups
+            let isMovable = isMovableName(target.name ?? "")
+            let maxDist: Float = isMovable ? 1.8 : manipulationDistance
+            
+            guard distance.isFinite, distance > 0.001,
+                  distance < maxDist else { return false }
+            let forward = forwardVector()
+            let length = sqrt(forward.x * forward.x + forward.z * forward.z)
+            guard length > 0.001 else { return false }
+            let ahead = dx * forward.x + dz * forward.z
+            
+            // Allow slight contact overlap (-0.2) and broader alignment angle for pushing
+            let minAlignment: Float = isMovable ? 0.25 : minimumManipulationAlignment
+            return ahead >= -0.2 && ahead / (distance * length) >= minAlignment
+        }
+
+        private func applyPush(
+            output: FrankensteinLocomotionOutput,
+            deltaTime dt: Float,
+            character: SCNNode
+        ) {
+            let pushIsExecuting = output.pushRequested || output.action == .pushObject
+            guard pushIsExecuting else {
+                pushLastNodePosition = nil
+                pushTrackedNodeID = nil
+                pushAccumulatedMeters = 0
+                return
+            }
+            guard let node = pushTargetNode, node.parent != nil else {
+                pushLastNodePosition = nil
+                pushTrackedNodeID = nil
+                pushAccumulatedMeters = 0
+                return
+            }
+            guard carriedNode == nil, canManipulate(node, from: character) else {
+                pushLastNodePosition = nil
+                pushTrackedNodeID = nil
+                pushAccumulatedMeters = 0
+                return
+            }
+            
+            let targetID = ObjectIdentifier(node)
+            if pushTrackedNodeID != targetID {
+                pushTrackedNodeID = targetID
+                pushLastNodePosition = nil
+                pushAccumulatedMeters = 0
+            }
+            
+            let forward = forwardVector()
+            let c = character.presentation.worldPosition
+            let n = node.presentation.worldPosition
+            
+            let dx = Float(n.x - c.x)
+            let dz = Float(n.z - c.z)
+            let ahead = dx * forward.x + dz * forward.z
+            let sideways = abs(dx * forward.z - dz * forward.x)
+            
+            guard ahead >= -0.2, ahead < 1.8, sideways < 0.85 else {
+                pushLastNodePosition = nil
+                return
+            }
+            
+            configurePhysicsBody(for: node, forceDynamic: true)
+            guard let body = node.physicsBody else { return }
+            
+            // Wake up physics body so SceneKit immediately applies movement velocity
+          
+            body.velocity = SCNVector3(forward.x * pushBlockSpeed, body.velocity.y, forward.z * pushBlockSpeed)
+            body.angularVelocity = SCNVector4Zero
+
+            let current = SIMD2<Float>(Float(n.x), Float(n.z))
+            if let last = pushLastNodePosition {
+                let moved = current - last
+                pushAccumulatedMeters += moved.x * forward.x + moved.y * forward.z
+            }
+            pushLastNodePosition = current
+            
+            locomotion.reportPushProgress(pushAccumulatedMeters)
+        }
 
     private func setRechargeStationFlashing(_ flashing: Bool) {
         guard let station = rechargeStationNode else { return }
@@ -1199,6 +1271,10 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             deltaTime: dt,
             character: character
         )
+        applyKick(
+                    output: output,
+                    character: character
+                )
 
         let finalPosition = character.presentation.worldPosition
         let stationaryByDesign: Set<FrankensteinAction> = [
@@ -3404,67 +3480,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         })?.node
     }
 
-    private func applyPush(
-            output: FrankensteinLocomotionOutput,
-            deltaTime dt: Float,
-            character: SCNNode
-        ) {
-            let pushIsExecuting = output.pushRequested || output.action == .pushObject
-            guard pushIsExecuting else {
-                pushLastNodePosition = nil
-                pushTrackedNodeID = nil
-                pushAccumulatedMeters = 0
-                return
-            }
-            guard let node = pushTargetNode, node.parent != nil else {
-                pushLastNodePosition = nil
-                pushTrackedNodeID = nil
-                pushAccumulatedMeters = 0
-                return
-            }
-            guard carriedNode == nil, canManipulate(node, from: character) else {
-                pushLastNodePosition = nil
-                pushTrackedNodeID = nil
-                pushAccumulatedMeters = 0
-                return
-            }
-            
-            let targetID = ObjectIdentifier(node)
-            if pushTrackedNodeID != targetID {
-                pushTrackedNodeID = targetID
-                pushLastNodePosition = nil
-                pushAccumulatedMeters = 0
-            }
-            
-            let forward = forwardVector()
-            let c = character.presentation.worldPosition
-            let n = node.presentation.worldPosition
-            
-            let dx = Float(n.x - c.x)
-            let dz = Float(n.z - c.z)
-            let ahead = dx * forward.x + dz * forward.z
-            let sideways = abs(dx * forward.z - dz * forward.x)
-            
-            guard ahead > 0.05, ahead < 1.8, sideways < 0.85 else {
-                pushLastNodePosition = nil
-                return
-            }
-            
-            configurePhysicsBody(for: node, forceDynamic: true)
-            guard let body = node.physicsBody else { return }
-            
-            body.velocity = SCNVector3(forward.x * pushBlockSpeed, body.velocity.y, forward.z * pushBlockSpeed)
-            body.angularVelocity = SCNVector4Zero
 
-            let current = SIMD2<Float>(Float(n.x), Float(n.z))
-            if let last = pushLastNodePosition {
-                let moved = current - last
-                pushAccumulatedMeters += moved.x * forward.x + moved.y * forward.z
-            }
-            pushLastNodePosition = current
-            
-            locomotion.reportPushProgress(pushAccumulatedMeters)
-        }
 
     @discardableResult
     private func dropCarriedObject(distance: Float, thrown: Bool) -> Bool {
@@ -3627,4 +3643,3 @@ extension Coordinator {
     func attachExecutiveCA(_ ca: FrankensteinCA) { attachCA(ca) }
     func logExecutiveControlState(terrain: FrankensteinTerrainSample, locomotion: FrankensteinLocomotion) {}
 }
-

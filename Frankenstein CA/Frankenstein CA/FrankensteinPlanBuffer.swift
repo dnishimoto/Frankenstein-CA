@@ -1,26 +1,26 @@
+
 //
 //  FrankensteinPlanBuffer.swift
 //  Frankenstein CA
 //
 //  The CA's buffered plan for the current sub-goal.
 //
-//  Each decision the CA first searches action sequences (Q-guided, against
-//  the goal), then reconciles this queue with the search:
+//  Responsibilities:
+//  - Retain a useful sequence of planned actions.
+//  - Reconcile an existing plan with a fresh CA search.
+//  - Allow the CA to override the current action.
+//  - Advance the plan only after an action has executed.
+//  - Mark blocked actions as failed.
+//  - Preserve a short history of completed and failed steps.
 //
-//  - reconcile(...)      keeps the head while it is still permitted and close
-//                        to the best first action; otherwise replaces the queue.
-//  - overrideHead(...)   the CA's own scoring vetoed the head.
-//  - recordExecuted(...) advances the queue only when an action has really
-//                        run for an outcome window, and fails the step when
-//                        the body was blocked.
-//  - invalidate(...)     the goal or sub-goal changed; the old plan is dropped.
-//
-//  Plain state used from the render thread (not ObservableObject).
+//  Plain state used from the render thread.
 //
 
 import Foundation
 
 struct FrankensteinPlanBuffer {
+
+    // MARK: - Storage
 
     private(set) var buffer: [PlanStep] = []
 
@@ -31,171 +31,311 @@ struct FrankensteinPlanBuffer {
     private(set) var lastReplanReason = "No plan yet"
     private(set) var executedCount = 0
 
-    // MARK: Queries
+    // MARK: - Queries
 
     var currentStep: PlanStep? {
-        buffer.first(where: { !$0.isCompleted && !$0.isFailed })
+        buffer.first(where: {
+            !$0.isCompleted && !$0.isFailed
+        })
     }
 
     var pendingSteps: [PlanStep] {
-        buffer.filter { !$0.isCompleted && !$0.isFailed }
+        buffer.filter {
+            !$0.isCompleted && !$0.isFailed
+        }
     }
 
     var pendingActions: [FrankensteinAction] {
         pendingSteps.map { $0.action }
     }
 
-    var isEmpty: Bool { currentStep == nil }
-
-    var isFinished: Bool {
-        !buffer.isEmpty && buffer.allSatisfy { $0.isCompleted || $0.isFailed }
+    var isEmpty: Bool {
+        pendingSteps.isEmpty
     }
 
-    // MARK: Compatibility helpers
+    var isFinished: Bool {
+        !buffer.isEmpty && pendingSteps.isEmpty
+    }
 
-    mutating func setPlan(_ steps: [PlanStep], reason: String = "new plan") {
-        let history = recentHistory()
-        buffer = history + steps.prefix(max(0, maxCapacity - history.count))
+    // MARK: - Set Plan
+
+    mutating func setPlan(
+        _ steps: [PlanStep],
+        reason: String = "new plan"
+    ) {
+        let history = buffer.filter {
+            $0.isCompleted || $0.isFailed
+        }
+
+        buffer = history + Array(steps.prefix(maxCapacity))
+        trimHistory()
+
         replanCount += 1
         lastReplanReason = reason
     }
 
-    mutating func adaptPlan(with newSteps: [PlanStep]) {
-        setPlan(newSteps, reason: "adapted plan")
+    // MARK: - Adapt Existing Plan
+
+    mutating func adaptPlan(
+        with actions: [FrankensteinAction]
+    ) {
+        guard !actions.isEmpty else {
+            return
+        }
+
+        let history = buffer.filter {
+            $0.isCompleted || $0.isFailed
+        }
+
+        let newSteps = actions.prefix(maxCapacity).map {
+            PlanStep(
+                action: $0,
+                description: "Adapted plan: \($0)"
+            )
+        }
+
+        buffer = history + newSteps
+        trimHistory()
+
+        replanCount += 1
+        lastReplanReason = "Adapted existing plan"
     }
 
-    mutating func insertImmediateStep(_ step: PlanStep) {
-        overrideHead(with: step, reason: "immediate step: \(step.action)")
+    // MARK: - Immediate Action
+
+    mutating func insertImmediateStep(
+        _ step: PlanStep
+    ) {
+        overrideHead(
+            with: step,
+            reason: "Immediate action inserted"
+        )
     }
 
-    // MARK: Reconciling with a fresh search
+    // MARK: - Reconcile Fresh Search
 
-    /// - Parameters:
-    ///   - fresh: best sequence from the latest search, head first.
-    ///   - headRegret: how much worse the buffered head is than the best
-    ///     first action in that search (zero or more).
-    ///   - allowed: actions permitted right now.
-    ///   - regretMargin: regret up to which the buffered head is kept.
-    @discardableResult
+    /// Keeps the current head when it is still permitted and
+    /// its regret is within the supplied threshold.
+    ///
+    /// Returns true when the current head was replaced.
     mutating func reconcile(
         fresh: [PlanStep],
         headRegret: Float,
         allowed: [FrankensteinAction],
         regretMargin: Float
     ) -> Bool {
-        let history = recentHistory()
+
+        let previousHead = currentStep?.action
 
         guard !fresh.isEmpty else {
-            if let head = currentStep, allowed.contains(head.action) {
-                return false
-            }
-            buffer = history
             return false
         }
 
-        if let head = currentStep, allowed.contains(head.action) {
-            if head.action == fresh[0].action {
-                let tail = Array(fresh.dropFirst())
-                buffer = history + [head] + tail.prefix(max(0, maxCapacity - history.count - 1))
-                return false
-            }
+        let allowedSet = Set(allowed)
 
-            if headRegret <= regretMargin {
-                buffer = history + [head] + fresh.prefix(max(0, maxCapacity - history.count - 1))
-                return false
-            }
-
-            setPlan(
-                fresh,
-                reason: "replanned: \(fresh[0].action) beats \(head.action) by \(String(format: "%.2f", Double(headRegret)))"
-            )
-            return true
+        let freshAllowed = fresh.filter {
+            allowedSet.contains($0.action)
         }
 
-        let previousHead = currentStep
-        let reason = previousHead == nil
-            ? "planned a route to the sub-goal"
-            : "replanned: \(previousHead?.action ?? .walk) is no longer permitted"
+        guard !freshAllowed.isEmpty else {
+            return false
+        }
 
-        setPlan(fresh, reason: reason)
-        return previousHead != nil
+        // No existing plan: accept the fresh search.
+        guard let current = currentStep else {
+            setPlan(
+                freshAllowed,
+                reason: "No pending plan"
+            )
+            return previousHead != freshAllowed.first?.action
+        }
+
+        let currentStillAllowed = allowedSet.contains(
+            current.action
+        )
+
+        let currentIsInFreshPlan = freshAllowed.contains {
+            $0.action == current.action
+        }
+
+        let shouldReplace =
+            !currentStillAllowed ||
+            !currentIsInFreshPlan ||
+            !headRegret.isFinite ||
+            headRegret > regretMargin
+
+        guard shouldReplace else {
+            // Preserve the existing head, but refresh its tail.
+            let history = buffer.filter {
+                $0.isCompleted || $0.isFailed
+            }
+
+            let freshTail = freshAllowed.dropFirst().map {
+                PlanStep(
+                    action: $0.action,
+                    description: $0.description
+                )
+            }
+
+            buffer = history + [current] +
+                Array(freshTail.prefix(maxCapacity - 1))
+
+            trimHistory()
+            return false
+        }
+
+        setPlan(
+            freshAllowed,
+            reason: "Fresh CA search replaced buffered plan"
+        )
+
+        return previousHead != currentStep?.action
     }
 
-    /// The CA's scoring chose something other than the buffered head.
-    mutating func overrideHead(with step: PlanStep, reason: String) {
-        let history = recentHistory()
-        var pending = pendingSteps
+    // MARK: - Override Current Head
 
-        if !pending.isEmpty {
-            pending.removeFirst()
+    mutating func overrideHead(
+        with step: PlanStep,
+        reason: String = "CA action override"
+    ) {
+        let history = buffer.filter {
+            $0.isCompleted || $0.isFailed
         }
 
-        buffer = history + [step] + pending.prefix(max(0, maxCapacity - history.count - 1))
+        let remaining = pendingSteps
+
+        let tail: [PlanStep]
+
+        if remaining.isEmpty {
+            tail = []
+        } else if remaining.count > 1 {
+            tail = Array(remaining.dropFirst())
+        } else {
+            tail = []
+        }
+
+        buffer = history + [step] + tail
+        buffer = Array(buffer.prefix(
+            maxCapacity + maxCompletedKept
+        ))
+
+        trimHistory()
+
         replanCount += 1
         lastReplanReason = reason
     }
 
-    /// `action` has been executed for one outcome window.
-    mutating func recordExecuted(action: FrankensteinAction, blocked: Bool) {
-        guard let index = buffer.firstIndex(where: { !$0.isCompleted && !$0.isFailed }),
-              buffer[index].action == action else {
+    // MARK: - Record Executed Action
+
+    /// Advances the plan only when the executed action matches
+    /// the current pending step.
+    ///
+    /// If blocked is true, the step is marked failed.
+    mutating func recordExecuted(
+        action: FrankensteinAction,
+        blocked: Bool
+    ) {
+        guard let index = buffer.firstIndex(where: {
+            !$0.isCompleted && !$0.isFailed
+        }) else {
             return
         }
 
-        executedCount += 1
+        guard buffer[index].action == action else {
+            return
+        }
 
         if blocked {
             buffer[index].isFailed = true
-            lastReplanReason = "blocked while trying to \(action)"
+            lastReplanReason = "Action blocked: \(action)"
         } else {
             buffer[index].isCompleted = true
+            executedCount += 1
+            lastReplanReason = "Executed: \(action)"
         }
 
         trimHistory()
     }
 
+    // MARK: - Explicit Completion
+
     mutating func markCurrentStepCompleted() {
-        if let index = buffer.firstIndex(where: { !$0.isCompleted && !$0.isFailed }) {
-            buffer[index].isCompleted = true
-            trimHistory()
+        guard let index = buffer.firstIndex(where: {
+            !$0.isCompleted && !$0.isFailed
+        }) else {
+            return
         }
+
+        buffer[index].isCompleted = true
+        executedCount += 1
+
+        lastReplanReason = "Current step completed"
+
+        trimHistory()
     }
+
+    // MARK: - Explicit Failure
 
     mutating func markCurrentStepFailed() {
-        if let index = buffer.firstIndex(where: { !$0.isCompleted && !$0.isFailed }) {
-            buffer[index].isFailed = true
-            trimHistory()
+        guard let index = buffer.firstIndex(where: {
+            !$0.isCompleted && !$0.isFailed
+        }) else {
+            return
         }
+
+        buffer[index].isFailed = true
+
+        lastReplanReason = "Current step failed"
+
+        trimHistory()
     }
 
-    /// The goal or sub-goal changed: drop the queue, keep recent history.
-    mutating func invalidate(reason: String) {
-        buffer = recentHistory()
+    // MARK: - Invalidate
+
+    mutating func invalidate(
+        reason: String = "Plan invalidated"
+    ) {
+        let history = buffer.filter {
+            $0.isCompleted || $0.isFailed
+        }
+
+        buffer = history
+
         replanCount += 1
         lastReplanReason = reason
+
+        trimHistory()
     }
+
+    // MARK: - Clear
 
     mutating func clear() {
         buffer.removeAll()
+
         replanCount = 0
-        executedCount = 0
         lastReplanReason = "No plan yet"
+        executedCount = 0
     }
 
-    // MARK: History
-
-    private func recentHistory() -> [PlanStep] {
-        Array(buffer.filter { $0.isCompleted }.suffix(maxCompletedKept))
-    }
+    // MARK: - History Management
 
     private mutating func trimHistory() {
-        let finished = buffer.filter { $0.isCompleted || $0.isFailed }
-        guard finished.count > maxCompletedKept else { return }
-
-        let keep = Set(finished.suffix(maxCompletedKept).map { $0.id })
-
-        buffer.removeAll {
-            ($0.isCompleted || $0.isFailed) && !keep.contains($0.id)
+        let completed = buffer.filter {
+            $0.isCompleted || $0.isFailed
         }
+
+        let pending = buffer.filter {
+            !$0.isCompleted && !$0.isFailed
+        }
+
+        let retainedHistory = Array(
+            completed.suffix(maxCompletedKept)
+        )
+
+        let retainedPending = Array(
+            pending.prefix(maxCapacity)
+        )
+
+        buffer = retainedHistory + retainedPending
     }
 }
