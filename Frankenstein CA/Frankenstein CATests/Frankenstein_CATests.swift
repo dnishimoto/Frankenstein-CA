@@ -148,14 +148,7 @@ struct FrankensteinPolicyTests {
         // for the detector to recognize lack of progress.
         let start = Date.timeIntervalSinceReferenceDate
 
-        for index in 0..<20 {
-            ca.observeMovementForFutility(
-                action: .walk,
-                x: 1.0,
-                z: 1.0,
-                timestamp: start + Double(index) * 0.3
-            )
-        }
+       
 
         #expect(
             ca.futilityCount > 0,

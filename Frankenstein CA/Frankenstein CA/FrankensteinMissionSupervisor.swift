@@ -1,5 +1,6 @@
+
 //
-//  File.swift
+//  FrankensteinMissionSupervisor.swift
 //  Frankenstein CA
 //
 //  Created by David Nishimoto on 11/3/26.
@@ -7,10 +8,28 @@
 
 import Foundation
 
-/// The authoritative supervisor governing Frankie's macro-phases, action overrides, and task safety.
-/// The authoritative supervisor governing Frankie's macro-phases and task safety.
+/// Authoritative supervisor governing macro-phases,
+/// mission priorities, and task safety.
+///
+/// The Coordinator supplies plan assessments.
+/// The Supervisor decides whether the active mission
+/// should continue or change.
+/// The Supervisor never selects physical actions.
+
 final class FrankensteinMissionSupervisor {
+
+    // MARK: - State
+
     private var revision: UInt64 = 0
+
+    private(set) var latestPlanAssessment:
+        FrankensteinPlanAssessment?
+
+    private(set) var planBlocked: Bool = false
+
+    private(set) var planFailureReason: String?
+
+    // MARK: - Mission Update
 
     func update(
         powerLevel: Float,
@@ -21,64 +40,178 @@ final class FrankensteinMissionSupervisor {
         dogAvailable: Bool,
         carryingDog: Bool
     ) -> FrankensteinMissionDecision {
+
         revision += 1
 
-        // 1. Emergency / Low Power Override
-        if powerLevel <= 30.0 || isRecharging {
-            let phase: FrankensteinMissionPhase = powerLevel <= 15.0 ? .emergencyRecharge : .recharge
-            return FrankensteinMissionDecision(
+        let safeMaximumPower = max(maximumPower, 0.001)
+        let normalizedPower = max(
+            0,
+            min(100, powerLevel / safeMaximumPower * 100)
+        )
+
+        // 1. Emergency recharge always has highest priority.
+
+        if normalizedPower <= 15 || isRecharging {
+
+            let phase: FrankensteinMissionPhase =
+                normalizedPower <= 15
+                ? .emergencyRecharge
+                : .recharge
+
+            return makeDecision(
                 phase: phase,
-                subGoal: powerLevel <= 15.0 ? "CRITICAL: emergency recharge required" : "recharging power reserves",
+                subGoal: normalizedPower <= 15
+                    ? "CRITICAL: emergency recharge required"
+                    : "Recharging power reserves",
                 requiresRecharge: true,
-                allowsOptionalInteraction: false,
-                revision: revision
+                allowsOptionalInteraction: false
             )
         }
 
-        // 2. Delivery Phase Override (Carrying letter block)
+        // 2. Low power recharge.
+
+        if normalizedPower <= 30 {
+
+            return makeDecision(
+                phase: .recharge,
+                subGoal: "Recharge power reserves",
+                requiresRecharge: true,
+                allowsOptionalInteraction: false
+            )
+        }
+
+        // 3. Deliver any letter already being carried.
+
         if carryingLetter {
-            return FrankensteinMissionDecision(
+
+            return makeDecision(
                 phase: .deliverLetter,
-                subGoal: "carrying letter block to slot",
+                subGoal: "Deliver carried letter to matching slot",
                 requiresRecharge: false,
-                allowsOptionalInteraction: false,
-                revision: revision
+                allowsOptionalInteraction: false
             )
         }
 
-        // 3. Fetch Phase (Unplaced letters remaining)
+        // 4. Complete required letter collection and delivery.
+
         if hasUnplacedLetter {
-            return FrankensteinMissionDecision(
+
+            return makeDecision(
                 phase: .fetchLetter,
-                subGoal: "fetching required letter block",
+                subGoal: "Find and collect next required letter",
                 requiresRecharge: false,
-                allowsOptionalInteraction: true,
-                revision: revision
+                allowsOptionalInteraction: false
             )
         }
 
-        // 4. Dog Interaction Phase
+        // 5. Optional dog interaction after required letters.
+
         if dogAvailable || carryingDog {
-            return FrankensteinMissionDecision(
+
+            return makeDecision(
                 phase: .dogInteraction,
-                subGoal: carryingDog ? "giving love to dog" : "approaching dog",
+                subGoal: carryingDog
+                    ? "Interact with dog"
+                    : "Approach dog",
                 requiresRecharge: false,
-                allowsOptionalInteraction: true,
-                revision: revision
+                allowsOptionalInteraction: true
             )
         }
 
-        // 5. Default Exploration / Complete
-        return FrankensteinMissionDecision(
-            phase: hasUnplacedLetter ? .explore : .lettersComplete,
-            subGoal: "exploring environment / scanning tasks",
+        // 6. All required letters completed.
+
+        return makeDecision(
+            phase: .lettersComplete,
+            subGoal: "Required letters completed",
             requiresRecharge: false,
-            allowsOptionalInteraction: true,
+            allowsOptionalInteraction: true
+        )
+    }
+
+    // MARK: - Plan Feedback
+
+    func evaluatePlan(
+        _ assessment: FrankensteinPlanAssessment
+    ) {
+
+        latestPlanAssessment = assessment
+
+        guard assessment.planIsValid else {
+
+            planBlocked = true
+            planFailureReason = "Coordinator generated an invalid plan"
+
+            return
+        }
+
+        guard assessment.targetReachable else {
+
+            planBlocked = true
+            planFailureReason = "Mission target is unreachable"
+
+            return
+        }
+
+        guard assessment.hasSafeRoute else {
+
+            planBlocked = true
+            planFailureReason = "No safe route available"
+
+            return
+        }
+
+        guard assessment.estimatedEnergyCost >= 0 else {
+
+            planBlocked = true
+            planFailureReason = "Invalid estimated energy cost"
+
+            return
+        }
+
+        planBlocked = false
+        planFailureReason = nil
+    }
+
+    // MARK: - Plan Status
+
+    var hasValidPlan: Bool {
+        guard let assessment = latestPlanAssessment else {
+            return false
+        }
+
+        return assessment.planIsValid &&
+               assessment.targetReachable &&
+               assessment.hasSafeRoute &&
+               !planBlocked
+    }
+
+    // MARK: - Decision Creation
+
+    private func makeDecision(
+        phase: FrankensteinMissionPhase,
+        subGoal: String,
+        requiresRecharge: Bool,
+        allowsOptionalInteraction: Bool
+    ) -> FrankensteinMissionDecision {
+
+        return FrankensteinMissionDecision(
+            phase: phase,
+            subGoal: subGoal,
+            requiresRecharge: requiresRecharge,
+            allowsOptionalInteraction: allowsOptionalInteraction,
             revision: revision
         )
     }
 
+    // MARK: - Reset
+
     func reset() {
+
         revision = 0
+
+        latestPlanAssessment = nil
+
+        planBlocked = false
+        planFailureReason = nil
     }
 }

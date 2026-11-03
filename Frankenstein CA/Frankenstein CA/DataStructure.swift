@@ -9,6 +9,27 @@ import Foundation
 import SwiftUI
 import SceneKit
 
+struct FrankensteinPlanAssessment {
+
+    var targetName: String?
+    var targetReachable: Bool
+
+    var routeDistance: Float
+    var estimatedTravelTime: Float
+    var estimatedEnergyCost: Float
+
+    var obstacleCount: Int
+    var hasSafeRoute: Bool
+    var requiresManipulation: Bool
+    var requiresJump: Bool
+
+    var planActionCount: Int
+    var planIsValid: Bool
+
+    var progressMade: Bool
+    var planBlocked: Bool
+}
+
 enum FrankensteinMissionPhase: String {
     case emergencyRecharge
     case recharge

@@ -84,7 +84,6 @@ final class FrankensteinCA: ObservableObject {
             ) {
                 pendingGoalChange = change
             }
-            decayFutility(to: newPerception.timestamp)
             
             // Mark Q-values dirty for all currently permitted actions
             markVisionQValuesDirty(perception: newPerception, allowedActions: allowedActions)
@@ -182,77 +181,9 @@ final class FrankensteinCA: ObservableObject {
         liveCellCount = countLiveCells()
     }
 
-    func observeMovementForFutility(
-        action: FrankensteinAction,
-        x: Float,
-        z: Float,
-        timestamp: TimeInterval = Date.timeIntervalSinceReferenceDate
-    ) {
-        lastTimestamp = max(lastTimestamp, timestamp)
-        decayFutility(to: timestamp)
+   
 
-        guard timestamp - lastPositionSampleTime >= positionSampleInterval else {
-            return
-        }
-
-        lastPositionSampleTime = timestamp
-
-        let current = PositionSample(x: x, z: z, time: timestamp, action: action)
-
-        var matchingSample: PositionSample?
-
-        if recentPositions.count >= 8 {
-            for old in recentPositions.dropLast(4) {
-                let dx = current.x - old.x
-                let dz = current.z - old.z
-                let distance = sqrt(dx * dx + dz * dz)
-                let age = timestamp - old.time
-
-                if distance < loopDistanceThreshold, age >= loopMinimumAge {
-                    matchingSample = old
-                    break
-                }
-            }
-        }
-
-        recentPositions.append(current)
-
-        if recentPositions.count > maximumPositionSamples {
-            recentPositions.removeFirst(recentPositions.count - maximumPositionSamples)
-        }
-
-        guard let match = matchingSample else { return }
-
-        guard timestamp - lastLoopPenaltyTime >= loopMinimumAge else { return }
-
-        lastLoopPenaltyTime = timestamp
-        futilityCount += 1
-
-        var actionsToPenalize: Set<FrankensteinAction> = [action]
-
-        for sample in recentPositions where sample.time >= match.time {
-            actionsToPenalize.insert(sample.action)
-        }
-
-        for failedAction in actionsToPenalize {
-            let oldPenalty = futilityPenalties[failedAction, default: 0]
-
-            futilityPenalties[failedAction] = min(
-                oldPenalty + futilityPenaltyIncrement,
-                maximumFutilityPenalty
-            )
-        }
-
-        futilityStatus = "Loop detected #\(futilityCount); reconsidering actions"
-    }
-
-    func forgiveFutility(for action: FrankensteinAction, amount: Float = 0.5) {
-        guard let penalty = futilityPenalties[action] else { return }
-
-        let reduced = penalty - amount
-        futilityPenalties[action] = reduced > 0.05 ? reduced : nil
-    }
-
+ 
     func isActive(x: Int, y: Int) -> Bool {
         guard x >= 0, x < size, y >= 0, y < size else {
             return false
@@ -276,13 +207,9 @@ final class FrankensteinCA: ObservableObject {
         plannedSequence.removeAll()
         visitCounts.removeAll()
         effectModel.removeAll()
-        futilityPenalties.removeAll()
         recentPositions.removeAll()
         lastPositionSampleTime = 0
         lastLoopPenaltyTime = 0
-        lastFutilityDecayTime = 0
-        futilityCount = 0
-        futilityStatus = "No loop detected"
         
         networkQGrid = Array(repeating: Array(repeating: 0.0, count: size), count: size)
         dirtyQCells = Array(repeating: Array(repeating: true, count: size), count: size)
@@ -623,10 +550,6 @@ final class FrankensteinCA: ObservableObject {
         return best
     }
    
-
-    @Published private(set) var futilityCount: Int = 0
-    @Published private(set) var futilityStatus = "No loop detected"
-
     private struct PositionSample {
         let x: Float
         let z: Float
@@ -637,22 +560,13 @@ final class FrankensteinCA: ObservableObject {
     private var recentPositions: [PositionSample] = []
     private var lastPositionSampleTime: TimeInterval = 0
     private var lastLoopPenaltyTime: TimeInterval = 0
-    private var lastFutilityDecayTime: TimeInterval = 0
 
     private let positionSampleInterval: TimeInterval = 0.25
     private let loopMinimumAge: TimeInterval = 2.0
     private let loopDistanceThreshold: Float = 0.45
     private let maximumPositionSamples = 40
-    private let futilityHalfLife: TimeInterval = 15
 
-    private var futilityPenalties: [FrankensteinAction: Float] = [:]
-    private let maximumFutilityPenalty: Float = 8.0
-    private let futilityPenaltyIncrement: Float = 1.5
-
-    func futilityPenalty(for action: FrankensteinAction) -> Float {
-        futilityPenalties[action, default: 0]
-    }
-
+   
     private func networkActivitySignal(
         for action: FrankensteinAction
     ) -> Float {
@@ -758,10 +672,9 @@ final class FrankensteinCA: ObservableObject {
         var goal: Float = 0
         var plan: Float = 0
         var activity: Float = 0
-        var futility: Float = 0
 
         var total: Float {
-            q + advisory + steering + clearance + terrain + goal + plan + novelty + activity - futility
+            q + advisory + steering + clearance + terrain + goal + plan + novelty + activity
         }
     }
 
@@ -789,28 +702,27 @@ final class FrankensteinCA: ObservableObject {
     }
 
     private func scoreParts(
-            for action: FrankensteinAction,
-            perception p: FrankensteinCAPerception?,
-            terrain: FrankensteinTerrainSample,
-            plan: [FrankensteinAction: Float] = [:]
-        ) -> ScoreParts {
-            var parts = ScoreParts()
-            parts.q = networkQGrid[actionNeuronPosition(for: action)?.y ?? 0][actionNeuronPosition(for: action)?.x ?? 0]
-            parts.activity = networkActivitySignal(for: action)
-            parts.futility = futilityPenalties[action, default: 0]
+                for action: FrankensteinAction,
+                perception p: FrankensteinCAPerception?,
+                terrain: FrankensteinTerrainSample,
+                plan: [FrankensteinAction: Float] = [:]
+            ) -> ScoreParts {
+                var parts = ScoreParts()
+                parts.q = networkQGrid[actionNeuronPosition(for: action)?.y ?? 0][actionNeuronPosition(for: action)?.x ?? 0]
+                parts.activity = networkActivitySignal(for: action)
+          
+                if let p {
+                    parts.advisory = p.advisoryValues[action, default: 0]
+                    parts.steering = steeringScore(for: action, perception: p)
+                    parts.clearance = clearanceScore(for: action, perception: p)
+                    parts.terrain = terrainScore(for: action, terrain: terrain)
+                    parts.plan = plan[action, default: 0]
+                    parts.goal = learnedGoalValue(for: action, stateKey: p.stateKey) + predictedGoalScore(for: action, perception: p)
+                    parts.novelty = explorationBonus(for: action, stateKey: p.stateKey)
+                }
 
-            if let p {
-                parts.advisory = p.advisoryValues[action, default: 0]
-                parts.steering = steeringScore(for: action, perception: p)
-                parts.clearance = clearanceScore(for: action, perception: p)
-                parts.terrain = terrainScore(for: action, terrain: terrain)
-                parts.plan = plan[action, default: 0]
-                parts.goal = learnedGoalValue(for: action, stateKey: p.stateKey) + predictedGoalScore(for: action, perception: p)
-                parts.novelty = explorationBonus(for: action, stateKey: p.stateKey)
+                return parts
             }
-
-            return parts
-        }
 
     private func learnedGoalValue(for action: FrankensteinAction, stateKey: String) -> Float {
             guard let stat = effectModel[stateKey]?[action.rawValue], stat.count >= 2 else { return 0 }
@@ -943,7 +855,7 @@ final class FrankensteinCA: ObservableObject {
             lastScoreBreakdown[best] = String(
                 format: "Q:%.2f | Pred:%.2f | Steer:%.2f | Clear:%.2f | Terr:%.2f | Plan:%.2f | Nov:%.2f | Act:%.2f | Fut:%.2f -> Total:%.2f",
                 bestParts.q, bestParts.goal, bestParts.steering, bestParts.clearance,
-                bestParts.terrain, bestParts.plan, bestParts.novelty, bestParts.activity, bestParts.futility, bestParts.total
+                bestParts.terrain, bestParts.plan, bestParts.novelty, bestParts.activity,  bestParts.total
             )
 
             for action in allowedActions.dropFirst() {
@@ -953,7 +865,7 @@ final class FrankensteinCA: ObservableObject {
                 lastScoreBreakdown[action] = String(
                     format: "Q:%.2f | Pred:%.2f | Steer:%.2f | Clear:%.2f | Terr:%.2f | Plan:%.2f | Nov:%.2f | Act:%.2f | Fut:%.2f -> Total:%.2f",
                     parts.q, parts.goal, parts.steering, parts.clearance,
-                    parts.terrain, parts.plan, parts.novelty, parts.activity, parts.futility, parts.total
+                    parts.terrain, parts.plan, parts.novelty, parts.activity,  parts.total
                 )
 
                 if parts.total > bestParts.total {
@@ -1106,21 +1018,5 @@ final class FrankensteinCA: ObservableObject {
         }
     }
     
-    private func decayFutility(to timestamp: TimeInterval) {
-        defer { lastFutilityDecayTime = timestamp }
-
-        guard lastFutilityDecayTime > 0,
-              timestamp > lastFutilityDecayTime,
-              !futilityPenalties.isEmpty else {
-            return
-        }
-
-        let elapsed = Float(timestamp - lastFutilityDecayTime)
-        let factor = powf(0.5, elapsed / Float(futilityHalfLife))
-
-        for (action, penalty) in futilityPenalties {
-            let decayed = penalty * factor
-            futilityPenalties[action] = decayed < 0.05 ? nil : decayed
-        }
-    }
+ 
 }

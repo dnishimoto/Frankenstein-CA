@@ -120,14 +120,7 @@ struct FrankensteinExecutiveActionTests {
         let startTime: TimeInterval = 100
 
         // Simulate repeated walking with no measured displacement.
-        for index in 0..<40 {
-            ca.observeMovementForFutility(
-                action: .walk,
-                x: 1,
-                z: 1,
-                timestamp: startTime + Double(index) * 0.3
-            )
-        }
+        
 
         #expect(ca.futilityCount > 0)
 

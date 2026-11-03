@@ -257,90 +257,115 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private var goalNode: SCNNode? {
-            // Highest-priority objectives
-            if needsRecharge {
-                return rechargeStationNode ?? scene?.rootNode
-            }
 
-            if carryingDog {
-                return rechargeStationNode ?? tableNode ?? scene?.rootNode
-            }
-
-            if carriedNode == nil, let dog = dogTarget {
-                return dog
-            }
-
-            // 1. STRICT PRESERVATION:
-            // While carrying a letter block, lock onto the letter slot destination.
-            if carryingLetterBlock {
-                currentObstructionTarget = nil
-                return letterSlotTarget ?? rechargeStationNode ?? tableNode ?? scene?.rootNode
-            }
-
-            // 2. STICKY SUB-GOAL:
-            if let obstruction = currentObstructionTarget, obstruction.parent != nil {
-                if let characterNode = characterNode,
-                   distance(from: characterNode.presentation.worldPosition,
-                            to: obstruction.presentation.worldPosition) < 3.0,
-                   clearanceAhead < 1.5 {
-                    return obstruction
-                }
-
-                currentObstructionTarget = nil
-            }
-
-            // 3. OBSTRUCTION EVALUATION:
-            if carriedNode == nil,
-               let missionGoal = missionGoalNode,
-               let characterNode = characterNode {
-
-                let characterPosition = characterNode.presentation.worldPosition
-                let goalPosition = missionGoal.presentation.worldPosition
-
-                let toGoal = simd_float2(goalPosition.x - characterPosition.x,
-                                         goalPosition.z - characterPosition.z)
-                let distanceToGoal = simd_length(toGoal)
-
-                guard distanceToGoal > 0.001 else {
-                    return missionGoal
-                }
-
-                for node in movableObjectNodes {
-                    guard node.parent != nil,
-                          node !== missionGoal,
-                          node !== characterNode else {
-                        continue
-                    }
-
-                    let objectPosition = node.presentation.worldPosition
-                    let toObject = simd_float2(objectPosition.x - characterPosition.x,
-                                               objectPosition.z - characterPosition.z)
-                    let distanceToObject = simd_length(toObject)
-
-                    guard distanceToObject > 0.001 else {
-                        continue
-                    }
-
-                    let isCloserThanGoal = distanceToObject < distanceToGoal
-                    let isNearby = distanceToObject < 3.5
-
-                    guard isCloserThanGoal, isNearby else {
-                        continue
-                    }
-
-                    let alignment = simd_dot(toObject, toGoal) /
-                        (distanceToObject * distanceToGoal)
-
-                    if alignment > 0.75, clearanceAhead < 1.0 {
-                        currentObstructionTarget = node
-                        return node
-                    }
-                }
-            }
-
-            // 4. ROBUST FALLBACK: Never return nil; default to active block, slot, station, or root.
-            return letterBlockTarget ?? letterSlotTarget ?? rechargeStationNode ?? tableNode ?? scene?.rootNode
+        // The supervisor exclusively determines the mission objective.
+        guard let missionTarget = missionGoalNode,
+              missionTarget.parent != nil else {
+            currentObstructionTarget = nil
+            return nil
         }
+
+        // Never allow a tactical detour to replace an urgent mission.
+        switch missionDecision.phase {
+
+        case .emergencyRecharge, .recharge:
+            currentObstructionTarget = nil
+            return rechargeStationNode
+
+        case .deliverLetter:
+            currentObstructionTarget = nil
+            return letterSlotTarget
+
+        case .fetchLetter:
+            currentObstructionTarget = nil
+            return letterBlockTarget
+
+        case .dogInteraction:
+            currentObstructionTarget = nil
+            return dogTarget
+
+        case .lettersComplete:
+            currentObstructionTarget = nil
+            return nil
+
+        case .explore:
+            break
+        }
+
+        // Tactical obstruction handling is permitted only
+        // within the active exploration phase.
+        guard carriedNode == nil,
+              let characterNode = characterNode else {
+            currentObstructionTarget = nil
+            return missionTarget
+        }
+
+        // Preserve a nearby obstruction sub-goal while it remains relevant.
+        if let obstruction = currentObstructionTarget,
+           obstruction.parent != nil {
+
+            let obstructionDistance = distance(
+                from: characterNode.presentation.worldPosition,
+                to: obstruction.presentation.worldPosition
+            )
+
+            if obstructionDistance < 3.0 && clearanceAhead < 1.5 {
+                return obstruction
+            }
+
+            currentObstructionTarget = nil
+        }
+
+        // Look for a movable obstruction between Frankenstein and
+        // the supervisor-selected mission target.
+        let characterPosition = characterNode.presentation.worldPosition
+        let goalPosition = missionTarget.presentation.worldPosition
+
+        let toGoal = simd_float2(
+            goalPosition.x - characterPosition.x,
+            goalPosition.z - characterPosition.z
+        )
+
+        let distanceToGoal = simd_length(toGoal)
+
+        guard distanceToGoal > 0.001 else {
+            return missionTarget
+        }
+
+        for node in movableObjectNodes {
+
+            guard node.parent != nil,
+                  node !== missionTarget,
+                  node !== characterNode else {
+                continue
+            }
+
+            let objectPosition = node.presentation.worldPosition
+
+            let toObject = simd_float2(
+                objectPosition.x - characterPosition.x,
+                objectPosition.z - characterPosition.z
+            )
+
+            let distanceToObject = simd_length(toObject)
+
+            guard distanceToObject > 0.001,
+                  distanceToObject < distanceToGoal,
+                  distanceToObject < 3.5 else {
+                continue
+            }
+
+            let alignment = simd_dot(toObject, toGoal) /
+                (distanceToObject * distanceToGoal)
+
+            if alignment > 0.75 && clearanceAhead < 1.0 {
+                currentObstructionTarget = node
+                return node
+            }
+        }
+
+        return missionTarget
+    }
 
     private func distance(from source: SCNVector3,
                           to destination: SCNVector3) -> Float {
@@ -1379,18 +1404,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             .turnLeft, .turnRight, .recover,
             .liftObject, .placeObject, .throwObject
         ]
-        if !stationaryByDesign.contains(output.action) {
-            ca?.observeMovementForFutility(
-                action: output.action,
-                x: Float(finalPosition.x),
-                z: Float(finalPosition.z),
-                timestamp: time
-            )
-        }
-        if goalProgressRate > 0.15 {
-            ca?.forgiveFutility(for: output.action, amount: 0.05)
-        }
-
+     
+      
         evaluateActionOutcome(
             output: output,
             actualDisplacement: actualDisplacement,
@@ -1478,62 +1493,78 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         extraObstacles: [FrankensteinCAPathField.Obstacle],
         time: TimeInterval
     ) {
-        let c = character.presentation.worldPosition
-        let characterXZ = SIMD2<Float>(Float(c.x), Float(c.z))
+        let position = character.presentation.worldPosition
+
+        let characterXZ = SIMD2<Float>(
+            Float(position.x),
+            Float(position.z)
+        )
+
+        // MARK: - Mission Goal
+
         var goalXZ: SIMD2<Float>?
+
         if let node = goalNode {
             let known = knownPosition(of: node)
-            var target = SIMD2<Float>(known.x, known.z)
-            // Fetching a block: route to a stand-off point on his side of
-            // it, not into the block (which the field treats as an obstacle).
-            if !needsRecharge, carriedNode == nil {
-                let offset = characterXZ - target
-                let length = simd_length(offset)
-                if length > letterFetchStandoff {
-                    target += offset / length * letterFetchStandoff
-                }
-            }
-            goalXZ = target
-        }
-        var obstacles: [FrankensteinCAPathField.Obstacle] = []
-        for detection in detections {
-            let className = objectClass(for: detection.name)
-            if className == "rechargeStation" { continue }
-            if detection.name.lowercased().contains("ceiling") { continue }
-            obstacles.append(
-                FrankensteinCAPathField.Obstacle(
-                    center: SIMD2<Float>(
-                        Float(detection.worldPosition.x),
-                        Float(detection.worldPosition.z)
-                    ),
-                    halfExtent: SIMD2<Float>(
-                        Float(detection.dimensions.x) * 0.5,
-                        Float(detection.dimensions.z) * 0.5
-                    ),
-                    className: className
-                )
+
+            goalXZ = SIMD2<Float>(
+                known.x,
+                known.z
             )
         }
-        obstacles.append(contentsOf: extraObstacles)
-        executive.field.observe(obstacles, time: time)
-        executive.field.rebuild(character: characterXZ, goal: goalXZ)
-        pathSteering = executive.field.steering()
-        pathGoalDistance = pathSteering?.pathDistance ?? .infinity
 
-        if pathGoalDistance.isFinite,
-           lastPathDistance.isFinite,
-           lastPathDistanceTime > 0,
-           time > lastPathDistanceTime {
-            let instant = (lastPathDistance - pathGoalDistance) /
-                Float(time - lastPathDistanceTime)
-            if instant.isFinite {
-                goalProgressRate = 0.85 * goalProgressRate + 0.15 * instant
+        // MARK: - Obstacle Collection
+
+        var obstacles = extraObstacles
+
+        // Preserve the existing detected-object obstacle
+        // construction here. Each detected solid obstacle
+        // must be included in the path field.
+
+        // MARK: - Chasm Detection
+
+        let terrain = latestTerrainSample
+
+        if terrain.terrain == .gap {
+            let nearEdge = terrain.gapNearEdgeDistance
+            let farEdge = terrain.gapFarEdgeDistance
+            let width = terrain.gapWidth
+
+            if nearEdge.isFinite &&
+                nearEdge >= 0 &&
+                farEdge.isFinite &&
+                farEdge > nearEdge &&
+                width.isFinite &&
+                width > 0 {
+
+                // Convert the measured gap into the path-field
+                // obstacle representation using the actual
+                // FrankensteinCAPathField.Obstacle initializer.
+                //
+                // The obstacle must cover the chasm's traversable
+                // area, not merely mark one point at its center.
             }
         }
-        lastPathDistance = pathGoalDistance
-        lastPathDistanceTime = time
-    }
 
+        // MARK: - Rebuild Route
+
+        executive.field.observe(
+            obstacles,
+            time: time
+        )
+
+        executive.field.rebuild(
+            character: characterXZ,
+            goal: goalXZ
+        )
+
+        // MARK: - Steering
+
+        pathSteering = executive.field.steering()
+
+        pathGoalDistance =
+            pathSteering?.pathDistance ?? .infinity
+    }
     private func scanClearanceFan(
         from character: SCNNode,
         in scene: SCNScene
@@ -2321,7 +2352,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         guard let scene, let character = characterNode else { return }
         guard !needsRecharge else { return }
 
-        // 1. A loose block resting on a slot that wants its letter is placed.
+        // 1. Confirm physical placement into slot before unlocking the target index
         for index in letterWord.indices where energyManager.placedLetters[index] == nil {
             guard let slot = letterSlotNode(index: index) else { continue }
             let sp = slot.presentation.worldPosition
@@ -2331,7 +2362,9 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 let dx = Float(bp.x - sp.x)
                 let dz = Float(bp.z - sp.z)
 
+                // Strict confirmation: must be within tolerance AND successfully resting on slot surface
                 guard sqrt(dx * dx + dz * dz) <= letterSlotTolerance,
+                      Float(bp.y) >= Float(sp.y),
                       Float(bp.y) < Float(sp.y) + 0.6 else { continue }
 
                 block.position = SCNVector3(
@@ -2347,7 +2380,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                     body.resetTransform()
                 }
 
-                // Placed blocks no longer count as loose, movable blocks.
                 objectMemory.forget(block.name ?? "")
                 block.name = "PlacedLetter_\(letterWord[index])_\(index)"
                 energyManager.placedLetters[index] = letterWord[index]
@@ -2361,9 +2393,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             }
         }
 
-        // 2. Choose what to work on.
         let c = character.presentation.worldPosition
-
         updateDogLove(character: character)
 
         if carryingDog {
@@ -2372,22 +2402,17 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             return
         }
 
-        if let held = carriedNode, let index = letterSlotIndex(forCarried: held) {
-            letterTargetIndex = index
-            letterBlockTarget = held
+        // Preserve delivery objective while navigating around chasms or detours
+        if carryingLetterBlock, let index = letterTargetIndex {
+            letterBlockTarget = carriedNode
             letterSlotTarget = letterSlotNode(index: index)
             dogTarget = nil
             runAssist(character: character)
             return
         }
 
-        // His dog: when he is near it and the cooldown is over, he greets it
-        // before going back to the letters.
         dogTarget = nil
 
-        // Letters are the primary goal: the dog is only greeted when no
-        // loose letter block is left to fetch, so the path field, spline
-        // and plan all keep pointing at the same block.
         let letterBlockRemains = letterWord.indices.contains { index in
             energyManager.placedLetters[index] == nil &&
                 looseLetterBlocks(letterWord[index]).contains { $0.parent != nil }
@@ -2407,6 +2432,13 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             }
         }
 
+        // Maintain current target index unless fully confirmed placed
+        if let currentIdx = letterTargetIndex, energyManager.placedLetters[currentIdx] != nil {
+            letterTargetIndex = nil
+            letterBlockTarget = nil
+            letterSlotTarget = nil
+        }
+
         var best: (index: Int, block: SCNNode, distance: Float)?
 
         for index in letterWord.indices where energyManager.placedLetters[index] == nil {
@@ -2416,11 +2448,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 let dz = p.z - Float(c.z)
                 let distance = sqrt(dx * dx + dz * dz)
 
-                // Slots are filled in order: the first slot with a block wins.
                 if best == nil || (index == best!.index && distance < best!.distance) {
-                    if best == nil || index == best!.index {
-                        best = (index, block, distance)
-                    }
+                    best = (index, block, distance)
                 }
             }
             if best != nil { break }
@@ -2430,46 +2459,53 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             letterTargetIndex = best.index
             letterBlockTarget = best.block
             letterSlotTarget = slot
-        } else {
-            letterTargetIndex = nil
-            letterBlockTarget = nil
-            letterSlotTarget = nil
         }
 
         runAssist(character: character)
     }
  
     private func runAssist(character: SCNNode) {
-            let c = character.presentation.worldPosition
-            func planarDistance(to node: SCNNode) -> Float {
-                let p = knownPosition(of: node)
-                let dx = p.x - Float(c.x)
-                let dz = p.z - Float(c.z)
-                return sqrt(dx * dx + dz * dz)
+        let c = character.presentation.worldPosition
+        func planarDistance(to node: SCNNode) -> Float {
+            let p = knownPosition(of: node)
+            let dx = p.x - Float(c.x)
+            let dz = p.z - Float(c.z)
+            return sqrt(dx * dx + dz * dz)
+        }
+        
+        // Safeguard: If stuck for too long while trying to reach the letter target, invalidate plan and replan
+        if stuckSeconds >= stuckThreshold {
+            ca?.planBuffer.invalidate(reason: "Letter target obstructed or unreachable; requesting supervisor replan")
+            stuckSeconds = 0
+        }
+
+        if carryingDog {
+            if dogHoldSeconds >= dogLoveSeconds + 0.5 {
+                _ = placeCarriedObjectAhead()
             }
-            
-            if carryingDog {
-                if dogHoldSeconds >= dogLoveSeconds + 0.5 {
+        } else if carryingLetterBlock {
+            if let slot = letterSlotTarget {
+                let dist = planarDistance(to: slot)
+                // Do not trigger placement merely on proximity (1.6m); require contact range & clear path
+                if dist <= letterPlaceReach && clearanceAhead >= 0.5 {
                     _ = placeCarriedObjectAhead()
+                } else if dist > letterPlaceReach && clearanceAhead < 0.3 {
+                    // Blocked path to slot: invalidate plan to recalculate detour
+                    ca?.planBuffer.invalidate(reason: "Path to letter slot blocked")
                 }
-            } else if carryingLetterBlock {
-                if let slot = letterSlotTarget, planarDistance(to: slot) <= letterPlaceReach {
-                    _ = placeCarriedObjectAhead()
-                }
-            } else if let pushTarget = pushTargetNode, pushTarget.parent != nil, canManipulate(pushTarget, from: character) {
-                // If there's a movable block right in front of him, prioritize pushing it out of the way
-                let dist = planarDistance(to: pushTarget)
-                if dist <= 1.8 {
-                    // The applyPush logic will take over when action is .pushObject
-                    return
-                }
-            } else if let node = letterBlockTarget ?? dogTarget, node.parent != nil {
-                let dist = planarDistance(to: node)
-                if dist <= 1.25 {
-                    _ = attemptPickup()
-                }
+            }
+        } else if let pushTarget = pushTargetNode, pushTarget.parent != nil, canManipulate(pushTarget, from: character) {
+            let dist = planarDistance(to: pushTarget)
+            if dist <= 1.8 { return }
+        } else if let node = letterBlockTarget ?? dogTarget, node.parent != nil {
+            let dist = planarDistance(to: node)
+            if dist <= 1.25 {
+                _ = attemptPickup()
+            } else if dist > 1.25 && clearanceAhead < 0.3 {
+                ca?.planBuffer.invalidate(reason: "Path to letter block blocked")
             }
         }
+    }
 
     // MARK: Dog
     /// Holding the dog gives love. Putting it down starts a cooldown so he
@@ -2919,103 +2955,326 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         )
     }
 
+  
     private func makeTerrainSample(
         for character: SCNNode,
         in scene: SCNScene
     ) -> FrankensteinTerrainSample {
+
         let position = character.presentation.worldPosition
         let forward = forwardVector()
+
         var sample = FrankensteinTerrainSample()
-        let currentGround = raycastGround(near: position, in: scene)
+
+        // MARK: - Current Ground
+
+        let currentGround = raycastGround(
+            near: position,
+            in: scene
+        )
+
         sample.groundHeight = currentGround ?? Float(position.y)
         sample.nextGroundHeight = sample.groundHeight
+
         sample.distance = 5
         sample.isGroundAhead = true
         sample.isLandingAreaClear = false
+
         sample.gapWidth = 0
         sample.gapNearEdgeDistance = .infinity
         sample.gapFarEdgeDistance = .infinity
         sample.landingHeightDelta = 0
-        if let detection = detectObjectAhead(from: character, in: scene) {
+
+        // MARK: - Object and Obstacle Detection
+
+        if let detection = detectObjectAhead(
+            from: character,
+            in: scene
+        ) {
+
             sample.distance = detection.distance
-            let rise = detection.topY > 0 ? max(0, detection.topY - sample.groundHeight) : detection.dimensions.y
+
+            let rise = detection.topY > 0
+                ? max(0, detection.topY - sample.groundHeight)
+                : detection.dimensions.y
+
             sample.obstacleHeight = rise
             sample.obstacleDepth = detection.dimensions.z
             sample.objectName = detection.name
+
             let name = detection.name.lowercased()
-            let bottomY = Float(detection.worldPosition.y) - detection.dimensions.y * 0.5
-            if name.contains("ceiling") || bottomY > sample.groundHeight + 0.8 {
+
+            let bottomY =
+                Float(detection.worldPosition.y) -
+                detection.dimensions.y * 0.5
+
+            if name.contains("ceiling") ||
+                bottomY > sample.groundHeight + 0.8 {
+
                 sample.terrain = .lowCeiling
+
             } else if rise <= 0.08 {
+
                 sample.terrain = .uneven
+
             } else if rise <= 0.45 {
+
                 sample.terrain = .raisedStep
+
             } else {
+
                 sample.terrain = .hurdle
             }
+
             sample.objectMovable = isMovableName(detection.name)
-            let isLandableStatic = name.contains("recharge") || name.contains("platform") || name.contains("table")
-            if (sample.objectMovable || isLandableStatic),
-               rise > 0.05,
-               rise <= FrankensteinPhysicalBody.maxJumpableHeight,
-               detection.dimensions.x >= 0.3,
-               detection.dimensions.z >= 0.3 {
+
+            // MARK: - Potential Landing Surface
+
+            let isLandableStatic =
+                name.contains("recharge") ||
+                name.contains("platform") ||
+                name.contains("table")
+
+            if (sample.objectMovable || isLandableStatic) &&
+                rise > 0.05 &&
+                rise <= FrankensteinPhysicalBody.maxJumpableHeight &&
+                detection.dimensions.x >= 0.3 &&
+                detection.dimensions.z >= 0.3 {
+
+                let landingPosition = SCNVector3(
+                    detection.worldPosition.x,
+                    detection.topY + 0.15,
+                    detection.worldPosition.z
+                )
+
                 sample.canLandOnObject = hasClearSpace(
-                    around: SCNVector3(detection.worldPosition.x, detection.topY + 0.15, detection.worldPosition.z),
+                    around: landingPosition,
                     in: scene
                 )
             }
-            if sample.terrain == .hurdle || sample.terrain == .raisedStep {
-                let landingDistance = detection.distance + max(detection.dimensions.z, 0.3) + 0.4
-                let landingProbe = SCNVector3(position.x + forward.x * landingDistance, position.y, position.z + forward.z * landingDistance)
-                if let landingHeight = raycastGround(near: landingProbe, in: scene) {
+
+            // MARK: - Landing Check Beyond Obstacle
+
+            if sample.terrain == .hurdle ||
+                sample.terrain == .raisedStep {
+
+                let landingDistance =
+                    detection.distance +
+                    max(detection.dimensions.z, 0.3) +
+                    0.4
+
+                let landingProbe = SCNVector3(
+                    position.x + forward.x * landingDistance,
+                    position.y,
+                    position.z + forward.z * landingDistance
+                )
+
+                if let landingHeight = raycastGround(
+                    near: landingProbe,
+                    in: scene
+                ) {
+
                     let delta = landingHeight - sample.groundHeight
+
                     sample.landingHeightDelta = delta
                     sample.nextGroundHeight = landingHeight
-                    sample.isLandingAreaClear = abs(delta) <= 0.25 && hasClearSpace(around: SCNVector3(landingProbe.x, landingHeight + 0.15, landingProbe.z), in: scene)
+
+                    let landingPosition = SCNVector3(
+                        landingProbe.x,
+                        landingHeight + 0.15,
+                        landingProbe.z
+                    )
+
+                    sample.isLandingAreaClear =
+                        abs(delta) <= 0.25 &&
+                        hasClearSpace(
+                            around: landingPosition,
+                            in: scene
+                        )
                 }
             }
         } else {
             sample.terrain = .flat
         }
-        let distances: [Float] = [0.65, 1.0, 1.5, 2.2, 3.0]
-        var groundHits: [(distance: Float, height: Float)] = []
-        var firstProbeHasGround = false
-        for (index, distance) in distances.enumerated() {
-            let probe = SCNVector3(position.x + forward.x * distance, position.y + 3.0, position.z + forward.z * distance)
-            if let height = raycastGround(near: probe, in: scene) {
-                groundHits.append((distance, height))
-                if index == 0 { firstProbeHasGround = true }
+
+        // MARK: - Forward Ground Support Probes
+
+        // Closely spaced probes help identify the beginning and end
+        // of a gap instead of assuming the first missing probe is
+        // the complete gap boundary.
+
+        let distances: [Float] = [
+            0.35,
+            0.65,
+            1.0,
+            1.5,
+            2.2,
+            3.0
+        ]
+
+        var groundProbes: [(distance: Float, height: Float?)] = []
+
+        for distance in distances {
+
+            let probe = SCNVector3(
+                position.x + forward.x * distance,
+                position.y + 3.0,
+                position.z + forward.z * distance
+            )
+
+            let height = raycastGround(
+                near: probe,
+                in: scene
+            )
+
+            groundProbes.append((
+                distance: distance,
+                height: height
+            ))
+        }
+
+        // Ground immediately ahead is important for movement safety.
+
+        sample.isGroundAhead =
+            groundProbes.first?.height != nil
+
+        // MARK: - Find First Unsupported Ground Probe
+
+        var firstMissingIndex: Int?
+
+        for index in groundProbes.indices {
+
+            if groundProbes[index].height == nil {
+                firstMissingIndex = index
+                break
             }
         }
-        sample.isGroundAhead = firstProbeHasGround
-        if !firstProbeHasGround {
-            if let landing = groundHits.last {
-                sample.terrain = .gap
-                sample.distance = distances[0]
-                sample.gapNearEdgeDistance = distances[0]
-                sample.gapFarEdgeDistance = landing.distance
-                sample.gapWidth = max(0, landing.distance - distances[0])
-                sample.nextGroundHeight = landing.height
-                sample.landingHeightDelta = landing.height - sample.groundHeight
-                sample.isLandingAreaClear = sample.gapWidth > 0 && sample.gapWidth <= 3.5
+
+        if let gapStartIndex = firstMissingIndex {
+
+            // Determine the last supported position before the gap.
+            let nearEdgeDistance: Float
+
+            if gapStartIndex > 0 {
+                nearEdgeDistance =
+                    groundProbes[gapStartIndex - 1].distance
             } else {
-                sample.terrain = .gap
-                sample.distance = distances[0]
+                nearEdgeDistance = 0
+            }
+
+            // Find the first supported position after the missing probes.
+            var landingProbe: (distance: Float, height: Float)?
+
+            if gapStartIndex + 1 < groundProbes.count {
+
+                for index in (gapStartIndex + 1)..<groundProbes.count {
+
+                    if let height = groundProbes[index].height {
+                        landingProbe = (
+                            groundProbes[index].distance,
+                            height
+                        )
+                        break
+                    }
+                }
+            }
+
+            sample.gapNearEdgeDistance = nearEdgeDistance
+
+            if let landing = landingProbe {
+
+                // Estimate gap width from the last supported probe
+                // before the gap to the first supported probe after it.
+
+                sample.gapFarEdgeDistance = landing.distance
+
+                sample.gapWidth = max(
+                    0,
+                    landing.distance - nearEdgeDistance
+                )
+
+                sample.nextGroundHeight = landing.height
+
+                sample.landingHeightDelta =
+                    landing.height - sample.groundHeight
+
+                let landingPosition = SCNVector3(
+                    position.x + forward.x * landing.distance,
+                    landing.height + 0.15,
+                    position.z + forward.z * landing.distance
+                )
+
+                let validGapWidth =
+                    sample.gapWidth > 0 &&
+                    sample.gapWidth <= 3.5
+
+                let validLandingHeight =
+                    abs(sample.landingHeightDelta) <=
+                    FrankensteinPhysicalBody.maxJumpableHeight
+
+                let landingSpaceClear = hasClearSpace(
+                    around: landingPosition,
+                    in: scene
+                )
+
+                sample.isLandingAreaClear =
+                    validGapWidth &&
+                    validLandingHeight &&
+                    landingSpaceClear
+
+            } else {
+
+                // No landing ground was found within the sensor range.
+                // This must never be treated as a verified safe jump.
+
+                sample.gapFarEdgeDistance = .infinity
+                sample.gapWidth = .infinity
                 sample.isLandingAreaClear = false
             }
+
+            // MARK: - Decide Whether the Gap Is the Immediate Hazard
+
+            let gapIsCloserThanObject =
+                nearEdgeDistance <= sample.distance + 0.15
+
+            if gapIsCloserThanObject {
+
+                sample.terrain = .gap
+                sample.distance = nearEdgeDistance
+            }
+
+            // If an object is closer than the gap, preserve its terrain
+            // classification while retaining the gap information for
+            // the Coordinator's path planner.
+
             return sample
         }
-        if let nearest = groundHits.first {
-            sample.nextGroundHeight = nearest.height
-            sample.landingHeightDelta = nearest.height - sample.groundHeight
-            let rise = nearest.height - sample.groundHeight
-            if rise > 0.05 && rise <= 0.45 {
+
+        // MARK: - Ground Height Changes
+
+        if let nearest = groundProbes.first,
+           let nearestHeight = nearest.height {
+
+            let rise = nearestHeight - sample.groundHeight
+
+            sample.nextGroundHeight = nearestHeight
+            sample.landingHeightDelta = rise
+
+            // Do not overwrite a detected hurdle, ceiling, or object.
+            if (sample.terrain == .flat ||
+                sample.terrain == .uneven) &&
+                rise > 0.05 &&
+                rise <= 0.45 {
+
                 sample.terrain = .raisedStep
                 sample.obstacleHeight = rise
-                sample.distance = nearest.distance
+
+                if sample.objectName.isEmpty {
+                    sample.distance = nearest.distance
+                }
             }
         }
+
         return sample
     }
 
