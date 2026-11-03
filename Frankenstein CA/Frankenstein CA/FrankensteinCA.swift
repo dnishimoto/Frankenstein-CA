@@ -42,38 +42,6 @@ final class FrankensteinCA: ObservableObject {
     /// before the CA's own scoring vetoes the plan.
     private let planCommitmentMargin: Float = 0.35
 
-    // MARK: - Stagnation Detection & Plan Abandonment
-    @Published private(set) var isStagnant: Bool = false
-    @Published var stagnationStatus = "Moving normally"
-    
-    private var lastKnownPosition: SIMD3<Float> = .zero
-    private var stagnationTimeAccumulator: TimeInterval = 0
-    private let stagnationTimeLimit: TimeInterval = 1.2
-
-    func checkStagnation(currentPosition: SIMD3<Float>, deltaTime: TimeInterval) {
-        let dx = currentPosition.x - lastKnownPosition.x
-        let dz = currentPosition.z - lastKnownPosition.z
-        let movedDistance = sqrt(dx * dx + dz * dz)
-
-        if movedDistance < 0.015 {
-            stagnationTimeAccumulator += deltaTime
-            if stagnationTimeAccumulator >= stagnationTimeLimit {
-                isStagnant = true
-                futilityCount += 1
-                stagnationStatus = "Stagnation detected: Plan abandoned, replanning..."
-                
-                // Abandon current plan and force immediate replan/reroute
-                planBuffer.invalidate(reason: "Stagnation blockage detected; abandoning plan")
-                plannedSequence.removeAll()
-            }
-        } else {
-            stagnationTimeAccumulator = 0
-            isStagnant = false
-            lastKnownPosition = currentPosition
-            stagnationStatus = "Moving normally"
-        }
-    }
-
     // MARK: - Tapestry Blueprint Coordinates & Movable Blocks Setup
     private var currentTapestrySlotIndex = 0
     private weak var cachedRootNode: SCNNode?
@@ -299,8 +267,6 @@ final class FrankensteinCA: ObservableObject {
         stuckSeconds = 0
         outcomesObserved = 0
         consecutiveJumpCount = 0
-        isStagnant = false
-        stagnationTimeAccumulator = 0
         lastDecisionDescription = "Simulation reset"
         goalSeekingStatus = "No goal outcome yet"
         
@@ -373,64 +339,70 @@ final class FrankensteinCA: ObservableObject {
     // FrankensteinCA_6.swift
 
     private func predictedGoalScore(
-        for action: FrankensteinAction,
-        perception p: FrankensteinCAPerception
-    ) -> Float {
-        var score: Float = 0
-        let alignment = max(0, cosf(p.headingError))
-        let objectName = p.nearestObjectName.lowercased()
-        
-        // ---> ADD THIS HAZARD EVASION OVERRIDE <---
-        // If clearance ahead is critically low (e.g., edge of a gap or wall),
-        // heavily favor backing up and turning to immediately break buffer inertia.
-        if p.clearanceAhead < 0.8 {
-            if action == .backward {
-                score += 6.0 // Instantly overrides the 0.35 commitment margin
-            } else if action == .turnLeft || action == .turnRight {
-                score += 3.0
-            } else if action == .walk || action == .run || action == .pushObject {
-                score -= 5.0 // Heavily penalize pushing forward into the hazard
+            for action: FrankensteinAction,
+            perception p: FrankensteinCAPerception
+        ) -> Float {
+            var score: Float = 0
+            let alignment = max(0, cosf(p.headingError))
+            let objectName = p.nearestObjectName.lowercased()
+            
+            // ---> HAZARD EVASION OVERRIDE <---
+            // If clearance ahead is critically low (e.g., edge of a gap or wall),
+            // heavily favor backing up and turning to immediately break buffer inertia.
+            if p.clearanceAhead < 0.8 {
+                if action == .backward {
+                    score += 6.0 // Instantly overrides the 0.35 commitment margin
+                } else if action == .turnLeft || action == .turnRight {
+                    score += 3.0
+                } else if action == .walk || action == .run || action == .pushObject || action == .kickObject {
+                    score -= 5.0 // Heavily penalize pushing forward or kicking into the hazard
+                }
             }
+            // ------------------------------------------
+
+            let isTargetLetter = objectName.contains("letterblock") || objectName.contains("floatingletter")
+            
+            switch action {
+            case .pushObject:
+                if p.nearestObjectMovable, p.nearestObjectDistance <= 2.0 {
+                    score += 6.0
+                } else {
+                    score -= 0.5
+                }
+
+            case .kickObject:
+                if p.nearestObjectMovable, p.nearestObjectDistance <= 1.8 {
+                    score += 5.5
+                } else {
+                    score -= 0.5
+                }
+                
+            case .throwObject:
+                if p.nearestObjectMovable || objectName.contains("block") {
+                    score += 4.5
+                } else {
+                    score -= 0.2
+                }
+                
+            case .liftObject:
+                if p.nearestObjectPickupable && (isTargetLetter || p.nearestObjectDistance <= 1.25) {
+                    score += 8.0
+                }
+            case .backward:
+                if p.carryingLetterBlock {
+                    score += 6.0
+                } else {
+                    score += 0.1
+                }
+            case .walk, .run:
+                score += (isTargetLetter ? 1.5 : 0.4) * alignment
+                
+            default:
+                break
+            }
+
+            return score
         }
-        // ------------------------------------------
-
-        let isTargetLetter = objectName.contains("letterblock") || objectName.contains("floatingletter")
-        
-        switch action {
-        case .pushObject:
-            if p.nearestObjectMovable, p.nearestObjectDistance <= 2.0 {
-                score += 6.0
-            } else {
-                score -= 0.5
-            }
-            
-        case .throwObject:
-            if p.nearestObjectMovable || objectName.contains("block") {
-                score += 4.5
-            } else {
-                score -= 0.2
-            }
-            
-        case .liftObject:
-            if p.nearestObjectPickupable && (isTargetLetter || p.nearestObjectDistance <= 1.25) {
-                score += 8.0
-            }
-        case .backward:
-            if p.carryingLetterBlock {
-                score += 6.0
-            } else {
-                score += 0.1
-            }
-        case .walk, .run:
-            score += (isTargetLetter ? 1.5 : 0.4) * alignment
-            
-        default:
-            break
-        }
-
-        return score
-    }
-
 
 
     private struct Rollout {
