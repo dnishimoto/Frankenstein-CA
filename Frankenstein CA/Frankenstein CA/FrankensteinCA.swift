@@ -947,68 +947,232 @@ final class FrankensteinCA: ObservableObject {
 
         var selected = best
 
-        if let head = planBuffer.currentStep {
+        func decideAction(
+                terrain: FrankensteinTerrainSample,
+                body: FrankensteinBodyState,
+                allowedActions: [FrankensteinAction],
+                qValues: [FrankensteinAction: Float],
+                exploration: Float = 0,
+                isDeliveringLetter: Bool = false
+            ) -> FrankensteinAction {
 
-            if allowedActions.contains(head.action) {
+                guard !allowedActions.isEmpty else {
+                    lastDecisionDescription = "No permitted action"
+                    return .walk
+                }
 
-                if isDeliveringLetter {
-                    // Letter delivery commitment:
-                    // keep executing the current planned action.
-                    selected = head.action
+                setQValues(qValues)
+                planQValues = qValues
 
-                } else if let headParts = allParts[head.action] {
+                let p = currentPerception()
 
-                    if head.action == best ||
-                        bestParts.total - headParts.total <= planCommitmentMargin {
+                // MARK: - Preserve the delivery route
 
+                if let p,
+                   routeHasChanged(p.routeRelativeHeadings),
+                   !isDeliveringLetter {
+
+                    planBuffer.invalidate(
+                        reason: "Pathfield changed: reconsidering route around obstruction"
+                    )
+
+                    plannedSequence.removeAll()
+                }
+
+                let stateKey = p?.stateKey ?? "none"
+
+                var plan: [FrankensteinAction: Float]
+
+                if let p {
+                    plan = planValues(
+                        for: allowedActions,
+                        perception: p
+                    )
+                } else {
+                    plannedSequence = []
+                    plan = [:]
+                }
+
+                if let p {
+                    applyObstructionToPlan(
+                        &plan,
+                        allowed: allowedActions,
+                        perception: p
+                    )
+                }
+
+                updatePlanBuffer(
+                    plan: plan,
+                    allowed: allowedActions,
+                    perception: p
+                )
+
+                // MARK: - Score permitted actions (used for fallback/best evaluation)
+
+                var best = allowedActions[0]
+
+                var bestParts = scoreParts(
+                    for: best,
+                    perception: p,
+                    terrain: terrain,
+                    plan: plan
+                )
+
+                var allParts: [FrankensteinAction: ScoreParts] = [
+                    best: bestParts
+                ]
+
+                lastScoreBreakdown.removeAll()
+
+                lastScoreBreakdown[best] = String(
+                    format: "Q:%.2f | Pred:%.2f | Steer:%.2f | Clear:%.2f | Terr:%.2f | Plan:%.2f | Nov:%.2f | Act:%.2f  -> Total:%.2f",
+                    bestParts.q,
+                    bestParts.goal,
+                    bestParts.steering,
+                    bestParts.clearance,
+                    bestParts.terrain,
+                    bestParts.plan,
+                    bestParts.novelty,
+                    bestParts.activity,
+                    bestParts.total
+                )
+
+                for action in allowedActions.dropFirst() {
+
+                    let parts = scoreParts(
+                        for: action,
+                        perception: p,
+                        terrain: terrain,
+                        plan: plan
+                    )
+
+                    allParts[action] = parts
+
+                    lastScoreBreakdown[action] = String(
+                        format: "Q:%.2f | Pred:%.2f | Steer:%.2f | Clear:%.2f | Terr:%.2f | Plan:%.2f | Nov:%.2f | Act:%.2f  -> Total:%.2f",
+                        parts.q,
+                        parts.goal,
+                        parts.steering,
+                        parts.clearance,
+                        parts.terrain,
+                        parts.plan,
+                        parts.novelty,
+                        parts.activity,
+                        parts.total
+                    )
+
+                    if parts.total > bestParts.total {
+                        best = action
+                        bestParts = parts
+                    }
+                }
+
+                // MARK: - Select action (Strict Plan Authoritativeness)
+
+                var selected = best
+
+                if let head = planBuffer.currentStep {
+                    if allowedActions.contains(head.action) {
+                        // Live scoring cannot change or override the active plan step.
+                        // Frankenstein strictly follows the plan unless it becomes illegal/unsafe.
                         selected = head.action
-
                     } else {
-
+                        // The current step is no longer permitted by terrain/safety constraints.
                         planBuffer.overrideHead(
                             with: PlanStep(
                                 action: best,
                                 description: "\(best)"
                             ),
-                            reason: "scoring overrode \(head.action) with \(best)"
+                            reason: isDeliveringLetter
+                                ? "delivery step no longer permitted; safe replan"
+                                : "current step no longer permitted"
                         )
 
                         selected = best
                     }
 
                 } else {
+
+                    planBuffer.overrideHead(
+                        with: PlanStep(
+                            action: best,
+                            description: "\(best)"
+                        ),
+                        reason: "no plan; chose \(best)"
+                    )
+
                     selected = best
                 }
 
-            } else {
-                // The current step is no longer permitted.
-                // Safety constraints take priority over commitment.
-                planBuffer.overrideHead(
-                    with: PlanStep(
-                        action: best,
-                        description: "\(best)"
-                    ),
-                    reason: isDeliveringLetter
-                        ? "delivery step no longer permitted; safe replan"
-                        : "current step no longer permitted"
+                // MARK: - Exploration
+
+                let epsilon: Float
+
+                if isDeliveringLetter {
+                    epsilon = 0
+                } else if exploration >= 1 {
+                    epsilon = 1
+                } else if exploration <= 0 {
+                    epsilon = 0
+                } else {
+                    epsilon = min(
+                        0.25,
+                        max(exploration, randomExploration)
+                    )
+                }
+
+                var explored = false
+
+                if Float.random(in: 0..<1) < epsilon,
+                   let random = allowedActions
+                    .filter({ $0 != .recover && $0 != selected })
+                    .randomElement() {
+
+                    selected = random
+                    explored = true
+
+                    planBuffer.overrideHead(
+                        with: PlanStep(
+                            action: random,
+                            description: "\(random) (exploring)"
+                        ),
+                        reason: "exploring \(random)"
+                    )
+                }
+
+                // MARK: - Record decision
+
+                recordVisit(
+                    action: selected,
+                    stateKey: stateKey
                 )
 
-                selected = best
+                rememberDecision(
+                    selected,
+                    stateKey: stateKey,
+                    perception: p
+                )
+
+                let queue = planBuffer.pendingActions
+                    .prefix(4)
+                    .map { String(describing: $0) }
+                    .joined(separator: " > ")
+
+                let missionLabel = isDeliveringLetter
+                    ? "LETTER DELIVERY COMMITTED"
+                    : "Normal planning"
+
+                lastDecisionDescription =
+                    "\(missionLabel) | " +
+                    "\(explored ? "Exploring" : "Executing") \(selected) | " +
+                    "\(goalContext.summary) | " +
+                    "Queue: \(queue.isEmpty ? "empty" : queue) | " +
+                    "Plan: \(planBuffer.lastReplanReason) " +
+                    "(\(planBuffer.replanCount)) | " +
+                    "State: \(stateKey)"
+
+                return selected
             }
-
-        } else {
-
-            planBuffer.overrideHead(
-                with: PlanStep(
-                    action: best,
-                    description: "\(best)"
-                ),
-                reason: "no plan; chose \(best)"
-            )
-
-            selected = best
-        }
-
         // MARK: - Exploration
 
         let epsilon: Float
