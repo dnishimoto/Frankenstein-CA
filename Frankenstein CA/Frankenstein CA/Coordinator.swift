@@ -1710,8 +1710,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                let character = characterNode {
                 let c = character.presentation.worldPosition
                 let n = target.presentation.worldPosition
-                let dx = Float(n.x - c.x)
-                let dz = Float(n.z - c.z)
+                let dx = Float(n.x) - Float(c.x)
+                let dz = Float(n.z) - Float(c.z)
                 let distance = sqrt(dx * dx + dz * dz)
                 if distance.isFinite && distance <= 2.3 {
                     perception.nearestObjectClass = "movable"
@@ -1739,6 +1739,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             let objectValues = latestDetection.map {
                 executive.learner.values(for: objectStateKey(for: $0, terrain: terrain))
             } ?? [:]
+            
             var advisory: [FrankensteinAction: Float] = [:]
             for action in FrankensteinAction.allCases {
                 let name = String(describing: action)
@@ -1746,17 +1747,19 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 let objVal = objectValues[name] ?? 0
                 advisory[action] = 0.35 * goalVal + 0.20 * objVal
             }
+            
             if allowedActions.contains(.liftObject), canLiftNow {
                 advisory[.liftObject, default: 0] += 5.0
                 advisory[.jump, default: 0] -= 5.0
             }
+            
             if let target = pushTargetNode,
                target.parent != nil,
                let character = characterNode {
                 let c = character.presentation.worldPosition
                 let n = target.presentation.worldPosition
-                let dx = Float(n.x - c.x)
-                let dz = Float(n.z - c.z)
+                let dx = Float(n.x) - Float(c.x)
+                let dz = Float(n.z) - Float(c.z)
                 let distance = sqrt(dx * dx + dz * dz)
                 let forward = forwardVector()
                 let ahead = dx * forward.x + dz * forward.z
@@ -1767,6 +1770,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                     terrain.terrain == .hurdle ||
                     terrain.terrain == .raisedStep ||
                     (pathSteering?.isDetouring ?? false)
+                    
                 if distance.isFinite,
                    distance <= 1.0,
                    ahead > 0.05,
@@ -1778,6 +1782,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                     advisory[.pushObject, default: 0] -= 1.0
                 }
             }
+            
             if let detection = latestDetection,
                detection.distance <= 2.5,
                (detection.name.lowercased().contains("recharge") ||
@@ -1785,6 +1790,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 advisory[.jump, default: 0] += 4.0
                 advisory[.walk, default: 0] -= 1.0
             }
+            
             if let target = pushTargetNode, target.parent != nil {
                 perception.subGoal = "Approach and interact with movable block"
             } else if let detection = latestDetection, detection.distance < 3.0 {
@@ -1792,6 +1798,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             } else {
                 perception.subGoal = ""
             }
+            
             perception.advisoryValues = advisory
             perception.stateKey = [
                 String(describing: terrain.terrain),
@@ -1801,8 +1808,11 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 perception.nearestObjectDistance.isFinite ? distanceBand(perception.nearestObjectDistance) : "none",
                 carriedNode != nil ? "carrying" : "empty"
             ].joined(separator: "|")
+            
             perception.timestamp = time
-            ca.receivePerception(perception)
+            
+            // Pass allowedActions so receivePerception updates dirty Q-cells for all permitted actions
+            ca.receivePerception(perception, allowedActions: allowedActions)
         }
     private func addLetterBlocks(to scene: SCNScene) {
         let targetWord = Array("FRANKENSTEIN")

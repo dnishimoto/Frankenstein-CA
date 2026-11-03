@@ -72,23 +72,23 @@ final class FrankensteinCA: ObservableObject {
 
     private(set) var lastScoreBreakdown: [FrankensteinAction: String] = [:]
 
-    func receivePerception(_ newPerception: FrankensteinCAPerception) {
-        perception = newPerception
-        lastTimestamp = max(lastTimestamp, newPerception.timestamp)
+    func receivePerception(_ newPerception: FrankensteinCAPerception, allowedActions: [FrankensteinAction]) {
+            perception = newPerception
+            lastTimestamp = max(lastTimestamp, newPerception.timestamp)
 
-        let sub = newPerception.subGoal.isEmpty ? nil : newPerception.subGoal
-        if let change = goalContext.observe(
-            goal: newPerception.goal,
-            subGoal: sub,
-            goalReached: newPerception.atGoal
-        ) {
-            pendingGoalChange = change
+            let sub = newPerception.subGoal.isEmpty ? nil : newPerception.subGoal
+            if let change = goalContext.observe(
+                goal: newPerception.goal,
+                subGoal: sub,
+                goalReached: newPerception.atGoal
+            ) {
+                pendingGoalChange = change
+            }
+            decayFutility(to: newPerception.timestamp)
+            
+            // Mark Q-values dirty for all currently permitted actions
+            markVisionQValuesDirty(perception: newPerception, allowedActions: allowedActions)
         }
-        decayFutility(to: newPerception.timestamp)
-        
-        // Mark Q-values dirty within Frankenstein's field of vision based on perception
-        markVisionQValuesDirty(perception: newPerception)
-    }
 
     private struct EffectStat {
         var mean: Float = 0
@@ -291,16 +291,15 @@ final class FrankensteinCA: ObservableObject {
         liveCellCount = countLiveCells()
     }
 
-    private func markVisionQValuesDirty(perception p: FrankensteinCAPerception) {
+    private func markVisionQValuesDirty(perception p: FrankensteinCAPerception, allowedActions: [FrankensteinAction]) {
         for y in 0..<size {
             for x in 0..<size {
                 dirtyQCells[y][x] = false
             }
         }
 
-        let visibleActions: [FrankensteinAction] = p.nearestObjectMovable ? [.pushObject, .liftObject, .walk] : [.walk, .run, .turnLeft, .turnRight, .jump]
-        
-        for action in visibleActions {
+        // Mark Q-cells for all currently permitted actions
+        for action in allowedActions {
             if let pos = actionNeuronPosition(for: action) {
                 dirtyQCells[pos.y][pos.x] = true
                 for dy in -1...1 {
@@ -790,33 +789,33 @@ final class FrankensteinCA: ObservableObject {
     }
 
     private func scoreParts(
-        for action: FrankensteinAction,
-        perception p: FrankensteinCAPerception?,
-        terrain: FrankensteinTerrainSample,
-        plan: [FrankensteinAction: Float] = [:]
-    ) -> ScoreParts {
-        var parts = ScoreParts()
-        parts.q = networkQGrid[actionNeuronPosition(for: action)?.y ?? 0][actionNeuronPosition(for: action)?.x ?? 0]
-        parts.activity = networkActivitySignal(for: action)
-        parts.futility = futilityPenalties[action, default: 0]
+            for action: FrankensteinAction,
+            perception p: FrankensteinCAPerception?,
+            terrain: FrankensteinTerrainSample,
+            plan: [FrankensteinAction: Float] = [:]
+        ) -> ScoreParts {
+            var parts = ScoreParts()
+            parts.q = networkQGrid[actionNeuronPosition(for: action)?.y ?? 0][actionNeuronPosition(for: action)?.x ?? 0]
+            parts.activity = networkActivitySignal(for: action)
+            parts.futility = futilityPenalties[action, default: 0]
 
-        if let p {
-            parts.advisory = p.advisoryValues[action, default: 0]
-            parts.steering = steeringScore(for: action, perception: p)
-            parts.clearance = clearanceScore(for: action, perception: p)
-            parts.terrain = terrainScore(for: action, terrain: terrain)
-            parts.plan = plan[action, default: 0]
-            parts.goal = learnedGoalValue(for: action, stateKey: p.stateKey) + predictedGoalScore(for: action, perception: p)
-            parts.novelty = explorationBonus(for: action, stateKey: p.stateKey)
+            if let p {
+                parts.advisory = p.advisoryValues[action, default: 0]
+                parts.steering = steeringScore(for: action, perception: p)
+                parts.clearance = clearanceScore(for: action, perception: p)
+                parts.terrain = terrainScore(for: action, terrain: terrain)
+                parts.plan = plan[action, default: 0]
+                parts.goal = learnedGoalValue(for: action, stateKey: p.stateKey) + predictedGoalScore(for: action, perception: p)
+                parts.novelty = explorationBonus(for: action, stateKey: p.stateKey)
+            }
+
+            return parts
         }
 
-        return parts
-    }
-
     private func learnedGoalValue(for action: FrankensteinAction, stateKey: String) -> Float {
-        guard let stat = effectModel[stateKey]?[action.rawValue], stat.count >= 2 else { return 0 }
-        return goalProgressGain * tanhf(stat.mean / 0.6)
-    }
+            guard let stat = effectModel[stateKey]?[action.rawValue], stat.count >= 2 else { return 0 }
+            return goalProgressGain * tanhf(stat.mean / 0.6)
+        }
 
     /// Within this distance (m) of an obstruction the plan clears it.
     private let obstructionReach: Float = 1.4
@@ -827,185 +826,196 @@ final class FrankensteinCA: ObservableObject {
     /// planned action: the plan walks up to it, then kicks it out of the way
     /// (or lifts a block), then carries on to the goal.
     private func applyObstructionToPlan(
-        _ plan: inout [FrankensteinAction: Float],
-        allowed: [FrankensteinAction],
-        perception p: FrankensteinCAPerception
-    ) {
-        // Blocked (walking but not displacing): clearing it comes first and
-        // is attempted from further away.
-        let reach = p.obstructionBlocked ? obstructionReach + 0.4 : obstructionReach
-        guard let action = p.obstructionAction,
-              p.obstructionDistance <= reach,
-              allowed.contains(action) else { return }
+            _ plan: inout [FrankensteinAction: Float],
+            allowed: [FrankensteinAction],
+            perception p: FrankensteinCAPerception
+        ) {
+            let reach = p.obstructionBlocked ? obstructionReach + 0.4 : obstructionReach
+            guard let action = p.obstructionAction,
+                  p.obstructionDistance <= reach,
+                  allowed.contains(action) else { return }
 
-        let top = plan.values.max() ?? 0
-        plan[action] = top + (p.obstructionBlocked ? 2 * obstructionPlanBonus : obstructionPlanBonus)
-        plannedSequence = [action] + plannedSequence.filter { $0 != action }
-    }
+            let top = plan.values.max() ?? 0
+            plan[action] = top + (p.obstructionBlocked ? 2 * obstructionPlanBonus : obstructionPlanBonus)
+            plannedSequence = [action] + plannedSequence.filter { $0 != action }
+        }
 
     private func updatePlanBuffer(
-        plan: [FrankensteinAction: Float],
-        allowed: [FrankensteinAction],
-        perception p: FrankensteinCAPerception?
-    ) {
-        if let change = pendingGoalChange {
-            planBuffer.invalidate(reason: change)
-            pendingGoalChange = nil
-        }
-
-        let fresh: [PlanStep] = plannedSequence.map { action in
-            guard let p, !p.obstructionName.isEmpty else {
-                return PlanStep(action: action, description: "\(action)")
+            plan: [FrankensteinAction: Float],
+            allowed: [FrankensteinAction],
+            perception p: FrankensteinCAPerception?
+        ) {
+            if let change = pendingGoalChange {
+                planBuffer.invalidate(reason: change)
+                pendingGoalChange = nil
             }
-            if action == p.obstructionAction {
+
+            let fresh: [PlanStep] = plannedSequence.map { action in
+                guard let p, !p.obstructionName.isEmpty else {
+                    return PlanStep(action: action, description: "\(action)")
+                }
+                if action == p.obstructionAction {
+                    return PlanStep(
+                        action: action,
+                        description: "\(action): clear \(p.obstructionName) out of the path"
+                    )
+                }
                 return PlanStep(
                     action: action,
-                    description: "\(action): clear \(p.obstructionName) out of the path"
+                    description: "\(action): toward \(p.obstructionName) (in the way)"
                 )
             }
-            return PlanStep(
-                action: action,
-                description: "\(action): toward \(p.obstructionName) (in the way)"
+
+            var headRegret: Float = 0
+            if let head = planBuffer.currentStep,
+               let bestValue = plan.values.max(),
+               let headValue = plan[head.action] {
+                headRegret = max(0, bestValue - headValue)
+            }
+
+            planBuffer.reconcile(
+                fresh: fresh,
+                headRegret: headRegret,
+                allowed: allowed,
+                regretMargin: planCommitmentMargin
             )
         }
-
-        var headRegret: Float = 0
-        if let head = planBuffer.currentStep,
-           let bestValue = plan.values.max(),
-           let headValue = plan[head.action] {
-            headRegret = max(0, bestValue - headValue)
-        }
-
-        planBuffer.reconcile(
-            fresh: fresh,
-            headRegret: headRegret,
-            allowed: allowed,
-            regretMargin: planCommitmentMargin
-        )
-    }
 
     func decideAction(
-        terrain: FrankensteinTerrainSample,
-        body: FrankensteinBodyState,
-        allowedActions: [FrankensteinAction],
-        qValues: [FrankensteinAction: Float],
-        exploration: Float = 0
-    ) -> FrankensteinAction {
-        guard !allowedActions.isEmpty else {
-            lastDecisionDescription = "No permitted action"
-            return .walk
-        }
+            terrain: FrankensteinTerrainSample,
+            body: FrankensteinBodyState,
+            allowedActions: [FrankensteinAction],
+            qValues: [FrankensteinAction: Float],
+            exploration: Float = 0
+        ) -> FrankensteinAction {
+            guard !allowedActions.isEmpty else {
+                lastDecisionDescription = "No permitted action"
+                return .walk
+            }
 
-        setQValues(qValues)
-        planQValues = qValues
+            setQValues(qValues)
+            planQValues = qValues
 
-        let p = currentPerception()
-        
-        // Reconcile plan when route changes[cite: 29]
-        if let p,
-           routeHasChanged(p.routeRelativeHeadings) {
+            let p = currentPerception()
+            
+            // Reconcile plan when route changes
+            if let p,
+               routeHasChanged(p.routeRelativeHeadings) {
 
-            planBuffer.invalidate(
-                reason: "Pathfield changed: reconsidering route around obstruction"
-            )
+                planBuffer.invalidate(
+                    reason: "Pathfield changed: reconsidering route around obstruction"
+                )
 
-            plannedSequence.removeAll()
-        }
+                plannedSequence.removeAll()
+            }
 
-        let stateKey = p?.stateKey ?? "none"
+            let stateKey = p?.stateKey ?? "none"
 
-        var plan: [FrankensteinAction: Float]
-        if let p {
-            plan = planValues(for: allowedActions, perception: p)
-        } else {
-            plannedSequence = []
-            plan = [:]
-        }
+            var plan: [FrankensteinAction: Float]
+            if let p {
+                plan = planValues(for: allowedActions, perception: p)
+            } else {
+                plannedSequence = []
+                plan = [:]
+            }
 
-        // Activate obstruction planning[cite: 29]
-        if let p {
-            applyObstructionToPlan(
-                &plan,
+            // Activate obstruction planning
+            if let p {
+                applyObstructionToPlan(
+                    &plan,
+                    allowed: allowedActions,
+                    perception: p
+                )
+            }
+
+            updatePlanBuffer(
+                plan: plan,
                 allowed: allowedActions,
                 perception: p
             )
-        }
 
-        updatePlanBuffer(
-            plan: plan,
-            allowed: allowedActions,
-            perception: p
-        )
+            var best = allowedActions[0]
+            var bestParts = scoreParts(for: best, perception: p, terrain: terrain, plan: plan)
+            var allParts: [FrankensteinAction: ScoreParts] = [best: bestParts]
 
-        var best = allowedActions[0]
-        var bestParts = scoreParts(for: best, perception: p, terrain: terrain, plan: plan)
-        var allParts: [FrankensteinAction: ScoreParts] = [best: bestParts]
+            // Clear and populate score breakdown for transparency
+            lastScoreBreakdown.removeAll()
+            lastScoreBreakdown[best] = String(
+                format: "Q:%.2f | Pred:%.2f | Steer:%.2f | Clear:%.2f | Terr:%.2f | Plan:%.2f | Nov:%.2f | Act:%.2f | Fut:%.2f -> Total:%.2f",
+                bestParts.q, bestParts.goal, bestParts.steering, bestParts.clearance,
+                bestParts.terrain, bestParts.plan, bestParts.novelty, bestParts.activity, bestParts.futility, bestParts.total
+            )
 
-        for action in allowedActions.dropFirst() {
-            let parts = scoreParts(for: action, perception: p, terrain: terrain, plan: plan)
-            allParts[action] = parts
+            for action in allowedActions.dropFirst() {
+                let parts = scoreParts(for: action, perception: p, terrain: terrain, plan: plan)
+                allParts[action] = parts
 
-            if parts.total > bestParts.total {
-                best = action
-                bestParts = parts
+                lastScoreBreakdown[action] = String(
+                    format: "Q:%.2f | Pred:%.2f | Steer:%.2f | Clear:%.2f | Terr:%.2f | Plan:%.2f | Nov:%.2f | Act:%.2f | Fut:%.2f -> Total:%.2f",
+                    parts.q, parts.goal, parts.steering, parts.clearance,
+                    parts.terrain, parts.plan, parts.novelty, parts.activity, parts.futility, parts.total
+                )
+
+                if parts.total > bestParts.total {
+                    best = action
+                    bestParts = parts
+                }
             }
-        }
 
-        var selected = best
+            var selected = best
 
-        if let head = planBuffer.currentStep,
-           let headParts = allParts[head.action] {
-            if head.action == best || bestParts.total - headParts.total <= planCommitmentMargin {
-                selected = head.action
+            if let head = planBuffer.currentStep,
+               let headParts = allParts[head.action] {
+                if head.action == best || bestParts.total - headParts.total <= planCommitmentMargin {
+                    selected = head.action
+                } else {
+                    planBuffer.overrideHead(
+                        with: PlanStep(action: best, description: "\(best)"),
+                        reason: "scoring overrode \(head.action) with \(best)"
+                    )
+                }
             } else {
                 planBuffer.overrideHead(
                     with: PlanStep(action: best, description: "\(best)"),
-                    reason: "scoring overrode \(head.action) with \(best)"
+                    reason: "no plan; chose \(best)"
                 )
             }
-        } else {
-            planBuffer.overrideHead(
-                with: PlanStep(action: best, description: "\(best)"),
-                reason: "no plan; chose \(best)"
-            )
+
+            let epsilon: Float
+            if exploration >= 1 {
+                epsilon = 1
+            } else if exploration <= 0 {
+                epsilon = 0
+            } else {
+                epsilon = min(0.25, max(exploration, randomExploration))
+            }
+
+            var explored = false
+
+            if Float.random(in: 0..<1) < epsilon,
+               let random = allowedActions.filter({ $0 != .recover && $0 != selected }).randomElement() {
+                selected = random
+                explored = true
+                planBuffer.overrideHead(
+                    with: PlanStep(action: random, description: "\(random) (exploring)"),
+                    reason: "exploring \(random)"
+                )
+            }
+
+            recordVisit(action: selected, stateKey: stateKey)
+            rememberDecision(selected, stateKey: stateKey, perception: p)
+
+            let queue = planBuffer.pendingActions.prefix(4)
+                .map { String(describing: $0) }
+                .joined(separator: " > ")
+
+            lastDecisionDescription =
+                "\(explored ? "Exploring" : "Executing") \(selected) | " +
+                "\(goalContext.summary) | Queue: \(queue.isEmpty ? "empty" : queue) | " +
+                "Plan: \(planBuffer.lastReplanReason) (\(planBuffer.replanCount)) | State: \(stateKey)"
+
+            return selected
         }
-
-        let epsilon: Float
-        if exploration >= 1 {
-            epsilon = 1
-        } else if exploration <= 0 {
-            epsilon = 0
-        } else {
-            epsilon = min(0.25, max(exploration, randomExploration))
-        }
-
-        var explored = false
-
-        if Float.random(in: 0..<1) < epsilon,
-           let random = allowedActions.filter({ $0 != .recover && $0 != selected }).randomElement() {
-            selected = random
-            explored = true
-            planBuffer.overrideHead(
-                with: PlanStep(action: random, description: "\(random) (exploring)"),
-                reason: "exploring \(random)"
-            )
-        }
-
-        recordVisit(action: selected, stateKey: stateKey)
-        rememberDecision(selected, stateKey: stateKey, perception: p)
-
-        let queue = planBuffer.pendingActions.prefix(4)
-            .map { String(describing: $0) }
-            .joined(separator: " > ")
-
-        lastDecisionDescription =
-            "\(explored ? "Exploring" : "Executing") \(selected) | " +
-            "\(goalContext.summary) | Queue: \(queue.isEmpty ? "empty" : queue) | " +
-            "Plan: \(planBuffer.lastReplanReason) (\(planBuffer.replanCount)) | State: \(stateKey)"
-
-        return selected
-    }
-
     init() {
         cells = Array(repeating: Array(repeating: false, count: size), count: size)
         nextGrid = cells
