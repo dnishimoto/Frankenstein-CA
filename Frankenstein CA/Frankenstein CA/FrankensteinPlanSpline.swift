@@ -1,4 +1,3 @@
-
 //
 //  FrankensteinPlanSpline.swift
 //  Frankenstein CA
@@ -44,6 +43,127 @@ final class FrankensteinPlanSpline {
 
     private var lastKey = ""
     private var lastUpdate: TimeInterval = 0
+
+    // MARK: - Keep-out zones (the chasm)
+
+    /// Rectangles (world X/Z) the path must go around, not across.
+    private var keepOutZones: [(center: SIMD2<Float>, half: SIMD2<Float>)] = []
+    private var keepOutLoaded = false
+    /// Clearance kept between the path and the edge of a keep-out zone.
+    private let keepOutMargin: Float = 0.8
+
+    private func loadKeepOutZones() {
+        guard !keepOutLoaded, let scene else { return }
+        let nodes = scene.rootNode.childNodes { node, _ in
+            let name = (node.name ?? "").lowercased()
+            return name.contains("chasm") && node.geometry != nil
+        }
+        guard !nodes.isEmpty else { return }
+        keepOutLoaded = true
+        keepOutZones = nodes.map { node in
+            let box = node.boundingBox
+            let p = node.worldPosition
+            return (
+                SIMD2<Float>(Float(p.x), Float(p.z)),
+                SIMD2<Float>(
+                    Float(box.max.x - box.min.x) * 0.5,
+                    Float(box.max.z - box.min.z) * 0.5
+                )
+            )
+        }
+    }
+
+    /// True when the straight segment a->b crosses the rectangle.
+    private func segmentCrosses(
+        _ a: SIMD2<Float>, _ b: SIMD2<Float>,
+        center: SIMD2<Float>, half: SIMD2<Float>
+    ) -> Bool {
+        let lo = center - half + SIMD2<Float>(repeating: 0.01)
+        let hi = center + half - SIMD2<Float>(repeating: 0.01)
+        let d = b - a
+        var t0: Float = 0
+        var t1: Float = 1
+        for axis in 0..<2 {
+            if abs(d[axis]) < 1e-6 {
+                if a[axis] < lo[axis] || a[axis] > hi[axis] { return false }
+            } else {
+                var ta = (lo[axis] - a[axis]) / d[axis]
+                var tb = (hi[axis] - a[axis]) / d[axis]
+                if ta > tb { swap(&ta, &tb) }
+                t0 = max(t0, ta)
+                t1 = min(t1, tb)
+                if t0 > t1 { return false }
+            }
+        }
+        return true
+    }
+
+    private func inside(_ p: SIMD2<Float>, center: SIMD2<Float>, half: SIMD2<Float>) -> Bool {
+        abs(p.x - center.x) < half.x && abs(p.y - center.y) < half.y
+    }
+
+    /// Waypoints from a to b that go around the corners of any keep-out
+    /// zone the straight line would cross. [a, b] when the way is clear.
+    private func route(_ a: SIMD2<Float>, _ b: SIMD2<Float>) -> [SIMD2<Float>] {
+        loadKeepOutZones()
+        for zone in keepOutZones {
+            let half = zone.half + SIMD2<Float>(repeating: keepOutMargin)
+            guard !inside(a, center: zone.center, half: half),
+                  !inside(b, center: zone.center, half: half),
+                  segmentCrosses(a, b, center: zone.center, half: half) else { continue }
+
+            // Corners of the inflated rectangle, in order around it.
+            let c = zone.center
+            let corners = [
+                SIMD2<Float>(c.x - half.x, c.y - half.y),
+                SIMD2<Float>(c.x + half.x, c.y - half.y),
+                SIMD2<Float>(c.x + half.x, c.y + half.y),
+                SIMD2<Float>(c.x - half.x, c.y + half.y)
+            ]
+            func clear(_ p: SIMD2<Float>, _ q: SIMD2<Float>) -> Bool {
+                !segmentCrosses(p, q, center: zone.center, half: half)
+            }
+            var best: [SIMD2<Float>]?
+            var bestLength = Float.greatestFiniteMagnitude
+            func consider(_ via: [SIMD2<Float>]) {
+                var pts = [a] + via + [b]
+                var length: Float = 0
+                for i in 0..<(pts.count - 1) {
+                    guard clear(pts[i], pts[i + 1]) else { return }
+                    length += simd_distance(pts[i], pts[i + 1])
+                }
+                if length < bestLength {
+                    bestLength = length
+                    best = pts
+                }
+                pts.removeAll()
+            }
+            for i in 0..<4 {
+                consider([corners[i]])
+                consider([corners[i], corners[(i + 1) % 4]])
+                consider([corners[(i + 1) % 4], corners[i]])
+            }
+            if let best { return best }
+        }
+        return [a, b]
+    }
+
+    /// Adds points along each leg so the smoothing spline stays close to
+    /// the corner-to-corner route instead of cutting across the zone.
+    private func densify(_ points: [SIMD2<Float>], spacing: Float = 0.8) -> [SIMD2<Float>] {
+        guard points.count >= 2 else { return points }
+        var result: [SIMD2<Float>] = [points[0]]
+        for i in 0..<(points.count - 1) {
+            let a = points[i]
+            let b = points[i + 1]
+            let length = simd_distance(a, b)
+            let steps = max(1, Int((length / spacing).rounded(.up)))
+            for step in 1...steps {
+                result.append(a + (b - a) * (Float(step) / Float(steps)))
+            }
+        }
+        return result
+    }
 
     // MARK: - Look-Ahead Navigation
 
@@ -144,7 +264,8 @@ final class FrankensteinPlanSpline {
         time: TimeInterval,
         character: SCNVector3,
         object: SCNVector3?,
-        destination: SCNVector3?
+        destination: SCNVector3?,
+        approachFromCharacterSide: Bool = false
     ) {
         guard isVisible, let destination else {
             hideAll()
@@ -155,10 +276,11 @@ final class FrankensteinPlanSpline {
         lastUpdate = time
 
         let key = String(
-            format: "%.1f,%.1f|%@|%.1f,%.1f",
+            format: "%.1f,%.1f|%@|%.1f,%.1f|%d",
             Double(character.x), Double(character.z),
             object.map { String(format: "%.1f,%.1f", Double($0.x), Double($0.z)) } ?? "-",
-            Double(destination.x), Double(destination.z)
+            Double(destination.x), Double(destination.z),
+            approachFromCharacterSide ? 1 : 0
         )
 
         guard key != lastKey else { return }
@@ -172,7 +294,10 @@ final class FrankensteinPlanSpline {
 
         guard let object else {
             // No object: one curve from Frankenstein to the destination.
-            let curve = spline(through: [start, (start + end) * 0.5, end])
+            let legRoute = route(start, end)
+            let curve = legRoute.count > 2
+                ? spline(through: densify(legRoute))
+                : spline(through: [start, (start + end) * 0.5, end])
             approachPath = curve
             deliveryPath = []
             approachNode.geometry = lineGeometry(curve, color: .cyan)
@@ -188,17 +313,38 @@ final class FrankensteinPlanSpline {
         let pushLength = simd_length(pushDirection)
         pushDirection = pushLength > 0.001 ? pushDirection / pushLength : SIMD2<Float>(0, -1)
 
-        let standPoint = obj - pushDirection * standOff
+        // Pushing: stand behind the object, opposite the destination.
+        // Lifting (letter blocks): stand on his own side of it, so he walks
+        // straight up to it and stops within reach instead of circling.
+        var standPoint = obj - pushDirection * standOff
+        if approachFromCharacterSide {
+            let toObject = obj - start
+            let distance = simd_length(toObject)
+            if distance > standOff {
+                standPoint = obj - toObject / distance * standOff
+            } else {
+                standPoint = start
+            }
+        }
 
         let toStand = standPoint - start
         let side = SIMD2<Float>(-toStand.y, toStand.x)
         let sideLength = simd_length(side)
         let bow = sideLength > 0.001 ? side / sideLength * min(0.5, simd_length(toStand) * 0.15) : .zero
 
-        let approach = spline(
-            through: [start, start + toStand * 0.5 + bow, standPoint, obj]
-        )
-        approachPath = approach
+        // Around the chasm corners when the straight way would cross it.
+        let approachRoute = route(start, standPoint)
+        let approachVia: [SIMD2<Float>] = approachRoute.count > 2
+            ? densify(approachRoute)
+            : [start, start + toStand * 0.5 + bow, standPoint]
+        let approach = spline(through: approachVia + [obj])
+        // Navigation ends at the stand-off point when lifting, so he stops
+        // within reach of the block rather than walking into it.
+        if approachFromCharacterSide {
+            approachPath = spline(through: approachVia)
+        } else {
+            approachPath = approach
+        }
 
         let across = end - obj
         let acrossSide = SIMD2<Float>(-across.y, across.x)
@@ -207,9 +353,10 @@ final class FrankensteinPlanSpline {
             ? acrossSide / acrossSideLength * min(0.4, simd_length(across) * 0.1)
             : .zero
 
-        let delivery = spline(
-            through: [obj, obj + across * 0.5 + acrossBow, end]
-        )
+        let deliveryRoute = route(obj, end)
+        let delivery = deliveryRoute.count > 2
+            ? spline(through: densify(deliveryRoute))
+            : spline(through: [obj, obj + across * 0.5 + acrossBow, end])
         deliveryPath = delivery
 
         approachNode.geometry = lineGeometry(approach, color: .cyan)
