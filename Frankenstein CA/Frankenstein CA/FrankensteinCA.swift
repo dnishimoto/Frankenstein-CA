@@ -6,7 +6,7 @@ import UIKit
 
 final class FrankensteinCA: ObservableObject {
      private var previousRouteHeadings: [Float] = []
-    private let routeChangeThreshold: Float = 0.30
+    private let routeChangeThreshold: Float = 0.50
     private let planHorizon = 5
         private let planActionSeconds: Float = 0.35
         private let planTurnPerAction: Float = 0.9 * 0.35
@@ -40,7 +40,7 @@ final class FrankensteinCA: ObservableObject {
 
     /// How much worse than the best-scoring action the buffered head may be
     /// before the CA's own scoring vetoes the plan.
-    private let planCommitmentMargin: Float = 0.35
+    private let planCommitmentMargin: Float = 0.75
 
     // MARK: - Tapestry Blueprint Coordinates & Movable Blocks Setup
     private var currentTapestrySlotIndex = 0
@@ -265,71 +265,84 @@ final class FrankensteinCA: ObservableObject {
     // FrankensteinCA_6.swift
 
     private func predictedGoalScore(
-            for action: FrankensteinAction,
-            perception p: FrankensteinCAPerception
-        ) -> Float {
-            var score: Float = 0
-            let alignment = max(0, cosf(p.headingError))
-            let objectName = p.nearestObjectName.lowercased()
-            
-            // ---> HAZARD EVASION OVERRIDE <---
-            // If clearance ahead is critically low (e.g., edge of a gap or wall),
-            // heavily favor backing up and turning to immediately break buffer inertia.
-            if p.clearanceAhead < 0.8 {
-                if action == .backward {
-                    score += 6.0 // Instantly overrides the 0.35 commitment margin
-                } else if action == .turnLeft || action == .turnRight {
-                    score += 3.0
-                } else if action == .walk || action == .run || action == .pushObject || action == .kickObject {
-                    score -= 5.0 // Heavily penalize pushing forward or kicking into the hazard
-                }
+        for action: FrankensteinAction,
+        perception p: FrankensteinCAPerception
+    ) -> Float {
+        var score: Float = 0
+        let alignment = max(0, cosf(p.headingError))
+        let objectName = p.nearestObjectName.lowercased()
+        
+        // ---> LETTER DELIVERY OVERRIDE <---
+        // When carrying a letter block, strongly prioritize walking toward the slot
+        // and executing the place action so scoring doesn't override the delivery plan.
+        if p.carryingLetterBlock {
+            if action == .placeObject {
+                score += 12.0 // Massive boost to prevent local overrides during delivery
+                return score
+            } else if action == .walk || action == .run || action == .stepForward {
+                score += 4.0 * alignment
+            } else if action == .turnLeft || action == .turnRight {
+                score += 1.0 * (1.0 - alignment) // Help him line up precisely with the slot
+            } else {
+                score -= 2.0 // Discourage unrelated actions while carrying a letter
             }
-            // ------------------------------------------
+        }
+        // ---------------------------------
 
-            let isTargetLetter = objectName.contains("letterblock") || objectName.contains("floatingletter")
-            
-            switch action {
-            case .pushObject:
-                if p.nearestObjectMovable, p.nearestObjectDistance <= 2.0 {
-                    score += 6.0
-                } else {
-                    score -= 0.5
-                }
-
-            case .kickObject:
-                if p.nearestObjectMovable, p.nearestObjectDistance <= 1.8 {
-                    score += 5.5
-                } else {
-                    score -= 0.5
-                }
-                
-            case .throwObject:
-                if p.nearestObjectMovable || objectName.contains("block") {
-                    score += 4.5
-                } else {
-                    score -= 0.2
-                }
-                
-            case .liftObject:
-                if p.nearestObjectPickupable && (isTargetLetter || p.nearestObjectDistance <= 1.25) {
-                    score += 8.0
-                }
-            case .backward:
-                if p.carryingLetterBlock {
-                    score += 6.0
-                } else {
-                    score += 0.1
-                }
-            case .walk, .run:
-                score += (isTargetLetter ? 1.5 : 0.4) * alignment
-                
-            default:
-                break
+        // ---> HAZARD EVASION OVERRIDE <---
+        if p.clearanceAhead < 0.8 {
+            if action == .backward {
+                score += 6.0
+            } else if action == .turnLeft || action == .turnRight {
+                score += 3.0
+            } else if action == .walk || action == .run || action == .pushObject || action == .kickObject {
+                score -= 5.0
             }
-
-            return score
         }
 
+        let isTargetLetter = objectName.contains("letterblock") || objectName.contains("floatingletter")
+        
+        switch action {
+        case .pushObject:
+            if p.nearestObjectMovable, p.nearestObjectDistance <= 2.0 {
+                score += 6.0
+            } else {
+                score -= 0.5
+            }
+
+        case .kickObject:
+            if p.nearestObjectMovable, p.nearestObjectDistance <= 1.8 {
+                score += 5.5
+            } else {
+                score -= 0.5
+            }
+            
+        case .throwObject:
+            if p.nearestObjectMovable || objectName.contains("block") {
+                score += 4.5
+            } else {
+                score -= 0.2
+            }
+            
+        case .liftObject:
+            if p.nearestObjectPickupable && (isTargetLetter || p.nearestObjectDistance <= 1.25) {
+                score += 8.0
+            }
+        case .backward:
+            if p.carryingLetterBlock {
+                score += 6.0
+            } else {
+                score += 0.1
+            }
+        case .walk, .run:
+            score += (isTargetLetter ? 1.5 : 0.4) * alignment
+            
+        default:
+            break
+        }
+
+        return score
+    }
 
     private struct Rollout {
         var heading: Float = 0
@@ -793,141 +806,283 @@ final class FrankensteinCA: ObservableObject {
             )
         }
 
+ 
     func decideAction(
-            terrain: FrankensteinTerrainSample,
-            body: FrankensteinBodyState,
-            allowedActions: [FrankensteinAction],
-            qValues: [FrankensteinAction: Float],
-            exploration: Float = 0
-        ) -> FrankensteinAction {
-            guard !allowedActions.isEmpty else {
-                lastDecisionDescription = "No permitted action"
-                return .walk
-            }
+        terrain: FrankensteinTerrainSample,
+        body: FrankensteinBodyState,
+        allowedActions: [FrankensteinAction],
+        qValues: [FrankensteinAction: Float],
+        exploration: Float = 0,
+        isDeliveringLetter: Bool = false
+    ) -> FrankensteinAction {
 
-            setQValues(qValues)
-            planQValues = qValues
+        guard !allowedActions.isEmpty else {
+            lastDecisionDescription = "No permitted action"
+            return .walk
+        }
 
-            let p = currentPerception()
-            
-            // Reconcile plan when route changes
-            if let p,
-               routeHasChanged(p.routeRelativeHeadings) {
+        setQValues(qValues)
+        planQValues = qValues
 
-                planBuffer.invalidate(
-                    reason: "Pathfield changed: reconsidering route around obstruction"
-                )
+        let p = currentPerception()
 
-                plannedSequence.removeAll()
-            }
+        // MARK: - Preserve the delivery route
 
-            let stateKey = p?.stateKey ?? "none"
+        // A changed path-field heading does not automatically cancel
+        // the delivery plan. The path can adapt around obstacles while
+        // the mission destination remains the letter slot.
+        if let p,
+           routeHasChanged(p.routeRelativeHeadings),
+           !isDeliveringLetter {
 
-            var plan: [FrankensteinAction: Float]
-            if let p {
-                plan = planValues(for: allowedActions, perception: p)
-            } else {
-                plannedSequence = []
-                plan = [:]
-            }
+            planBuffer.invalidate(
+                reason: "Pathfield changed: reconsidering route around obstruction"
+            )
 
-            // Activate obstruction planning
-            if let p {
-                applyObstructionToPlan(
-                    &plan,
+            plannedSequence.removeAll()
+        }
+
+        let stateKey = p?.stateKey ?? "none"
+
+        var plan: [FrankensteinAction: Float]
+
+        if let p {
+            plan = planValues(
+                for: allowedActions,
+                perception: p
+            )
+        } else {
+            plannedSequence = []
+            plan = [:]
+        }
+
+        // Obstruction planning remains available during delivery.
+        if let p {
+            applyObstructionToPlan(
+                &plan,
+                allowed: allowedActions,
+                perception: p
+            )
+        }
+
+        // During delivery, do not continuously replace the plan.
+        // Only initialize it if empty or replace an unsafe/disallowed head.
+        if isDeliveringLetter {
+            if planBuffer.currentStep == nil {
+                updatePlanBuffer(
+                    plan: plan,
                     allowed: allowedActions,
                     perception: p
                 )
             }
-
+        } else {
             updatePlanBuffer(
                 plan: plan,
                 allowed: allowedActions,
                 perception: p
             )
+        }
 
-            var best = allowedActions[0]
-            var bestParts = scoreParts(for: best, perception: p, terrain: terrain, plan: plan)
-            var allParts: [FrankensteinAction: ScoreParts] = [best: bestParts]
+        // MARK: - Score permitted actions
 
-            // Clear and populate score breakdown for transparency
-            lastScoreBreakdown.removeAll()
-            lastScoreBreakdown[best] = String(
-                format: "Q:%.2f | Pred:%.2f | Steer:%.2f | Clear:%.2f | Terr:%.2f | Plan:%.2f | Nov:%.2f | Act:%.2f | Fut:%.2f -> Total:%.2f",
-                bestParts.q, bestParts.goal, bestParts.steering, bestParts.clearance,
-                bestParts.terrain, bestParts.plan, bestParts.novelty, bestParts.activity,  bestParts.total
+        var best = allowedActions[0]
+
+        var bestParts = scoreParts(
+            for: best,
+            perception: p,
+            terrain: terrain,
+            plan: plan
+        )
+
+        var allParts: [FrankensteinAction: ScoreParts] = [
+            best: bestParts
+        ]
+
+        lastScoreBreakdown.removeAll()
+
+        lastScoreBreakdown[best] = String(
+            format: "Q:%.2f | Pred:%.2f | Steer:%.2f | Clear:%.2f | Terr:%.2f | Plan:%.2f | Nov:%.2f | Act:%.2f  -> Total:%.2f",
+            bestParts.q,
+            bestParts.goal,
+            bestParts.steering,
+            bestParts.clearance,
+            bestParts.terrain,
+            bestParts.plan,
+            bestParts.novelty,
+            bestParts.activity,
+            bestParts.total
+        )
+
+        for action in allowedActions.dropFirst() {
+
+            let parts = scoreParts(
+                for: action,
+                perception: p,
+                terrain: terrain,
+                plan: plan
             )
 
-            for action in allowedActions.dropFirst() {
-                let parts = scoreParts(for: action, perception: p, terrain: terrain, plan: plan)
-                allParts[action] = parts
+            allParts[action] = parts
 
-                lastScoreBreakdown[action] = String(
-                    format: "Q:%.2f | Pred:%.2f | Steer:%.2f | Clear:%.2f | Terr:%.2f | Plan:%.2f | Nov:%.2f | Act:%.2f | Fut:%.2f -> Total:%.2f",
-                    parts.q, parts.goal, parts.steering, parts.clearance,
-                    parts.terrain, parts.plan, parts.novelty, parts.activity,  parts.total
-                )
+            lastScoreBreakdown[action] = String(
+                format: "Q:%.2f | Pred:%.2f | Steer:%.2f | Clear:%.2f | Terr:%.2f | Plan:%.2f | Nov:%.2f | Act:%.2f  -> Total:%.2f",
+                parts.q,
+                parts.goal,
+                parts.steering,
+                parts.clearance,
+                parts.terrain,
+                parts.plan,
+                parts.novelty,
+                parts.activity,
+                parts.total
+            )
 
-                if parts.total > bestParts.total {
-                    best = action
-                    bestParts = parts
-                }
+            if parts.total > bestParts.total {
+                best = action
+                bestParts = parts
             }
-
-            var selected = best
-
-            if let head = planBuffer.currentStep,
-               let headParts = allParts[head.action] {
-                if head.action == best || bestParts.total - headParts.total <= planCommitmentMargin {
-                    selected = head.action
-                } else {
-                    planBuffer.overrideHead(
-                        with: PlanStep(action: best, description: "\(best)"),
-                        reason: "scoring overrode \(head.action) with \(best)"
-                    )
-                }
-            } else {
-                planBuffer.overrideHead(
-                    with: PlanStep(action: best, description: "\(best)"),
-                    reason: "no plan; chose \(best)"
-                )
-            }
-
-            let epsilon: Float
-            if exploration >= 1 {
-                epsilon = 1
-            } else if exploration <= 0 {
-                epsilon = 0
-            } else {
-                epsilon = min(0.25, max(exploration, randomExploration))
-            }
-
-            var explored = false
-
-            if Float.random(in: 0..<1) < epsilon,
-               let random = allowedActions.filter({ $0 != .recover && $0 != selected }).randomElement() {
-                selected = random
-                explored = true
-                planBuffer.overrideHead(
-                    with: PlanStep(action: random, description: "\(random) (exploring)"),
-                    reason: "exploring \(random)"
-                )
-            }
-
-            recordVisit(action: selected, stateKey: stateKey)
-            rememberDecision(selected, stateKey: stateKey, perception: p)
-
-            let queue = planBuffer.pendingActions.prefix(4)
-                .map { String(describing: $0) }
-                .joined(separator: " > ")
-
-            lastDecisionDescription =
-                "\(explored ? "Exploring" : "Executing") \(selected) | " +
-                "\(goalContext.summary) | Queue: \(queue.isEmpty ? "empty" : queue) | " +
-                "Plan: \(planBuffer.lastReplanReason) (\(planBuffer.replanCount)) | State: \(stateKey)"
-
-            return selected
         }
+
+        // MARK: - Select action
+
+        var selected = best
+
+        if let head = planBuffer.currentStep {
+
+            if allowedActions.contains(head.action) {
+
+                if isDeliveringLetter {
+                    // Letter delivery commitment:
+                    // keep executing the current planned action.
+                    selected = head.action
+
+                } else if let headParts = allParts[head.action] {
+
+                    if head.action == best ||
+                        bestParts.total - headParts.total <= planCommitmentMargin {
+
+                        selected = head.action
+
+                    } else {
+
+                        planBuffer.overrideHead(
+                            with: PlanStep(
+                                action: best,
+                                description: "\(best)"
+                            ),
+                            reason: "scoring overrode \(head.action) with \(best)"
+                        )
+
+                        selected = best
+                    }
+
+                } else {
+                    selected = best
+                }
+
+            } else {
+                // The current step is no longer permitted.
+                // Safety constraints take priority over commitment.
+                planBuffer.overrideHead(
+                    with: PlanStep(
+                        action: best,
+                        description: "\(best)"
+                    ),
+                    reason: isDeliveringLetter
+                        ? "delivery step no longer permitted; safe replan"
+                        : "current step no longer permitted"
+                )
+
+                selected = best
+            }
+
+        } else {
+
+            planBuffer.overrideHead(
+                with: PlanStep(
+                    action: best,
+                    description: "\(best)"
+                ),
+                reason: "no plan; chose \(best)"
+            )
+
+            selected = best
+        }
+
+        // MARK: - Exploration
+
+        let epsilon: Float
+
+        if isDeliveringLetter {
+            // No random action substitutions while delivering.
+            epsilon = 0
+
+        } else if exploration >= 1 {
+            epsilon = 1
+
+        } else if exploration <= 0 {
+            epsilon = 0
+
+        } else {
+            epsilon = min(
+                0.25,
+                max(exploration, randomExploration)
+            )
+        }
+
+        var explored = false
+
+        if Float.random(in: 0..<1) < epsilon,
+           let random = allowedActions
+            .filter({ $0 != .recover && $0 != selected })
+            .randomElement() {
+
+            selected = random
+            explored = true
+
+            planBuffer.overrideHead(
+                with: PlanStep(
+                    action: random,
+                    description: "\(random) (exploring)"
+                ),
+                reason: "exploring \(random)"
+            )
+        }
+
+        // MARK: - Record decision
+
+        recordVisit(
+            action: selected,
+            stateKey: stateKey
+        )
+
+        rememberDecision(
+            selected,
+            stateKey: stateKey,
+            perception: p
+        )
+
+        let queue = planBuffer.pendingActions
+            .prefix(4)
+            .map { String(describing: $0) }
+            .joined(separator: " > ")
+
+        let missionLabel = isDeliveringLetter
+            ? "LETTER DELIVERY COMMITTED"
+            : "Normal planning"
+
+        lastDecisionDescription =
+            "\(missionLabel) | " +
+            "\(explored ? "Exploring" : "Executing") \(selected) | " +
+            "\(goalContext.summary) | " +
+            "Queue: \(queue.isEmpty ? "empty" : queue) | " +
+            "Plan: \(planBuffer.lastReplanReason) " +
+            "(\(planBuffer.replanCount)) | " +
+            "State: \(stateKey)"
+
+        return selected
+    }
+
     init() {
         cells = Array(repeating: Array(repeating: false, count: size), count: size)
         nextGrid = cells
