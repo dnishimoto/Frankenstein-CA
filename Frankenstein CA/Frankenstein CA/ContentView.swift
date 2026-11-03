@@ -16,6 +16,7 @@ import SceneKit
 import UIKit
 
 struct ContentView: View {
+    @State private var resetTrigger = 0
     @StateObject private var energyManager = FrankensteinEnergyManager()
     @State private var generation = 0
     @State private var liveCells = 0
@@ -40,11 +41,15 @@ struct ContentView: View {
                 Spacer()
 
                 Button {
+                    resetTrigger += 1
                     resetRequested.toggle()
                     generation = 0
                     liveCells = 0
                     seenText = "I have not looked around yet."
                     planText = "I have not made a plan yet."
+                    energyManager.reset()
+
+
                 } label: {
                     Label("Reset", systemImage: "arrow.counterclockwise")
                 }
@@ -53,14 +58,16 @@ struct ContentView: View {
             .padding()
 
             FrankensteinSceneView(
-                generation: $generation,
-                liveCells: $liveCells,
-                resetRequested: $resetRequested,
-                seenText: $seenText,
-                planText: $planText,
-                qCells: $qCells,
-                animateSpeed: $animationSpeed
-            )
+                            generation: $generation,
+                            liveCells: $liveCells,
+                            resetRequested: $resetRequested,
+                            seenText: $seenText,
+                            planText: $planText,
+                            qCells: $qCells,
+                            animateSpeed: $animationSpeed,
+                            onResetPerformed: {
+                                print("The scene and coordinator have successfully finished resetting!")
+                            })
             
             //QNetworkGridPanel(cells: qCells)
 
@@ -232,13 +239,13 @@ struct RobotMindPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            section(
+           /* section(
                 title: "Frankenstein sees",
                 symbol: "eye",
                 text: seen
-            )
+            )*/
 
-            Divider()
+            //Divider()
 
             section(
                 title: "Frankenstein is planning",

@@ -6,6 +6,7 @@ import SwiftUI
 import UIKit
 
 final class Coordinator: NSObject, SCNSceneRendererDelegate {
+    var isResetPending = false
     private weak var currentObstructionTarget: SCNNode?
     private var movableObjectNodes: [SCNNode] = []
     private var lastSplineIndex: Int = 0
@@ -1023,42 +1024,47 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     func resetObjectLearning() {
-        executive.reset()
-        pathSteering = nil
-        pathGoalDistance = .infinity
-        goalProgressRate = 0
-        lastPathDistance = .infinity
-        lastPathDistanceTime = 0
-        clearanceAhead = clearanceRange
-        clearancePlus = clearanceRange
-        clearanceMinus = clearanceRange
-        latestDetections.removeAll()
-        latestDetectionNodes.removeAll()
-        latestRayObservations.removeAll()
-        wideDetections.removeAll()
-        visibleObjects.removeAll()
-        pushTargetNode = nil
-        pushLastNodePosition = nil
-        pushAccumulatedMeters = 0
-        rechargePlatformDistance = .infinity
-        lastGoalDistance = .infinity
-        hasReachedRechargePlatform = false
-        rechargePlatformContactTime = 0
-        consecutiveNoProgressCount = 0
-        previousGoalStateKey = nil
-        previousGoalAction = nil
-        outcomeWindowElapsedTime = 0
-        outcomeWindowDisplacement = 0
-        outcomeWindowGoalProgress = 0
-        outcomeWindowPathProgress = 0
-        lastEvalPathDistance = .infinity
-        lastEvaluatedActionName = ""
-        lastDisplayedActionName = ""
-
-        energyManager.reset()
-        missionSupervisor.reset()
-        missionDecision = .initial
-    }
+            executive.reset()
+            pathSteering = nil
+            pathGoalDistance = .infinity
+            goalProgressRate = 0
+            lastPathDistance = .infinity
+            lastPathDistanceTime = 0
+            clearanceAhead = clearanceRange
+            clearancePlus = clearanceRange
+            clearanceMinus = clearanceRange
+            latestDetections.removeAll()
+            latestDetectionNodes.removeAll()
+            latestRayObservations.removeAll()
+            wideDetections.removeAll()
+            visibleObjects.removeAll()
+            pushTargetNode = nil
+            pushLastNodePosition = nil
+            pushAccumulatedMeters = 0
+            rechargePlatformDistance = .infinity
+            lastGoalDistance = .infinity
+            hasReachedRechargePlatform = false
+            rechargePlatformContactTime = 0
+            consecutiveNoProgressCount = 0
+            previousGoalStateKey = nil
+            previousGoalAction = nil
+            outcomeWindowElapsedTime = 0
+            outcomeWindowDisplacement = 0
+            outcomeWindowGoalProgress = 0
+            outcomeWindowPathProgress = 0
+            lastEvalPathDistance = .infinity
+            lastEvaluatedActionName = ""
+            lastDisplayedActionName = ""
+    
+            randomizeSceneObjects()
+                
+            energyManager.reset()
+            missionSupervisor.reset()
+            missionDecision = .initial
+        
+    
+              
+        }
 
     // MARK: - Hierarchical Mission Supervisor
     /// The supervisor observes mission facts and chooses the active objective.
@@ -1626,7 +1632,49 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         default: return "open"
         }
     }
+    func randomizeSceneObjects() {
 
+            guard let scene = scene else { return }
+        ca?.reset()
+            // 1. Randomize Letter Blocks
+            let letterBlocks = scene.rootNode.childNodes { node, _ in
+                return node.name?.hasPrefix("LetterBlock_") == true
+            }
+            
+            for block in letterBlocks {
+                // Random x between -4.5 and 4.5, z between -4.5 and 4.5
+                let randomX = Float.random(in: -4.5...4.5)
+                let randomZ = Float.random(in: -4.5...4.5)
+                block.position = SCNVector3(randomX, 0.3, randomZ)
+                
+                if let body = block.physicsBody {
+                    body.velocity = SCNVector3Zero
+                    body.angularVelocity = SCNVector4Zero
+                    body.resetTransform()
+                }
+            }
+            
+            // 2. Randomize Movable Course Blocks / Crates
+            let movableBlocks = scene.rootNode.childNodes { node, _ in
+                let name = node.name?.lowercased() ?? ""
+                return name.contains("movableblock_") || name.contains("stackblock_")
+            }
+            
+            for block in movableBlocks {
+                let randomX = Float.random(in: -5.0...5.0)
+                let randomZ = Float.random(in: -5.0...5.0)
+                let randomY = Float.random(in: 0.4...1.2) // allow some height variety for stacks
+                block.position = SCNVector3(randomX, randomY, randomZ)
+                
+                if let body = block.physicsBody {
+                    body.velocity = SCNVector3Zero
+                    body.angularVelocity = SCNVector4Zero
+                    body.resetTransform()
+                }
+            }
+            
+            publishDebug("Scene objects and letter blocks randomly repositioned.")
+        }
     private func pushPerceptionToCA(
             terrain: FrankensteinTerrainSample,
             allowedActions: [FrankensteinAction],

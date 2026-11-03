@@ -5,7 +5,6 @@ import UIKit
 
 struct FrankensteinSceneView: UIViewRepresentable {
 
-    // MARK: - UI Bindings
 
     @Binding var generation: Int
     @Binding var liveCells: Int
@@ -14,13 +13,12 @@ struct FrankensteinSceneView: UIViewRepresentable {
     @Binding var planText: String
     @Binding var qCells: [FrankensteinQDisplayCell]
     @Binding var animateSpeed: Double
+    var onResetPerformed: (() -> Void)? = nil
 
     // Keep one CA instance for the lifetime of this view value.
     private let ca = FrankensteinCA()
 
-    // MARK: - Coordinator
 
-    // MARK: - Coordinator
 
         func makeCoordinator() -> Coordinator {
             let placeholderScene = SCNScene()
@@ -67,11 +65,13 @@ struct FrankensteinSceneView: UIViewRepresentable {
             return coordinator
         }
 
-    // MARK: - Create Scene View
+
+    
 
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView(frame: .zero)
-
+        
+   
         let scene = SCNScene()
         scene.background.contents = UIColor(
             red: 0.08,
@@ -79,7 +79,7 @@ struct FrankensteinSceneView: UIViewRepresentable {
             blue: 0.13,
             alpha: 1.0
         )
-
+       
         // Build the course.
         FrankensteinTerrainScene.build(in: scene)
 
@@ -306,47 +306,70 @@ struct FrankensteinSceneView: UIViewRepresentable {
 
     // MARK: - Update View
 
-    func updateUIView(
-        _ uiView: SCNView,
-        context: Context
-    ) {
-        guard resetRequested else {
-            return
-        }
+    // MARK: - Update View
 
-        if let character = uiView.scene?.rootNode.childNode(
-            withName: "Frankenstein",
-            recursively: true
+        func updateUIView(
+            _ uiView: SCNView,
+            context: Context
         ) {
-            character.position = SCNVector3(5.5, 0, 7.0)
-            character.eulerAngles = SCNVector3Zero
+            let coordinator = context.coordinator
+            guard resetRequested, !coordinator.isResetPending else {
+                return
+            }
+            
+            coordinator.isResetPending = true
+            let resetRequestedBinding = $resetRequested
+            let generationBinding = $generation
+            let liveCellsBinding = $liveCells
+            let ca = self.ca
+            let resetAction = onResetPerformed
 
-            let limbNames = [
-                "FrankensteinLeftLeg",
-                "FrankensteinRightLeg",
-                "FrankensteinLeftArm",
-                "FrankensteinRightArm",
-                "FrankensteinHead"
-            ]
+            DispatchQueue.main.async { [weak uiView] in
+                defer {
+                    resetRequestedBinding.wrappedValue = false
+                    coordinator.isResetPending = false
+                }
 
-            for name in limbNames {
-                character.childNode(
-                    withName: name,
+                guard let uiView = uiView else {
+                    return
+                }
+
+                // Reset the coordinator's learned object state and randomize the scene.
+                coordinator.resetObjectLearning()
+
+                if let character = uiView.scene?.rootNode.childNode(
+                    withName: "Frankenstein",
                     recursively: true
-                )?.eulerAngles = SCNVector3Zero
+                ) {
+                    character.position = SCNVector3(5.5, 0, 7.0)
+                    character.eulerAngles = SCNVector3Zero
+
+                    let limbNames = [
+                        "FrankensteinLeftLeg",
+                        "FrankensteinRightLeg",
+                        "FrankensteinLeftArm",
+                        "FrankensteinRightArm",
+                        "FrankensteinHead"
+                    ]
+
+                    for name in limbNames {
+                        character.childNode(
+                            withName: name,
+                            recursively: true
+                        )?.eulerAngles = SCNVector3Zero
+                    }
+                }
+
+                // Reset the same CA instance attached to the coordinator.
+                ca.reset()
+
+                generationBinding.wrappedValue = ca.generation
+                liveCellsBinding.wrappedValue = ca.liveCellCount
+
+                // Notify the parent after the built-in reset completes.
+                resetAction?()
             }
         }
-
-        ca.reset()
-
-        generation = ca.generation
-        liveCells = ca.liveCellCount
-
-        DispatchQueue.main.async {
-            self.resetRequested = false
-        }
-    }
-
     // MARK: - Tear Down
 
     static func dismantleUIView(

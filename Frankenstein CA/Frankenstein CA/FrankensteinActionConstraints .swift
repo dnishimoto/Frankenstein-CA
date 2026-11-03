@@ -57,6 +57,7 @@ enum FrankensteinActionConstraints {
                 return [
                     .walk,
                     .stepForward,
+                    .kickObject,
                     .turnLeft,
                     .turnRight,
                     .backward
