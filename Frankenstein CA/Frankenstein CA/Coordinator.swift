@@ -245,17 +245,22 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             return dog
         }
 
+        // Automatically resolve slot destination if carrying a letter block[cite: 22]
+        if carryingLetterBlock {
+            if letterTargetIndex == nil, let carried = carriedNode {
+                letterTargetIndex = letterSlotIndex(forCarried: carried)
+            }
+            if let index = letterTargetIndex {
+                return letterSlotNode(index: index)
+            }
+        }
+
         guard letterTargetIndex != nil else {
             return nil
         }
 
-        if carryingLetterBlock {
-            return letterSlotTarget
-        }
-
         return letterBlockTarget
     }
-
     private var goalNode: SCNNode? {
 
         // The supervisor exclusively determines the mission objective.
@@ -2352,7 +2357,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         guard let scene, let character = characterNode else { return }
         guard !needsRecharge else { return }
 
-        // 1. Confirm physical placement into slot before unlocking the target index
+        // 1. Confirm physical placement into slot before unlocking the target index[cite: 22]
         for index in letterWord.indices where energyManager.placedLetters[index] == nil {
             guard let slot = letterSlotNode(index: index) else { continue }
             let sp = slot.presentation.worldPosition
@@ -2362,7 +2367,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
                 let dx = Float(bp.x - sp.x)
                 let dz = Float(bp.z - sp.z)
 
-                // Strict confirmation: must be within tolerance AND successfully resting on slot surface
                 guard sqrt(dx * dx + dz * dz) <= letterSlotTolerance,
                       Float(bp.y) >= Float(sp.y),
                       Float(bp.y) < Float(sp.y) + 0.6 else { continue }
@@ -2402,10 +2406,15 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             return
         }
 
-        // Preserve delivery objective while navigating around chasms or detours
-        if carryingLetterBlock, let index = letterTargetIndex {
-            letterBlockTarget = carriedNode
-            letterSlotTarget = letterSlotNode(index: index)
+        // Preserve delivery objective and bind target index if holding a block[cite: 22]
+        if carryingLetterBlock {
+            if letterTargetIndex == nil, let carried = carriedNode {
+                letterTargetIndex = letterSlotIndex(forCarried: carried)
+            }
+            if let index = letterTargetIndex {
+                letterBlockTarget = carriedNode
+                letterSlotTarget = letterSlotNode(index: index)
+            }
             dogTarget = nil
             runAssist(character: character)
             return
@@ -2432,7 +2441,6 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             }
         }
 
-        // Maintain current target index unless fully confirmed placed
         if let currentIdx = letterTargetIndex, energyManager.placedLetters[currentIdx] != nil {
             letterTargetIndex = nil
             letterBlockTarget = nil
