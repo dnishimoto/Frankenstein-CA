@@ -2354,123 +2354,124 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     
     
     private func updateLetterMission() {
-        guard let scene, let character = characterNode else { return }
-        guard !needsRecharge else { return }
-        
-        // 1. Confirm physical placement into slot before unlocking the target index[cite: 22]
-        for index in letterWord.indices where energyManager.placedLetters[index] == nil {
-            guard let slot = letterSlotNode(index: index) else { continue }
-            let sp = slot.presentation.worldPosition
+            guard let scene, let character = characterNode else { return }
+            guard !needsRecharge else { return }
             
-            for block in looseLetterBlocks(letterWord[index]) {
-                let bp = block.presentation.worldPosition
-                let dx = Float(bp.x - sp.x)
-                let dz = Float(bp.z - sp.z)
+            // 1. Confirm physical placement into slot before unlocking the target index
+            for index in letterWord.indices where energyManager.placedLetters[index] == nil {
+                guard let slot = letterSlotNode(index: index) else { continue }
+                let sp = slot.presentation.worldPosition
                 
-                guard sqrt(dx * dx + dz * dz) <= letterSlotTolerance,
-                      Float(bp.y) >= Float(sp.y),
-                      Float(bp.y) < Float(sp.y) + 0.6 else { continue }
-                
-                block.position = SCNVector3(
-                    sp.x,
-                    sp.y + worldDimensions(of: slot).y * 0.5 + worldDimensions(of: block).y * 0.5 + 0.005,
-                    sp.z
-                )
-                
-                if let body = block.physicsBody {
-                    body.velocity = SCNVector3Zero
-                    body.angularVelocity = SCNVector4Zero
-                    body.type = .kinematic
-                    body.resetTransform()
-                }
-                
-                objectMemory.forget(block.name ?? "")
-                block.name = "PlacedLetter_\(letterWord[index])_\(index)"
-                energyManager.placedLetters[index] = letterWord[index]
-                
-                reinforceOutcome(
-                    stateKey: goalStateKey(terrain: latestTerrainSample),
-                    action: locomotion.output.action,
-                    reward: 3.0
-                )
-                break
-            }
-        }
-        
-        let c = character.presentation.worldPosition
-        updateDogLove(character: character)
-        
-        if carryingDog {
-            dogTarget = nil
-            runAssist(character: character)
-            return
-        }
-        
-        // Preserve delivery objective and bind target index if holding a block[cite: 22]
-        if carryingLetterBlock {
-            if letterTargetIndex == nil, let carried = carriedNode {
-                letterTargetIndex = letterSlotIndex(forCarried: carried)
-            }
-            if let index = letterTargetIndex {
-                letterBlockTarget = carriedNode
-                letterSlotTarget = letterSlotNode(index: index)
-            }
-            dogTarget = nil
-            runAssist(character: character)
-            return
-        }
-        
-        dogTarget = nil
-        
-        let letterBlockRemains = letterWord.indices.contains { index in
-            energyManager.placedLetters[index] == nil &&
-            looseLetterBlocks(letterWord[index]).contains { $0.parent != nil }
-        }
-        
-        if carriedNode == nil,
-           !letterBlockRemains,
-           currentFrameTime >= dogCooldownUntil,
-           let dog = scene.rootNode.childNode(withName: dogName, recursively: true),
-           dog.parent != nil {
-            let p = dog.presentation.worldPosition
-            let dx = Float(p.x - c.x)
-            let dz = Float(p.z - c.z)
-            
-            if sqrt(dx * dx + dz * dz) <= dogDetourRange {
-                dogTarget = dog
-            }
-        }
-        
-        if let currentIdx = letterTargetIndex, energyManager.placedLetters[currentIdx] != nil {
-            letterTargetIndex = nil
-            letterBlockTarget = nil
-            letterSlotTarget = nil
-        }
-        
-        var best: (index: Int, block: SCNNode, distance: Float)?
-        
-        for index in letterWord.indices where energyManager.placedLetters[index] == nil {
-            for block in looseLetterBlocks(letterWord[index]) where block.parent != nil {
-                let p = knownPosition(of: block)
-                let dx = p.x - Float(c.x)
-                let dz = p.z - Float(c.z)
-                let distance = sqrt(dx * dx + dz * dz)
-                
-                if best == nil || (index == best!.index && distance < best!.distance) {
-                    best = (index, block, distance)
+                for block in looseLetterBlocks(letterWord[index]) {
+                    let bp = block.presentation.worldPosition
+                    let dx = Float(bp.x - sp.x)
+                    let dz = Float(bp.z - sp.z)
+                    
+                    guard sqrt(dx * dx + dz * dz) <= letterSlotTolerance,
+                          Float(bp.y) >= Float(sp.y),
+                          Float(bp.y) < Float(sp.y) + 0.6 else { continue }
+                    
+                    // Snap the block precisely into the target slot center with correct height offset
+                    block.position = SCNVector3(
+                        sp.x,
+                        sp.y + worldDimensions(of: slot).y * 0.5 + worldDimensions(of: block).y * 0.5 + 0.005,
+                        sp.z
+                    )
+                    
+                    if let body = block.physicsBody {
+                        body.velocity = SCNVector3Zero
+                        body.angularVelocity = SCNVector4Zero
+                        body.type = .kinematic
+                        body.resetTransform()
+                    }
+                    
+                    objectMemory.forget(block.name ?? "")
+                    block.name = "PlacedLetter_\(letterWord[index])_\(index)"
+                    energyManager.placedLetters[index] = letterWord[index]
+                    
+                    reinforceOutcome(
+                        stateKey: goalStateKey(terrain: latestTerrainSample),
+                        action: locomotion.output.action,
+                        reward: 3.0
+                    )
+                    break
                 }
             }
-            if best != nil { break }
+            
+            let c = character.presentation.worldPosition
+            updateDogLove(character: character)
+            
+            if carryingDog {
+                dogTarget = nil
+                runAssist(character: character)
+                return
+            }
+            
+            // Preserve delivery objective and bind target index if holding a block
+            if carryingLetterBlock {
+                if letterTargetIndex == nil, let carried = carriedNode {
+                    letterTargetIndex = letterSlotIndex(forCarried: carried)
+                }
+                if let index = letterTargetIndex {
+                    letterBlockTarget = carriedNode
+                    letterSlotTarget = letterSlotNode(index: index)
+                }
+                dogTarget = nil
+                runAssist(character: character)
+                return
+            }
+            
+            dogTarget = nil
+            
+            let letterBlockRemains = letterWord.indices.contains { index in
+                energyManager.placedLetters[index] == nil &&
+                looseLetterBlocks(letterWord[index]).contains { $0.parent != nil }
+            }
+            
+            if carriedNode == nil,
+               !letterBlockRemains,
+               currentFrameTime >= dogCooldownUntil,
+               let dog = scene.rootNode.childNode(withName: dogName, recursively: true),
+               dog.parent != nil {
+                let p = dog.presentation.worldPosition
+                let dx = Float(p.x - c.x)
+                let dz = Float(p.z - c.z)
+                
+                if sqrt(dx * dx + dz * dz) <= dogDetourRange {
+                    dogTarget = dog
+                }
+            }
+            
+            if let currentIdx = letterTargetIndex, energyManager.placedLetters[currentIdx] != nil {
+                letterTargetIndex = nil
+                letterBlockTarget = nil
+                letterSlotTarget = nil
+            }
+            
+            var best: (index: Int, block: SCNNode, distance: Float)?
+            
+            for index in letterWord.indices where energyManager.placedLetters[index] == nil {
+                for block in looseLetterBlocks(letterWord[index]) where block.parent != nil {
+                    let p = knownPosition(of: block)
+                    let dx = p.x - Float(c.x)
+                    let dz = p.z - Float(c.z)
+                    let distance = sqrt(dx * dx + dz * dz)
+                    
+                    if best == nil || (index == best!.index && distance < best!.distance) {
+                        best = (index, block, distance)
+                    }
+                }
+                if best != nil { break }
+            }
+            
+            if let best, let slot = letterSlotNode(index: best.index) {
+                letterTargetIndex = best.index
+                letterBlockTarget = best.block
+                letterSlotTarget = slot
+            }
+            
+            runAssist(character: character)
         }
-        
-        if let best, let slot = letterSlotNode(index: best.index) {
-            letterTargetIndex = best.index
-            letterBlockTarget = best.block
-            letterSlotTarget = slot
-        }
-        
-        runAssist(character: character)
-    }
     
     private func runAssist(character: SCNNode) {
         let c = character.presentation.worldPosition
