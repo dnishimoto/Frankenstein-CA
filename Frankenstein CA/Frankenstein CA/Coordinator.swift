@@ -35,7 +35,13 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private var lastCATickTime: TimeInterval = 0
     private let caTickInterval: TimeInterval = 0.25
 
-    // MARK: - CA Executive (learning + object identity + distance paths)
+    // MARK: - Hierarchical mission supervision
+    // The supervisor selects only the high-level objective. It never selects
+    // locomotion actions; FrankensteinCA remains the sole action selector.
+    private let missionSupervisor = FrankensteinMissionSupervisor()
+    private var missionDecision = FrankensteinMissionDecision.initial
+
+    // MARK: - CA Executive (object identity + distance paths + object outcomes)
     private let executive = FrankensteinCAExecutive()
     private var pathSteering: CAPathSteering?
     private var pathGoalDistance: Float = .infinity
@@ -63,7 +69,9 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     /// charging) continues until the battery is full, so it is not cut off
     /// when the power rises past the threshold.
     private var needsRecharge: Bool {
-        energyManager.powerLevel < rechargeThreshold || hasReportedRecharge
+        missionDecision.requiresRecharge ||
+        energyManager.powerLevel < rechargeThreshold ||
+        hasReportedRecharge
     }
 
     private var effectiveRechargeStationNode: SCNNode? {
@@ -1048,6 +1056,29 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         lastDisplayedActionName = ""
 
         energyManager.reset()
+        missionSupervisor.reset()
+        missionDecision = .initial
+    }
+
+    // MARK: - Hierarchical Mission Supervisor
+    /// The supervisor observes mission facts and chooses the active objective.
+    /// Target selection, route planning, and movement remain with the existing
+    /// mission resolver, path field, CA, and locomotion controller.
+    private func updateMissionSupervisor() {
+        let hasUnplacedLetter = letterWord.indices.contains { index in
+            energyManager.placedLetters[index] == nil &&
+            !looseLetterBlocks(letterWord[index]).isEmpty
+        }
+        let dog = scene?.rootNode.childNode(withName: dogName, recursively: true)
+        missionDecision = missionSupervisor.update(
+            powerLevel: energyManager.powerLevel,
+            maximumPower: energyManager.maxPower,
+            isRecharging: hasReportedRecharge,
+            carryingLetter: carryingLetterBlock,
+            hasUnplacedLetter: hasUnplacedLetter,
+            dogAvailable: dogTarget?.parent != nil || carryingDog,
+            carryingDog: carryingDog
+        )
     }
 
     // MARK: - Renderer Update
@@ -1085,7 +1116,12 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         rechargeStationNode?.isHidden = false
         rechargeStationNode?.physicsBody?.categoryBitMask = 1
 
+        // First pass applies the power-safety priority before mission target
+        // resolution. The second pass synchronizes the selected phase with
+        // the targets that updateLetterMission just resolved.
+        updateMissionSupervisor()
         updateLetterMission()
+        updateMissionSupervisor()
 
         if let textGeo = powerMeterNode?.geometry as? SCNText {
             let percentage = Int(energyManager.powerLevel)
@@ -1602,27 +1638,38 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             // Include carryingLetterBlock status for CA awareness
             perception.carryingLetterBlock = carryingLetterBlock
 
-            // Recharge is the goal only while power is low (or a recharge is
-            // under way). Otherwise there is no station to seek.
-            if needsRecharge {
+            // The supervisor selects the mission objective. The CA still
+            // selects every primitive action needed to achieve that objective.
+            switch missionDecision.phase {
+            case .emergencyRecharge, .recharge:
                 perception.goal = .recharge
-                perception.subGoal = ""
-            } else if carryingDog {
+                perception.subGoal = missionDecision.subGoal
+            case .deliverLetter:
+                if let index = letterTargetIndex {
+                    perception.goal = .placeLetterBlock(
+                        letter: letterWord[index],
+                        targetIndex: index
+                    )
+                } else {
+                    perception.goal = .reachPosition
+                }
+                perception.subGoal = "carry block to slot"
+            case .fetchLetter:
+                if let index = letterTargetIndex {
+                    perception.goal = .placeLetterBlock(
+                        letter: letterWord[index],
+                        targetIndex: index
+                    )
+                } else {
+                    perception.goal = .reachPosition
+                }
+                perception.subGoal = "fetch block"
+            case .dogInteraction:
                 perception.goal = .completeInteraction("hug dog")
-                perception.subGoal = "give love"
-            } else if carriedNode == nil, dogTarget != nil {
-                perception.goal = .completeInteraction("hug dog")
-                perception.subGoal = "pick up dog"
-            } else if let index = letterTargetIndex {
-                // Power is OK: the primary goal is placing the letter blocks.
-                perception.goal = .placeLetterBlock(
-                    letter: letterWord[index],
-                    targetIndex: index
-                )
-                perception.subGoal = carryingLetterBlock ? "carry block to slot" : "fetch block"
-            } else {
+                perception.subGoal = carryingDog ? "give love" : "pick up dog"
+            case .lettersComplete, .explore:
                 perception.goal = .reachPosition
-                perception.subGoal = "no letter block to place"
+                perception.subGoal = missionDecision.subGoal
             }
 
             // If the path field has no route (no gradient from his cell), turn

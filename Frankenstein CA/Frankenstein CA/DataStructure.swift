@@ -9,6 +9,32 @@ import Foundation
 import SwiftUI
 import SceneKit
 
+enum FrankensteinMissionPhase: String {
+    case emergencyRecharge
+    case recharge
+    case fetchLetter
+    case deliverLetter
+    case dogInteraction
+    case lettersComplete
+    case explore
+}
+
+/// A compact, immutable decision published by the mission supervisor.
+struct FrankensteinMissionDecision {
+    let phase: FrankensteinMissionPhase
+    let subGoal: String
+    let requiresRecharge: Bool
+    let allowsOptionalInteraction: Bool
+    let revision: UInt64
+
+    static let initial = FrankensteinMissionDecision(
+        phase: .fetchLetter,
+        subGoal: "initialize mission",
+        requiresRecharge: false,
+        allowsOptionalInteraction: true,
+        revision: 0
+    )
+}
 struct RememberedObject {
     let name: String
     var position: SIMD3<Float>
