@@ -69,10 +69,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     /// when the power rises past the threshold.
     private var needsRecharge: Bool {
         missionDecision.requiresRecharge ||
-        energyManager.powerLevel < rechargeThreshold ||
         hasReportedRecharge
     }
-
     // MARK: - Hierarchical mission supervision
     // The supervisor selects only the high-level objective. It never selects
     // locomotion actions; FrankensteinCA remains the sole action selector.
@@ -3875,143 +3873,234 @@ private func isLetterBlockName(_ name: String?) -> Bool {
         }
     }
 
+    // MARK: - Measured Outcome Evaluation
+
     private func evaluateActionOutcome(
-            output: FrankensteinLocomotionOutput,
-            actualDisplacement: Float?,
-            character: SCNNode,
-            scene: SCNScene,
-            time: TimeInterval
-        ) {
-            guard let station = goalNode else { return }
-            let action = output.action
-            let actionName = String(describing: action)
-            let currentPosition = character.presentation.worldPosition
-            let stationPosition = station.presentation.worldPosition
+        output: FrankensteinLocomotionOutput,
+        actualDisplacement: Float?,
+        character: SCNNode,
+        scene: SCNScene,
+        time: TimeInterval
+    ) {
+        guard let goal = goalNode else { return }
 
-            // A new goal target (another block, the slot, the station) restarts
-            // the progress measurement, so the jump in distance is not rewarded.
-            let goalID = ObjectIdentifier(station)
-            if goalID != lastGoalNodeID {
-                lastGoalNodeID = goalID
-                lastEvaluatedActionName = ""
-            }
+        let action = output.action
+        let actionName = String(describing: action)
 
-            let currentDx = Float(currentPosition.x - stationPosition.x)
-            let currentDz = Float(currentPosition.z - stationPosition.z)
-            let currentDistance = sqrt(currentDx * currentDx + currentDz * currentDz)
-            let currentStateKey = goalStateKey(terrain: latestTerrainSample)
+        let currentPosition = character.presentation.worldPosition
+        let goalPosition = goal.presentation.worldPosition
 
-            guard actionName == lastEvaluatedActionName else {
-                lastEvaluatedActionName = actionName
-                lastGoalActionTime = time
-                lastGoalActionPosition = currentPosition
-                lastGoalDistance = currentDistance
-                consecutiveNoProgressCount = 0
-                outcomeWindowElapsedTime = 0
-                outcomeWindowDisplacement = 0
-                outcomeWindowGoalProgress = 0
-                outcomeWindowPathProgress = 0
-                lastEvalPathDistance = pathGoalDistance
-                previousGoalStateKey = currentStateKey
-                previousGoalAction = action
-                return
-            }
+        // Reset measurement when the mission target changes.
+        let goalID = ObjectIdentifier(goal)
 
-            defer {
-                previousGoalStateKey = currentStateKey
-                previousGoalAction = action
-            }
+        if goalID != lastGoalNodeID {
+            lastGoalNodeID = goalID
+            lastEvaluatedActionName = ""
+        }
 
-            guard let displacement = actualDisplacement else { return }
-            let previousDistance = lastGoalDistance
-            let goalProgress = previousDistance - currentDistance
-            rechargePlatformDistance = currentDistance
+        let currentDx = Float(currentPosition.x - goalPosition.x)
+        let currentDz = Float(currentPosition.z - goalPosition.z)
+
+        let currentDistance = sqrt(
+            currentDx * currentDx +
+            currentDz * currentDz
+        )
+
+        let currentStateKey = goalStateKey(
+            terrain: latestTerrainSample
+        )
+
+        // Start a new measurement window when the action changes.
+        guard actionName == lastEvaluatedActionName else {
+            lastEvaluatedActionName = actionName
+            lastGoalActionTime = time
+            lastGoalActionPosition = currentPosition
             lastGoalDistance = currentDistance
-
-            outcomeWindowElapsedTime += Double(dtFromLastFrame)
-            outcomeWindowDisplacement += displacement
-            outcomeWindowGoalProgress += goalProgress
-            if pathGoalDistance.isFinite, lastEvalPathDistance.isFinite {
-                outcomeWindowPathProgress += lastEvalPathDistance - pathGoalDistance
-            }
-            lastEvalPathDistance = pathGoalDistance
-
-            guard outcomeWindowElapsedTime >= outcomeWindowDuration else { return }
-
-            let movingActions: Set<FrankensteinAction> = [.walk, .run, .stepForward, .crouch, .crawl, .roll]
-            ca?.reportActionOutcome(
-                action: action,
-                goalProgressRate: outcomeWindowPathProgress / Float(outcomeWindowElapsedTime),
-                windowDuration: Float(outcomeWindowElapsedTime),
-                blocked: movingActions.contains(action) && abs(outcomeWindowDisplacement) < noProgressThreshold
-            )
-
-            var reward: Float = 0
-            let nearbyClass: String? = {
-                guard let detection = latestDetection, detection.distance < 1.0 else { return nil }
-                return objectClass(for: detection.name)
-            }()
-
-            if abs(outcomeWindowDisplacement) < noProgressThreshold {
-                consecutiveNoProgressCount += 1
-                reward += noProgressPenalty
-                if let nearbyClass { executive.field.learnClassOutcome(className: nearbyClass, blocked: true) }
-            } else if outcomeWindowGoalProgress > 0.001 {
-                consecutiveNoProgressCount = 0
-                reward += outcomeWindowDisplacement * 0.25
-                reward += outcomeWindowGoalProgress * goalProgressRewardScale
-                if let nearbyClass { executive.field.learnClassOutcome(className: nearbyClass, blocked: false) }
-            } else if outcomeWindowGoalProgress < -0.001 {
-                consecutiveNoProgressCount += 1
-                reward += outcomeWindowGoalProgress * goalProgressRewardScale
-            } else {
-                reward += outcomeWindowDisplacement * 0.05
-            }
-
-            // Reward bonus when pushing an obstacle out of the way successfully
-            if output.action == .pushObject, outcomeWindowDisplacement > 0.05 {
-                reward += 4.0
-            }
-
-            if hasReportedRecharge {
-                reward += 2.0
-                if !hasReachedRechargePlatform {
-                    hasReachedRechargePlatform = true
-                    rechargePlatformContactTime = time
-                }
-            } else {
-                hasReachedRechargePlatform = false
-            }
-
-            if hasReportedRecharge {
-                if rechargePlatformContactTime == 0 { rechargePlatformContactTime = time }
-                let contactDuration = time - rechargePlatformContactTime
-                reward += 0.25
-                if contactDuration >= requiredRechargeContactDuration, !hasCompletedRechargeGoal {
-                    hasCompletedRechargeGoal = true
-                    reward += 5.0
-                    locomotion.completeEpisode(.recharged)
-                    executive.learner.clearTraces()
-                    ca?.goalContext.advanceToNextGoal()
-                    ca?.planBuffer.invalidate(reason: "Recharge complete")
-                }
-            } else {
-                rechargePlatformContactTime = 0
-                hasReachedRechargePlatform = false
-            }
-
-            reinforceOutcome(
-                stateKey: previousGoalStateKey ?? currentStateKey,
-                action: previousGoalAction ?? action,
-                reward: reward,
-                nextStateKey: currentStateKey
-            )
+            consecutiveNoProgressCount = 0
 
             outcomeWindowElapsedTime = 0
             outcomeWindowDisplacement = 0
             outcomeWindowGoalProgress = 0
             outcomeWindowPathProgress = 0
+            lastEvalPathDistance = pathGoalDistance
+
+            previousGoalStateKey = currentStateKey
+            previousGoalAction = action
+
+            return
         }
+
+        defer {
+            previousGoalStateKey = currentStateKey
+            previousGoalAction = action
+        }
+
+        guard let displacement = actualDisplacement else {
+            return
+        }
+
+        // Measure actual progress toward the active goal.
+        let previousDistance = lastGoalDistance
+        let goalProgress = previousDistance - currentDistance
+
+        rechargePlatformDistance = currentDistance
+        lastGoalDistance = currentDistance
+
+        // Accumulate measured outcomes.
+        outcomeWindowElapsedTime += Double(dtFromLastFrame)
+        outcomeWindowDisplacement += displacement
+        outcomeWindowGoalProgress += goalProgress
+
+        if pathGoalDistance.isFinite,
+           lastEvalPathDistance.isFinite {
+            outcomeWindowPathProgress +=
+                lastEvalPathDistance - pathGoalDistance
+        }
+
+        lastEvalPathDistance = pathGoalDistance
+
+        guard outcomeWindowElapsedTime >= outcomeWindowDuration else {
+            return
+        }
+
+        let movingActions: Set<FrankensteinAction> = [
+            .walk, .run, .stepForward,
+            .crouch, .crawl, .roll
+        ]
+
+        let outcomeDuration = max(
+            0.01,
+            Float(outcomeWindowElapsedTime)
+        )
+
+        let measuredPathProgressRate =
+            outcomeWindowPathProgress / outcomeDuration
+
+        // Credit verified object movement when pushing.
+        let verifiedPushMeters = action == .pushObject
+            ? max(0, pushAccumulatedMeters)
+            : 0
+
+        let pushProgressRate = min(
+            0.75,
+            verifiedPushMeters * 0.45 / outcomeDuration
+        )
+
+        ca?.reportActionOutcome(
+            action: action,
+            goalProgressRate:
+                measuredPathProgressRate + pushProgressRate,
+            windowDuration: outcomeDuration,
+            blocked: movingActions.contains(action) &&
+                abs(outcomeWindowDisplacement) < noProgressThreshold
+        )
+
+        var reward: Float = 0
+
+        // Identify a nearby obstruction.
+        let nearbyClass: String? = {
+            guard let detection = latestDetection,
+                  detection.distance < 1.0 else {
+                return nil
+            }
+
+            return objectClass(for: detection.name)
+        }()
+
+        // Evaluate actual movement and goal progress.
+        if abs(outcomeWindowDisplacement) < noProgressThreshold {
+            consecutiveNoProgressCount += 1
+            reward += noProgressPenalty
+
+            if let nearbyClass {
+                executive.field.learnClassOutcome(
+                    className: nearbyClass,
+                    blocked: true
+                )
+            }
+
+            if consecutiveNoProgressCount >= 3 {
+                publishDebug(
+                    "No measurable progress for \(actionName); reconsidering action."
+                )
+            }
+
+        } else if outcomeWindowGoalProgress > 0.001 {
+            consecutiveNoProgressCount = 0
+
+            reward += outcomeWindowDisplacement * 0.25
+            reward += outcomeWindowGoalProgress * goalProgressRewardScale
+
+            if let nearbyClass {
+                executive.field.learnClassOutcome(
+                    className: nearbyClass,
+                    blocked: false
+                )
+            }
+
+        } else if outcomeWindowGoalProgress < -0.001 {
+            consecutiveNoProgressCount += 1
+            reward += outcomeWindowGoalProgress * goalProgressRewardScale
+
+        } else {
+            reward += outcomeWindowDisplacement * 0.05
+        }
+
+        // Reward successful pushing.
+        if output.action == .pushObject,
+           outcomeWindowDisplacement > 0.05 {
+            reward += 4.0
+        }
+
+        // Recharge contact reward.
+        if hasReportedRecharge {
+            reward += 2.0
+
+            if !hasReachedRechargePlatform {
+                hasReachedRechargePlatform = true
+                rechargePlatformContactTime = time
+            }
+        } else {
+            hasReachedRechargePlatform = false
+        }
+
+        // Verify sustained recharge contact.
+        if hasReportedRecharge {
+            if rechargePlatformContactTime == 0 {
+                rechargePlatformContactTime = time
+            }
+
+            let contactDuration = time - rechargePlatformContactTime
+
+            reward += 0.25
+
+            if contactDuration >= requiredRechargeContactDuration,
+               !hasCompletedRechargeGoal {
+
+                hasCompletedRechargeGoal = true
+                reward += 5.0
+
+                locomotion.completeEpisode(.recharged)
+                executive.learner.clearTraces()
+                ca?.goalContext.advanceToNextGoal()
+                ca?.planBuffer.invalidate(
+                    reason: "Recharge complete"
+                )
+            }
+
+        } else {
+            rechargePlatformContactTime = 0
+            hasReachedRechargePlatform = false
+        }
+
+        // Update reinforcement learning.
+        reinforceOutcome(
+            stateKey: previousGoalStateKey ?? currentStateKey,
+            action: previousGoalAction ?? action,
+            reward: reward,
+            nextStateKey: currentStateKey
+        )
+    }
     func randomFloat(in range: ClosedRange<Float> = 0.0...1.0) -> Float {
         return Float.random(in: range)
     }
