@@ -69,8 +69,8 @@ struct ContentView: View {
                                 print("The scene and coordinator have successfully finished resetting!")
                             })
             
-            //QNetworkGridPanel(cells: qCells)
-
+            QNetworkGridPanel(cells: qCells)
+            
             RobotMindPanel(seen: seenText, plan: planText)
 
             // Animation Speed Slider Control Row

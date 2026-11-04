@@ -1,173 +1,158 @@
 import Foundation
 import SceneKit
 
-/// The high-level and tactical behaviours Frankenstein's mission can be in.
-/// The mission anchor is always one of the first group; tactical overrides
-/// are the second group.
-enum CharacterAction: String, CaseIterable, Codable {
-    // Mission anchors (what the supervisor's phase asks for)
-    case idle                  // No mission target
-    case fetchLetter           // Go to a letter block and pick it up
-    case deliverLetter         // Carry the letter block to its slot and place it
-    case dogInteraction        // Go to the dog
-    case recharge              // Go to the recharge station
-    case explore               // Autonomous wandering
-
-    // Tactical overrides (discovered on the way, never replace the anchor)
-    case stepAroundObstacle    // Go around a platform he cannot climb
-    case clearObstacle         // Kick or throw a table / loose block off the route
-    case realignHeading        // Turn back toward the goal
-}
-
-/// One plan: an action, the node it concerns (held weakly), why it exists,
-/// and when it lapses if nothing completes it first.
+/// One executable step. A nil action means the CA chooses the best permitted
+/// movement action while pursuing this step. Completion is always verified.
 struct PlanTask {
-    let action: CharacterAction
-    weak var targetNode: SCNNode?
-    let reason: String
-    let expiresAt: TimeInterval?
+    let id: UUID
+    let action: FrankensteinAction?
+    let targetNode: SCNNode?
+    let description: String
+    let completionCondition: ((FrankensteinCAPerception?) -> Bool)?
 
     init(
-        action: CharacterAction,
+        action: FrankensteinAction? = nil,
         targetNode: SCNNode? = nil,
-        reason: String = "",
-        expiresAt: TimeInterval? = nil
+        description: String,
+        completionCondition: ((FrankensteinCAPerception?) -> Bool)? = nil
     ) {
+        self.id = UUID()
         self.action = action
         self.targetNode = targetNode
-        self.reason = reason
-        self.expiresAt = expiresAt
+        self.description = description
+        self.completionCondition = completionCondition
     }
 }
 
-/// Manages every plan discovered while Frankenstein finds letter blocks and
-/// delivers them to their slots.
-///
-/// - The mission anchor is the one plan that decides WHERE he is going. It
-///   comes only from the supervisor's phase.
-/// - Tactical overrides are short-lived plans found on the way (go around a
-///   platform, clear the table). They are stacked on top of the anchor, never
-///   replace its target, and lapse when completed, expired or their target is
-///   gone.
-/// - A change of anchor drops every override: they belonged to the old plan.
+/// A goal contains an ordered list of subgoals/tasks.
+struct MissionQueueGoal {
+    let id: String
+    let title: String
+    var targetNode: SCNNode?
+    var subgoals: [PlanTask]
+}
+
+/// The CA is the sole owner of mission, goal, subgoal and tactical queues.
+/// Coordinator may submit plans and report verified physical outcomes.
 final class MissionPlanQueue {
+    private(set) var missionID: String?
+    private(set) var missionTitle: String = ""
+    private(set) var goals: [MissionQueueGoal] = []
+    private(set) var tacticalQueue: [PlanTask] = []
+    var onPlanEvent: ((String) -> Void)?
 
-    private(set) var missionAnchor: PlanTask?
-    private var overrides: [PlanTask] = []
-    private let maximumOverrides = 3
+    var currentGoal: MissionQueueGoal? { goals.first }
+    var currentMissionTask: PlanTask? { goals.first?.subgoals.first }
+    var currentTask: PlanTask? { tacticalQueue.last ?? currentMissionTask }
 
-    /// Recent plan events, newest last (for the debug panel).
-    private(set) var history: [String] = []
-    private let maximumHistory = 12
-
-    /// Called for each plan event so the Coordinator can publish it.
-    var onEvent: ((String) -> Void)?
-
-    // MARK: - Anchor
-
-    /// Sets the mission anchor. A different action or target replaces the
-    /// anchor and drops all overrides; the same one is left untouched.
-    func setAnchor(action: CharacterAction, target: SCNNode?, reason: String) {
-        if let current = missionAnchor,
-           current.action == action,
-           current.targetNode === target {
-            return
+    /// The active SceneKit target used by Coordinator pathfinding and interactions.
+    var currentTargetNode: SCNNode? {
+        if let tactical = tacticalQueue.last, let target = tactical.targetNode {
+            return target
         }
-        let hadOverrides = !overrides.isEmpty
-        overrides.removeAll()
-        missionAnchor = PlanTask(action: action, targetNode: target, reason: reason)
-        record("anchor \(action.rawValue) -> \(target?.name ?? "none")"
-               + (hadOverrides ? " (overrides dropped)" : "")
-               + (reason.isEmpty ? "" : ": \(reason)"))
+        return currentMissionTask?.targetNode ?? currentGoal?.targetNode
     }
 
-    /// The node the mission is heading for. Overrides never change it.
-    var anchorTarget: SCNNode? {
-        guard let node = missionAnchor?.targetNode, node.parent != nil else { return nil }
-        return node
+    var pendingActions: [FrankensteinAction] {
+        tacticalQueue.reversed().compactMap(\.action) +
+            goals.flatMap { $0.subgoals.compactMap(\.action) }
     }
 
-    // MARK: - Tactical overrides
-
-    /// Adds a tactical plan unless the same action on the same target is
-    /// already queued (then only its expiry is extended).
-    func push(
-        _ action: CharacterAction,
-        target: SCNNode? = nil,
-        reason: String,
-        expiresAt: TimeInterval?
-    ) {
-        if let index = overrides.firstIndex(where: {
-            $0.action == action && $0.targetNode === target
-        }) {
-            let old = overrides[index]
-            overrides[index] = PlanTask(
-                action: action,
-                targetNode: target,
-                reason: old.reason,
-                expiresAt: expiresAt
-            )
-            return
-        }
-        if overrides.count >= maximumOverrides {
-            overrides.removeFirst()
-        }
-        overrides.append(
-            PlanTask(action: action, targetNode: target, reason: reason, expiresAt: expiresAt)
-        )
-        record("push \(action.rawValue)\(target.map { " (\($0.name ?? "node"))" } ?? ""): \(reason)")
-    }
-
-    /// Ends every queued plan of this action.
-    func finish(_ action: CharacterAction, because why: String = "done") {
-        let before = overrides.count
-        overrides.removeAll { $0.action == action }
-        if overrides.count != before {
-            record("finish \(action.rawValue): \(why)")
-        }
-    }
-
-    /// Drops overrides that have expired or whose target has left the scene.
-    func update(now: TimeInterval) {
-        let before = overrides
-        overrides.removeAll { task in
-            if let expiry = task.expiresAt, now >= expiry { return true }
-            if task.action == .clearObstacle,
-               task.targetNode == nil || task.targetNode?.parent == nil { return true }
-            return false
-        }
-        for task in before where !overrides.contains(where: {
-            $0.action == task.action && $0.targetNode === task.targetNode
-        }) {
-            record("lapse \(task.action.rawValue)")
-        }
-    }
-
-    // MARK: - Reading
-
-    /// The active behaviour: the top override, else the anchor.
-    var activeAction: CharacterAction? {
-        overrides.last?.action ?? missionAnchor?.action
-    }
-
-    var hasActiveTacticalOverride: Bool {
-        !overrides.isEmpty
-    }
-
-    /// One line for the debug panel.
     var summary: String {
-        let anchor = missionAnchor.map {
-            "\($0.action.rawValue) -> \($0.targetNode?.name ?? "none")"
-        } ?? "none"
-        let tactical = overrides.map { $0.action.rawValue }.joined(separator: " > ")
-        return tactical.isEmpty ? anchor : "\(anchor) | \(tactical)"
+        let goalDescriptions = goals.map { goal in
+            let steps = goal.subgoals.map(\.description).joined(separator: " → ")
+            return "\(goal.title) { \(steps) }"
+        }.joined(separator: " | ")
+        let tactical = tacticalQueue.reversed().map(\.description).joined(separator: " → ")
+        return "Mission: \(missionTitle.isEmpty ? "none" : missionTitle) | Goals: \(goalDescriptions.isEmpty ? "none" : goalDescriptions) | Tactical: \(tactical.isEmpty ? "none" : tactical)"
     }
 
-    // MARK: - Events
+    func beginMission(id: String, title: String) {
+        guard missionID != id else {
+            missionTitle = title
+            return
+        }
+        missionID = id
+        missionTitle = title
+        goals.removeAll()
+        tacticalQueue.removeAll()
+        onPlanEvent?("Mission started: \(title)")
+    }
 
-    private func record(_ message: String) {
-        history.append(message)
-        if history.count > maximumHistory { history.removeFirst() }
-        onEvent?(message)
+    /// Idempotent synchronization: an existing goal keeps its subgoal progress.
+    func upsertGoal(_ goal: MissionQueueGoal, atFront: Bool = true) {
+        if let index = goals.firstIndex(where: { $0.id == goal.id }) {
+            goals[index].targetNode = goal.targetNode
+            if atFront && index > 0 {
+                let existing = goals.remove(at: index)
+                goals.insert(existing, at: 0)
+            }
+            return
+        }
+        if atFront { goals.insert(goal, at: 0) } else { goals.append(goal) }
+        onPlanEvent?("Goal added: \(goal.title)")
+    }
+
+    func removeGoal(id: String, reason: String) {
+        guard let index = goals.firstIndex(where: { $0.id == id }) else { return }
+        let removed = goals.remove(at: index)
+        onPlanEvent?("Goal removed: \(removed.title) — \(reason)")
+    }
+
+    @discardableResult
+    func completeCurrentMissionTask(because reason: String) -> Bool {
+        guard !goals.isEmpty, !goals[0].subgoals.isEmpty else { return false }
+        let completed = goals[0].subgoals.removeFirst()
+        onPlanEvent?("Subgoal completed: \(completed.description) — \(reason)")
+        if goals[0].subgoals.isEmpty {
+            let goal = goals.removeFirst()
+            onPlanEvent?("Goal completed: \(goal.title)")
+        }
+        return true
+    }
+
+    func completeGoal(id: String, because reason: String) {
+        removeGoal(id: id, reason: reason)
+    }
+
+    func update(perception: FrankensteinCAPerception?) {
+        if let tactical = tacticalQueue.last,
+           let condition = tactical.completionCondition,
+           let perception, condition(perception) {
+            tacticalQueue.removeLast()
+            onPlanEvent?("Tactical task completed: \(tactical.description)")
+            return
+        }
+        guard let task = currentMissionTask,
+              let condition = task.completionCondition,
+              let perception, condition(perception) else { return }
+        _ = completeCurrentMissionTask(because: "perception verified")
+    }
+
+    func pushTacticalOverride(_ task: PlanTask, reason: String) {
+        if tacticalQueue.last?.description == task.description { return }
+        tacticalQueue.append(task)
+        onPlanEvent?("Tactical override added: \(reason)")
+    }
+
+    func completeTopTacticalTask(matchingDescriptionPrefix prefix: String, because reason: String) {
+        guard let top = tacticalQueue.last,
+              top.description.hasPrefix(prefix) else { return }
+        tacticalQueue.removeLast()
+        onPlanEvent?("Tactical override completed: \(reason)")
+    }
+
+    func clearTacticalOverrides(reason: String) {
+        guard !tacticalQueue.isEmpty else { return }
+        tacticalQueue.removeAll()
+        onPlanEvent?("Tactical overrides cleared: \(reason)")
+    }
+
+    func reset() {
+        goals.removeAll()
+        tacticalQueue.removeAll()
+        missionID = nil
+        missionTitle = ""
+        onPlanEvent?("Mission queue reset")
     }
 }

@@ -341,27 +341,120 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     /// tactically (the path field routes around them, runAssist clears
     /// them, the CA plans the clearing action) and never replace this goal.
     private var goalNode: SCNNode? {
-        missionSupervisor.goalTarget
+        ca?.missionQueue.currentTargetNode ?? resolveMissionGoal()
     }
 
-    /// LOCK: the Coordinator provides the phase's target; the supervisor owns
-    /// the plan queue and decides what the mission is doing. Runs once per
-    /// frame after the supervisor's decision.
+    /// Coordinator submits mission intent and SceneKit targets to the CA-owned queue.
+    /// The supervisor only selects the high-level phase; it does not own plans.
     private var missionPlansWired = false
     private func syncMissionQueue() {
+        guard let ca else { return }
+        let queue = ca.missionQueue
+
         if !missionPlansWired {
             missionPlansWired = true
-            missionSupervisor.onPlanEvent = { [weak self] message in
-                self?.publishDebug("[PLAN QUEUE] \(message)")
+            queue.onPlanEvent = { [weak self] message in
+                self?.publishDebug("[CA MISSION QUEUE] \(message)")
             }
         }
-        missionSupervisor.provideMissionTarget(
-            resolveMissionGoal(),
-            for: missionDecision,
-            now: currentFrameTime
+
+        queue.beginMission(
+            id: "frankenstein-letter-delivery",
+            title: "Spell FRANKENSTEIN by placing each letter in its matching slot"
+        )
+
+        guard let target = resolveMissionGoal() else {
+            if missionDecision.phase == .lettersComplete {
+                queue.clearTacticalOverrides(reason: "Mission completed")
+                queue.completeGoal(id: "recharge", because: "No longer required")
+            }
+            return
+        }
+
+        let targetID = String(describing: ObjectIdentifier(target))
+        let goalID: String
+        let title: String
+        let tasks: [PlanTask]
+
+        switch missionDecision.phase {
+        case .emergencyRecharge, .recharge:
+            goalID = "recharge"
+            title = missionDecision.subGoal
+            tasks = [
+                PlanTask(
+                    targetNode: target,
+                    description: "Approach charging station",
+                    completionCondition: { [weak self] _ in
+                        guard let self else { return false }
+                        return self.hasReachedRechargePlatform
+                    }
+                ),
+                PlanTask(targetNode: target, description: "Recharge until battery is full")
+            ]
+
+        case .fetchLetter:
+            goalID = "fetch-letter-\(targetID)"
+            title = "Retrieve letter: \(target.name ?? "letter block")"
+            tasks = [
+                PlanTask(
+                    targetNode: target,
+                    description: "Approach letter block",
+                    completionCondition: { [weak self] perception in
+                        guard let self, let perception else { return false }
+                        return perception.atGoal || self.planarDistance(to: target) <= self.manipulationDistance + 0.3
+                    }
+                ),
+                PlanTask(action: .liftObject, targetNode: target, description: "Pick up matching letter")
+            ]
+
+        case .deliverLetter:
+            goalID = "deliver-letter-\(targetID)"
+            title = "Deliver carried letter to matching slot"
+            tasks = [
+                PlanTask(
+                    targetNode: target,
+                    description: "Approach matching letter slot",
+                    completionCondition: { [weak self] perception in
+                        guard let self, let perception else { return false }
+                        return perception.atGoal || self.planarDistance(to: target) <= self.letterPlaceReach
+                    }
+                ),
+                PlanTask(action: .placeObject, targetNode: target, description: "Place letter in matching slot")
+            ]
+
+        case .dogInteraction:
+            goalID = "dog-interaction-\(targetID)"
+            title = "Optional dog interaction"
+            tasks = [
+                PlanTask(targetNode: target, description: "Approach dog", completionCondition: { [weak self] perception in
+                    guard let self, let perception else { return false }
+                    return perception.atGoal || self.planarDistance(to: target) <= self.manipulationDistance
+                }),
+                PlanTask(action: .liftObject, targetNode: target, description: "Pick up dog")
+            ]
+
+        case .lettersComplete, .explore:
+            return
+        }
+
+        queue.upsertGoal(
+            MissionQueueGoal(id: goalID, title: title, targetNode: target, subgoals: tasks),
+            atFront: true
         )
     }
+    private func planarDistance(to node: SCNNode) -> Float {
+        guard let character = characterNode else {
+            return .infinity
+        }
 
+        let characterPosition = character.presentation.worldPosition
+        let targetPosition = node.presentation.worldPosition
+
+        let dx = targetPosition.x - characterPosition.x
+        let dz = targetPosition.z - characterPosition.z
+
+        return sqrt(dx * dx + dz * dz)
+    }
     /// LOCK: the spatial target for each supervisor phase.
     private func resolveMissionGoal() -> SCNNode? {
         switch missionDecision.phase {
@@ -1072,6 +1165,10 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         if hasReportedRecharge {
             energyManager.recharge(dt: dt)
             if energyManager.powerLevel >= energyManager.maxPower {
+                ca?.missionQueue.completeGoal(
+                    id: "recharge",
+                    because: "Battery reached full charge"
+                )
                 hasReportedRecharge = false
                 hasCompletedRechargeGoal = false
             }
@@ -2130,63 +2227,63 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private func updatePlanSpline(character: SCNNode, time: TimeInterval) {
-        // Where the cyan/orange line ends:
-        //  - recharge: the station;
-        //  - a blocker (table, letterless block) or the dog: that node, directly;
-        //  - the letter mission: the SLOT. While fetching, the cyan leg runs to
-        //    the letter block and the orange leg carries on from it to the slot.
-        let goal = goalNode
-        let destinationNode: SCNNode?
-        var direct = false
-        if needsRecharge {
-            destinationNode = rechargeStationNode
-        } else if let goal, isLooseBlocker(goal) || goal === dogTarget {
-            destinationNode = goal
-            direct = true
-        } else {
-            destinationNode = letterSlotTarget ?? goal
-        }
+            // Where the cyan/orange line ends:
+            //  - recharge: the station;
+            //  - a blocker (table, letterless block) or the dog: that node, directly;
+            //  - the letter mission: the SLOT. While fetching, the cyan leg runs to
+            //    the letter block and the orange leg carries on from it to the slot.
+            let goal = goalNode
+            let destinationNode: SCNNode?
+            var direct = false
+            if needsRecharge {
+                destinationNode = rechargeStationNode
+            } else if let goal, isLooseBlocker(goal) || goal === dogTarget {
+                destinationNode = goal
+                direct = true
+            } else {
+                destinationNode = letterSlotTarget ?? goal
+            }
 
-        guard let destinationNode else {
+            guard let destinationNode else {
+                planSpline.update(
+                    time: time,
+                    character: character.presentation.worldPosition,
+                    object: nil,
+                    destination: nil
+                )
+                return
+            }
+
+            let queue = ca?.missionQueue.pendingActions ?? []
+            let planMovesObject = queue.contains(.pushObject) ||
+                queue.contains(.liftObject) ||
+                queue.contains(.placeObject)
+            var objectPosition: SCNVector3?
+            var lifting = false
+
+            if !needsRecharge {
+                if !direct, !carryingLetterBlock,
+                   let block = letterBlockTarget, block.parent != nil {
+                    objectPosition = block.presentation.worldPosition
+                    lifting = true
+                }
+            } else if let target = pushTargetNode, target.parent != nil {
+                objectPosition = target.presentation.worldPosition
+            } else if planMovesObject {
+                objectPosition = visibleObjects
+                    .filter { isMovableName($0.name) }
+                    .min(by: { $0.distance < $1.distance })?
+                    .worldPosition
+            }
+
             planSpline.update(
                 time: time,
                 character: character.presentation.worldPosition,
-                object: nil,
-                destination: nil
+                object: objectPosition,
+                destination: destinationNode.presentation.worldPosition,
+                approachFromCharacterSide: lifting
             )
-            return
         }
-
-        let queue = ca?.planBuffer.pendingActions ?? []
-        let planMovesObject = queue.contains(.pushObject) ||
-            queue.contains(.liftObject) ||
-            queue.contains(.placeObject)
-        var objectPosition: SCNVector3?
-        var lifting = false
-
-        if !needsRecharge {
-            if !direct, !carryingLetterBlock,
-               let block = letterBlockTarget, block.parent != nil {
-                objectPosition = block.presentation.worldPosition
-                lifting = true
-            }
-        } else if let target = pushTargetNode, target.parent != nil {
-            objectPosition = target.presentation.worldPosition
-        } else if planMovesObject {
-            objectPosition = visibleObjects
-                .filter { isMovableName($0.name) }
-                .min(by: { $0.distance < $1.distance })?
-                .worldPosition
-        }
-
-        planSpline.update(
-            time: time,
-            character: character.presentation.worldPosition,
-            object: objectPosition,
-            destination: destinationNode.presentation.worldPosition,
-            approachFromCharacterSide: lifting
-        )
-    }
 
     private func visibleObservations() -> [FrankensteinObjectObservation] {
         visibleObjects.prefix(12).map { item in
@@ -2536,17 +2633,25 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         // A letterless block on the path, or sitting on top of the letter
         // block he is after, is cleared before he continues.
         if let blocker = pathBlocker(character: character) {
-            missionSupervisor.submitTacticalPlan(
-                .clearObstacle,
-                target: blocker,
-                reason: "\(blocker.name ?? "obstacle") on the route",
-                expiresAt: currentFrameTime + 4
+            ca?.missionQueue.pushTacticalOverride(
+                PlanTask(
+                    targetNode: blocker,
+                    description: "Clear obstacle: \(blocker.name ?? "obstacle")",
+                    completionCondition: { perception in
+                        guard let perception else { return false }
+                        return perception.clearanceAhead > 1.8 || perception.obstructionName.isEmpty
+                    }
+                ),
+                reason: "\(blocker.name ?? "obstacle") on the route"
             )
             if clearBlocker(blocker, character: character) {
                 return
             }
         } else {
-            missionSupervisor.completeTacticalPlan(.clearObstacle, because: "route is clear")
+            ca?.missionQueue.completeTopTacticalTask(
+                matchingDescriptionPrefix: "Clear obstacle:",
+                because: "route is clear"
+            )
         }
 
         if carryingLetterBlock {
@@ -3534,7 +3639,10 @@ private func isLetterBlockName(_ name: String?) -> Bool {
         if let waypoint = platformDetourWaypoint {
             if currentFrameTime >= platformDetourUntil || simd_distance(here, waypoint) < 0.5 {
                 platformDetourWaypoint = nil
-                missionSupervisor.completeTacticalPlan(.stepAroundObstacle, because: "passed \(platformDetourName)")
+                ca?.missionQueue.completeTopTacticalTask(
+                    matchingDescriptionPrefix: "Step around obstacle:",
+                    because: "passed \(platformDetourName)"
+                )
                 publishDebug("Detour: passed \(platformDetourName)")
             } else {
                 let dx = waypoint.x - here.x
@@ -3565,10 +3673,9 @@ private func isLetterBlockName(_ name: String?) -> Bool {
         platformDetourWaypoint = waypoint
         platformDetourName = terrain.objectName
         platformDetourUntil = currentFrameTime + 6
-        missionSupervisor.submitTacticalPlan(
-            .stepAroundObstacle,
-            reason: "cannot climb \(terrain.objectName)",
-            expiresAt: platformDetourUntil
+        ca?.missionQueue.pushTacticalOverride(
+            PlanTask(description: "Step around obstacle: \(terrain.objectName)"),
+            reason: "cannot climb \(terrain.objectName)"
         )
         let dx = waypoint.x - here.x
         let dz = waypoint.y - here.y
@@ -4178,6 +4285,13 @@ private func isLetterBlockName(_ name: String?) -> Bool {
         target.physicsBody?.resetTransform()
         guard target.parent === hand else { return false }
         carriedNode = target
+        if let task = ca?.missionQueue.currentTask,
+           task.action == .liftObject,
+           task.targetNode === target {
+            _ = ca?.missionQueue.completeCurrentMissionTask(
+                because: "SceneKit confirmed object attached to Frankenstein's hand"
+            )
+        }
         publishDebug("Pickup confirmed.")
         return true
     }
@@ -4334,6 +4448,13 @@ private func isLetterBlockName(_ name: String?) -> Bool {
         if let snappedIndex, let snappedSlot {
             // Delivered: lock it into the slot now, not on the next frame.
             finalizePlacedLetter(carriedNode, index: snappedIndex, slot: snappedSlot)
+            if let task = ca?.missionQueue.currentTask,
+               task.action == .placeObject,
+               task.targetNode === snappedSlot {
+                _ = ca?.missionQueue.completeCurrentMissionTask(
+                    because: "Letter snapped into its matching slot"
+                )
+            }
         } else {
             rememberNode(carriedNode, time: currentFrameTime)
         }
@@ -4427,7 +4548,7 @@ private func isLetterBlockName(_ name: String?) -> Bool {
         Visible objects: \(visibleObjects.count)
         Recharge distance: \(String(format: "%.2f", Double(rechargePlatformDistance))) m
         CA path distance: \(pathText) m
-        Mission queue: \(missionSupervisor.planSummary)
+        Mission queue: \(ca?.missionQueue.summary ?? "CA not attached")
         CA plan: \(ca?.plannedSequence.map { String(describing: $0) }.joined(separator: " > ") ?? "n/a")
         """
         DispatchQueue.main.async { [weak self] in
@@ -4449,3 +4570,4 @@ extension Coordinator {
     func attachExecutiveCA(_ ca: FrankensteinCA) { attachCA(ca) }
     func logExecutiveControlState(terrain: FrankensteinTerrainSample, locomotion: FrankensteinLocomotion) {}
 }
+

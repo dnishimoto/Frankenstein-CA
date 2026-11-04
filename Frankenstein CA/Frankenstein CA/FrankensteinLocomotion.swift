@@ -652,165 +652,173 @@ final class FrankensteinLocomotion {
     // MARK: - Movement Execution
 
     private func updateMovement(
-        deltaTime dt: Float,
-        terrain: FrankensteinTerrainSample
-    ) {
-        let requestedSpeed: Float
+            deltaTime dt: Float,
+            terrain: FrankensteinTerrainSample
+        ) {
+            let requestedSpeed: Float
 
-        switch currentAction {
-        case .walk:
-            requestedSpeed = 1.0
+            switch currentAction {
+            case .walk, .fetchLetter, .deliverLetter, .explore:
+                requestedSpeed = 1.0
 
-        case .run:
-            requestedSpeed = 2.2
+            case .run:
+                requestedSpeed = 2.2
 
-        case .turnLeft, .turnRight:
-            requestedSpeed = 0
+            case .turnLeft, .turnRight, .realignHeading:
+                requestedSpeed = 0
 
-        case .jump:
-            requestedSpeed = activeJumpSpeed
+            case .jump:
+                requestedSpeed = activeJumpSpeed
 
-        case .crouch:
-            requestedSpeed = 0.45
+            case .crouch:
+                requestedSpeed = 0.45
 
-        case .crawl:
-            requestedSpeed = 0.35
+            case .crawl:
+                requestedSpeed = 0.35
 
-        case .roll:
-            requestedSpeed = 1.1
+            case .roll:
+                requestedSpeed = 1.1
 
-        case .stepUp:
-            requestedSpeed = stepUpSpeed
+            case .stepUp:
+                requestedSpeed = stepUpSpeed
 
-        case .stepDown:
-            requestedSpeed = stepDownSpeed
+            case .stepDown:
+                requestedSpeed = stepDownSpeed
 
-        case .backward:
-            requestedSpeed = -0.5
+            case .backward:
+                requestedSpeed = -0.5
 
-        case .stepForward:
-            requestedSpeed = 0.5
+            case .stepForward, .stepAroundObstacle:
+                requestedSpeed = 0.5
 
-        case .pushObject, .kickObject:
-            requestedSpeed = pushWalkSpeed
+            case .pushObject, .kickObject:
+                requestedSpeed = pushWalkSpeed
 
-        case .recover,
-             .liftObject,
-             .placeObject,
-             .throwObject:
-            requestedSpeed = 0
-        }
+            case .recover,
+                 .liftObject,
+                 .placeObject,
+                 .throwObject,
+                 .recharge,
+                 .dogInteraction,
+                 .completeTopTacticalTask,
+                 .idle,
+                 .clearObstacle:
+                requestedSpeed = 0
+            }
 
-        var speed = requestedSpeed
+            var speed = requestedSpeed
 
-        let validDistance =
-            terrain.distance.isFinite &&
-            terrain.distance >= 0
-
-        if !jumpInProgress &&
-            terrain.terrain == .hurdle &&
-            validDistance &&
-            terrain.distance < 0.8 &&
-            currentAction != .backward &&
-            currentAction != .turnLeft &&
-            currentAction != .turnRight {
-
-            speed = min(speed, 0.25)
-        }
-
-        // Gap safety.
-        if terrain.terrain == .gap {
-            let hasValidWidth =
-                terrain.gapWidth.isFinite &&
-                terrain.gapWidth > 0
-
-            let safeLanding =
-                terrain.isLandingAreaClear &&
-                hasValidWidth
-
-            let isMovingTowardGap =
-                currentAction == .walk ||
-                currentAction == .run ||
-                currentAction == .stepForward ||
-                currentAction == .crawl ||
-                currentAction == .roll ||
-                currentAction == .stepUp
+            let validDistance =
+                terrain.distance.isFinite &&
+                terrain.distance >= 0
 
             if !jumpInProgress &&
-                isMovingTowardGap &&
-                !safeLanding {
+                terrain.terrain == .hurdle &&
+                validDistance &&
+                terrain.distance < 0.8 &&
+                currentAction != .backward &&
+                currentAction != .turnLeft &&
+                currentAction != .turnRight {
 
-                speed = 0
+                speed = min(speed, 0.25)
             }
 
-            if currentAction == .jump &&
-                !jumpInProgress &&
-                !safeLanding {
+            // Gap safety.
+            if terrain.terrain == .gap {
+                let hasValidWidth =
+                    terrain.gapWidth.isFinite &&
+                    terrain.gapWidth > 0
 
-                speed = 0
+                let safeLanding =
+                    terrain.isLandingAreaClear &&
+                    hasValidWidth
+
+                let isMovingTowardGap =
+                    currentAction == .walk ||
+                    currentAction == .run ||
+                    currentAction == .stepForward ||
+                    currentAction == .crawl ||
+                    currentAction == .roll ||
+                    currentAction == .stepUp ||
+                    currentAction == .fetchLetter ||
+                    currentAction == .deliverLetter ||
+                    currentAction == .explore
+
+                if !jumpInProgress &&
+                    isMovingTowardGap &&
+                    !safeLanding {
+
+                    speed = 0
+                }
+
+                if currentAction == .jump &&
+                    !jumpInProgress &&
+                    !safeLanding {
+
+                    speed = 0
+                }
             }
-        }
 
-        if currentAction == .jump && !jumpInProgress {
-            beginJump(terrain: terrain)
-        }
-
-        // Step-up initiation.
-        if currentAction == .stepUp &&
-            !stepUpInProgress &&
-            !stepDownInProgress &&
-            !stepTransitionLatched {
-
-            let rise = terrain.obstacleHeight
-
-            let validRise =
-                rise.isFinite &&
-                rise > 0 &&
-                rise <= maximumStepUpHeight
-
-            let obstacleIsRelevant =
-                terrain.distance.isFinite &&
-                terrain.distance >= 0 &&
-                terrain.distance < 1.0
-
-            if validRise && obstacleIsRelevant {
-                beginStepTransition(to: body.height + rise)
-                stepTransitionLatched = true
-            } else {
-                speed = 0
+            if currentAction == .jump && !jumpInProgress {
+                beginJump(terrain: terrain)
             }
-        }
 
-        // Step-down initiation.
-        if currentAction == .stepDown &&
-            !stepDownInProgress &&
-            !stepUpInProgress &&
-            !stepTransitionLatched {
+            // Step-up initiation.
+            if currentAction == .stepUp &&
+                !stepUpInProgress &&
+                !stepDownInProgress &&
+                !stepTransitionLatched {
 
-            let drop = terrain.obstacleHeight
+                let rise = terrain.obstacleHeight
 
-            let validDrop =
-                drop.isFinite &&
-                drop > 0 &&
-                drop <= maximumStepDownHeight &&
-                terrain.distance.isFinite &&
-                terrain.distance >= 0 &&
-                terrain.distance < 1.0
+                let validRise =
+                    rise.isFinite &&
+                    rise > 0 &&
+                    rise <= maximumStepUpHeight
 
-            if validDrop {
-                beginStepTransition(
-                    to: max(0, body.height - drop)
-                )
+                let obstacleIsRelevant =
+                    terrain.distance.isFinite &&
+                    terrain.distance >= 0 &&
+                    terrain.distance < 1.0
 
-                stepTransitionLatched = true
-            } else {
-                speed = 0
+                if validRise && obstacleIsRelevant {
+                    beginStepTransition(to: body.height + rise)
+                    stepTransitionLatched = true
+                } else {
+                    speed = 0
+                }
             }
-        }
 
-        output.speed = speed
-        output.action = currentAction
-    }
+            // Step-down initiation.
+            if currentAction == .stepDown &&
+                !stepDownInProgress &&
+                !stepUpInProgress &&
+                !stepTransitionLatched {
+
+                let drop = terrain.obstacleHeight
+
+                let validDrop =
+                    drop.isFinite &&
+                    drop > 0 &&
+                    drop <= maximumStepDownHeight &&
+                    terrain.distance.isFinite &&
+                    terrain.distance >= 0 &&
+                    terrain.distance < 1.0
+
+                if validDrop {
+                    beginStepTransition(
+                        to: max(0, body.height - drop)
+                    )
+
+                    stepTransitionLatched = true
+                } else {
+                    speed = 0
+                }
+            }
+
+            output.speed = speed
+            output.action = currentAction
+        }
 
     // MARK: - Step Transitions
 

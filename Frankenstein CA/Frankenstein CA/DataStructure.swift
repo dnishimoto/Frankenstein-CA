@@ -9,6 +9,8 @@ import Foundation
 import SwiftUI
 import SceneKit
 
+
+
 struct FrankensteinPlanAssessment {
 
     var targetName: String?
@@ -85,6 +87,16 @@ enum FrankensteinAction: Int, CaseIterable {
     case throwObject
     case pushObject
     case kickObject
+    case recharge
+    case fetchLetter
+    case deliverLetter
+    case explore
+    case dogInteraction
+    case stepAroundObstacle
+    case completeTopTacticalTask
+    case idle
+    case clearObstacle
+    case realignHeading
 }
 
 enum FrankensteinPosture: Equatable {
