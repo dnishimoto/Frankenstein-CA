@@ -3882,21 +3882,15 @@ private func isLetterBlockName(_ name: String?) -> Bool {
         scene: SCNScene,
         time: TimeInterval
     ) {
-        guard let goal = goalNode else { return }
+        guard let goal = missionGoalNode else {
+            return
+        }
 
         let action = output.action
         let actionName = String(describing: action)
 
         let currentPosition = character.presentation.worldPosition
         let goalPosition = goal.presentation.worldPosition
-
-        // Reset measurement when the mission target changes.
-        let goalID = ObjectIdentifier(goal)
-
-        if goalID != lastGoalNodeID {
-            lastGoalNodeID = goalID
-            lastEvaluatedActionName = ""
-        }
 
         let currentDx = Float(currentPosition.x - goalPosition.x)
         let currentDz = Float(currentPosition.z - goalPosition.z)
@@ -3905,201 +3899,83 @@ private func isLetterBlockName(_ name: String?) -> Bool {
             currentDx * currentDx +
             currentDz * currentDz
         )
+        
+        let goalID = ObjectIdentifier(goal)
 
-        let currentStateKey = goalStateKey(
-            terrain: latestTerrainSample
-        )
-
-        // Start a new measurement window when the action changes.
-        guard actionName == lastEvaluatedActionName else {
-            lastEvaluatedActionName = actionName
-            lastGoalActionTime = time
-            lastGoalActionPosition = currentPosition
+        if goalID != lastGoalNodeID {
+            lastGoalNodeID = goalID
             lastGoalDistance = currentDistance
-            consecutiveNoProgressCount = 0
+            lastEvaluatedActionName = ""
 
             outcomeWindowElapsedTime = 0
             outcomeWindowDisplacement = 0
             outcomeWindowGoalProgress = 0
             outcomeWindowPathProgress = 0
             lastEvalPathDistance = pathGoalDistance
-
-            previousGoalStateKey = currentStateKey
-            previousGoalAction = action
-
-            return
         }
 
-        defer {
-            previousGoalStateKey = currentStateKey
-            previousGoalAction = action
-        }
+        let displacement = actualDisplacement ?? 0.0
+        outcomeWindowDisplacement += displacement
+        outcomeWindowElapsedTime += 0.016
 
-        guard let displacement = actualDisplacement else {
-            return
-        }
-
-        // Measure actual progress toward the active goal.
-        let previousDistance = lastGoalDistance
-        let goalProgress = previousDistance - currentDistance
-
-        rechargePlatformDistance = currentDistance
+        let goalProgress = lastGoalDistance - currentDistance
+        outcomeWindowGoalProgress = goalProgress
         lastGoalDistance = currentDistance
 
-        // Accumulate measured outcomes.
-        outcomeWindowElapsedTime += Double(dtFromLastFrame)
-        outcomeWindowDisplacement += displacement
-        outcomeWindowGoalProgress += goalProgress
-
-        if pathGoalDistance.isFinite,
-           lastEvalPathDistance.isFinite {
-            outcomeWindowPathProgress +=
-                lastEvalPathDistance - pathGoalDistance
-        }
-
+        let pathProgress = lastEvalPathDistance - pathGoalDistance
+        outcomeWindowPathProgress = pathProgress
         lastEvalPathDistance = pathGoalDistance
 
-        guard outcomeWindowElapsedTime >= outcomeWindowDuration else {
-            return
-        }
-
-        let movingActions: Set<FrankensteinAction> = [
+        let movementActions: Set<FrankensteinAction> = [
             .walk, .run, .stepForward,
-            .crouch, .crawl, .roll
+            .crouch, .crawl, .roll,
+            .backward
         ]
 
-        let outcomeDuration = max(
-            0.01,
-            Float(outcomeWindowElapsedTime)
-        )
+        let turningActions: Set<FrankensteinAction> = [
+            .turnLeft, .turnRight
+        ]
 
-        let measuredPathProgressRate =
-            outcomeWindowPathProgress / outcomeDuration
+        let madeRouteProgress = outcomeWindowPathProgress > 0.015
+        let madeGoalProgress = outcomeWindowGoalProgress > 0.001
+        let madeProgress = madeRouteProgress || madeGoalProgress
 
-        // Credit verified object movement when pushing.
-        let verifiedPushMeters = action == .pushObject
-            ? max(0, pushAccumulatedMeters)
-            : 0
+        var reward: Float = 0.0
 
-        let pushProgressRate = min(
-            0.75,
-            verifiedPushMeters * 0.45 / outcomeDuration
-        )
-
-        ca?.reportActionOutcome(
-            action: action,
-            goalProgressRate:
-                measuredPathProgressRate + pushProgressRate,
-            windowDuration: outcomeDuration,
-            blocked: movingActions.contains(action) &&
-                abs(outcomeWindowDisplacement) < noProgressThreshold
-        )
-
-        var reward: Float = 0
-
-        // Identify a nearby obstruction.
         let nearbyClass: String? = {
-            guard let detection = latestDetection,
-                  detection.distance < 1.0 else {
-                return nil
+            if let detection = latestDetection {
+                return objectClass(for: detection.name)
+            } else if let target = pushTargetNode, let name = target.name {
+                return objectClass(for: name)
             }
-
-            return objectClass(for: detection.name)
+            return nil
         }()
 
-        // Evaluate actual movement and goal progress.
-        if abs(outcomeWindowDisplacement) < noProgressThreshold {
+        if movementActions.contains(action) && abs(outcomeWindowDisplacement) < noProgressThreshold && !madeProgress {
+            // Stagnant movement penalty
             consecutiveNoProgressCount += 1
             reward += noProgressPenalty
 
             if let nearbyClass {
-                executive.field.learnClassOutcome(
-                    className: nearbyClass,
-                    blocked: true
-                )
+                executive.field.learnClassOutcome(className: nearbyClass, blocked: true)
             }
-
-            if consecutiveNoProgressCount >= 3 {
-                publishDebug(
-                    "No measurable progress for \(actionName); reconsidering action."
-                )
-            }
-
-        } else if outcomeWindowGoalProgress > 0.001 {
+        } else if madeProgress {
+            // Successful progress reward
             consecutiveNoProgressCount = 0
-
-            reward += outcomeWindowDisplacement * 0.25
-            reward += outcomeWindowGoalProgress * goalProgressRewardScale
+            reward += max(0, outcomeWindowPathProgress) * goalProgressRewardScale
+            reward += max(0, outcomeWindowGoalProgress) * goalProgressRewardScale
 
             if let nearbyClass {
-                executive.field.learnClassOutcome(
-                    className: nearbyClass,
-                    blocked: false
-                )
+                executive.field.learnClassOutcome(className: nearbyClass, blocked: false)
             }
-
-        } else if outcomeWindowGoalProgress < -0.001 {
-            consecutiveNoProgressCount += 1
-            reward += outcomeWindowGoalProgress * goalProgressRewardScale
-
+        } else if turningActions.contains(action) {
+            // Turning in place receives no automatic penalty
         } else {
             reward += outcomeWindowDisplacement * 0.05
         }
 
-        // Reward successful pushing.
-        if output.action == .pushObject,
-           outcomeWindowDisplacement > 0.05 {
-            reward += 4.0
-        }
-
-        // Recharge contact reward.
-        if hasReportedRecharge {
-            reward += 2.0
-
-            if !hasReachedRechargePlatform {
-                hasReachedRechargePlatform = true
-                rechargePlatformContactTime = time
-            }
-        } else {
-            hasReachedRechargePlatform = false
-        }
-
-        // Verify sustained recharge contact.
-        if hasReportedRecharge {
-            if rechargePlatformContactTime == 0 {
-                rechargePlatformContactTime = time
-            }
-
-            let contactDuration = time - rechargePlatformContactTime
-
-            reward += 0.25
-
-            if contactDuration >= requiredRechargeContactDuration,
-               !hasCompletedRechargeGoal {
-
-                hasCompletedRechargeGoal = true
-                reward += 5.0
-
-                locomotion.completeEpisode(.recharged)
-                executive.learner.clearTraces()
-                ca?.goalContext.advanceToNextGoal()
-                ca?.planBuffer.invalidate(
-                    reason: "Recharge complete"
-                )
-            }
-
-        } else {
-            rechargePlatformContactTime = 0
-            hasReachedRechargePlatform = false
-        }
-
-        // Update reinforcement learning.
-        reinforceOutcome(
-            stateKey: previousGoalStateKey ?? currentStateKey,
-            action: previousGoalAction ?? action,
-            reward: reward,
-            nextStateKey: currentStateKey
-        )
+        // Apply reward to reinforcement learning system
+        locomotion.updateReinforcement(reward: reward, for: actionName)
     }
     func randomFloat(in range: ClosedRange<Float> = 0.0...1.0) -> Float {
         return Float.random(in: range)
@@ -4311,87 +4187,79 @@ private func isLetterBlockName(_ name: String?) -> Bool {
 
 
     private func applyPush(
-                output: FrankensteinLocomotionOutput,
-                deltaTime dt: Float,
-                character: SCNNode
-            ) {
-                let pushIsExecuting = output.pushRequested || output.action == .pushObject
-                guard pushIsExecuting else {
-                    blockConnectionStartGeneration = nil
-                    trackedBlockID = nil
-                    pushLastNodePosition = nil
-                    pushTrackedNodeID = nil
-                    pushAccumulatedMeters = 0
-                    return
-                }
-                guard let node = pushTargetNode, node.parent != nil else {
-                    blockConnectionStartGeneration = nil
-                    trackedBlockID = nil
-                    pushLastNodePosition = nil
-                    pushTrackedNodeID = nil
-                    pushAccumulatedMeters = 0
-                    return
-                }
-                guard carriedNode == nil, canManipulate(node, from: character) else {
-                    blockConnectionStartGeneration = nil
-                    trackedBlockID = nil
-                    pushLastNodePosition = nil
-                    pushTrackedNodeID = nil
-                    pushAccumulatedMeters = 0
-                    return
-                }
-
-                let targetID = ObjectIdentifier(node)
-                if trackedBlockID != targetID {
-                    trackedBlockID = targetID
-                    blockConnectionStartGeneration = ca?.generation ?? 0
-                }
-
-                // If connected/pushing this same block for too long, kick it away to prevent stalling
-                if let startGen = blockConnectionStartGeneration, let currentGen = ca?.generation, currentGen - startGen > 600 {
-                    publishDebug("Block push stalled. Kicking away!")
-                    applyKick(output: FrankensteinLocomotionOutput(action: .kickObject), character: character)
-                    blockConnectionStartGeneration = nil
-                    trackedBlockID = nil
-                    return
-                }
-
-                if pushTrackedNodeID != targetID {
-                    pushTrackedNodeID = targetID
-                    pushLastNodePosition = nil
-                    pushAccumulatedMeters = 0
-                }
-
-                let forward = forwardVector()
-                let c = character.presentation.worldPosition
-                let n = node.presentation.worldPosition
-
-                let dx = Float(n.x - c.x)
-                let dz = Float(n.z - c.z)
-                let ahead = dx * forward.x + dz * forward.z
-                let sideways = abs(dx * forward.z - dz * forward.x)
-
-                guard ahead > 0.05, ahead < 1.8, sideways < 0.85 else {
-                    pushLastNodePosition = nil
-                    return
-                }
-
-                configurePhysicsBody(for: node, forceDynamic: true)
-                guard let body = node.physicsBody else { return }
-
-                // Apply forward velocity using the increased push speed
-                body.velocity = SCNVector3(forward.x * pushBlockSpeed, body.velocity.y, forward.z * pushBlockSpeed)
-                body.angularVelocity = SCNVector4Zero
-
-                let current = SIMD2<Float>(Float(n.x), Float(n.z))
-                if let last = pushLastNodePosition {
-                    let moved = current - last
-                    pushAccumulatedMeters += moved.x * forward.x + moved.y * forward.z
-                }
-                pushLastNodePosition = current
-
-                locomotion.reportPushProgress(pushAccumulatedMeters)
+            output: FrankensteinLocomotionOutput,
+            deltaTime dt: Float,
+            character: SCNNode
+        ) {
+            let pushIsExecuting = output.pushRequested || output.action == .pushObject
+            guard pushIsExecuting else {
+                blockConnectionStartGeneration = nil
+                trackedBlockID = nil
+                pushLastNodePosition = nil
+                pushTrackedNodeID = nil
+                pushAccumulatedMeters = 0
+                return
             }
+            guard let node = pushTargetNode, node.parent != nil else {
+                blockConnectionStartGeneration = nil
+                trackedBlockID = nil
+                pushLastNodePosition = nil
+                pushTrackedNodeID = nil
+                pushAccumulatedMeters = 0
+                return
+            }
+            guard carriedNode == nil, canManipulate(node, from: character) else {
+                blockConnectionStartGeneration = nil
+                trackedBlockID = nil
+                pushLastNodePosition = nil
+                pushTrackedNodeID = nil
+                pushAccumulatedMeters = 0
+                return
+            }
+
+            let targetID = ObjectIdentifier(node)
+            if trackedBlockID != targetID {
+                trackedBlockID = targetID
+                blockConnectionStartGeneration = ca?.generation ?? 0
+            }
+
+            // [Removed rigid 600-generation generation check]
+
+            if pushTrackedNodeID != targetID {
+                pushTrackedNodeID = targetID
+                pushLastNodePosition = nil
+                pushAccumulatedMeters = 0
+            }
+
+            let forward = forwardVector()
+            let c = character.presentation.worldPosition
+            let n = node.presentation.worldPosition
+
+            let dx = Float(n.x - c.x)
+            let dz = Float(n.z - c.z)
+            let ahead = dx * forward.x + dz * forward.z
+            let sideways = abs(dx * forward.z - dz * forward.x)
+
+            guard ahead > 0.05, ahead < 1.8, sideways < 0.85 else {
+                pushLastNodePosition = nil
+                return
+            }
+
+            configurePhysicsBody(for: node, forceDynamic: true)
+            guard let body = node.physicsBody else { return }
+
+            body.velocity = SCNVector3(forward.x * pushBlockSpeed, body.velocity.y, forward.z * pushBlockSpeed)
+            body.angularVelocity = SCNVector4Zero
+
+            let current = SIMD2<Float>(Float(n.x), Float(n.z))
+            if let last = pushLastNodePosition {
+                let moved = current - last
+                pushAccumulatedMeters += moved.x * forward.x + moved.y * forward.z
+            }
+            pushLastNodePosition = current
+
+            locomotion.reportPushProgress(pushAccumulatedMeters)
+        }
     @discardableResult
     private func dropCarriedObject(
         distance: Float,

@@ -643,22 +643,27 @@ final class FrankensteinCA: ObservableObject {
         }
     }
     private func terminalPlanValue(
-        _ state: Rollout,
-        perception p: FrankensteinCAPerception
-    ) -> Float {
-        let routeNow = routeHeading(atProgress: state.progress, perception: p)
-        let alignment = cosf(wrapped(routeNow - state.heading))
-        var value = state.progress + 0.4 * alignment - 0.5 * Float(state.wasted)
+            _ state: Rollout,
+            perception p: FrankensteinCAPerception
+        ) -> Float {
+            let routeNow = routeHeading(atProgress: state.progress, perception: p)
+            let alignment = cosf(wrapped(routeNow - state.heading))
+            
+            // If we are already at or near the goal / slot, do not penalize zero movement (wasted steps)
+            let atDestination = p.pathDistance.isFinite && p.pathDistance <= 0.5 || p.atGoal
+            let wastePenalty: Float = atDestination ? 0.0 : 0.5 * Float(state.wasted)
+            
+            var value = state.progress + 0.4 * alignment - wastePenalty
 
-        value += state.qSum
+            value += state.qSum
 
-        if p.pathDistance.isFinite,
-           state.progress >= p.pathDistance - planGoalTolerance {
-            value += planGoalBonus
+            if p.pathDistance.isFinite,
+               state.progress >= p.pathDistance - planGoalTolerance || atDestination {
+                value += planGoalBonus * 2.0 // Boost value upon reaching destination
+            }
+
+            return value
         }
-
-        return value
-    }
 
     private func bestContinuation(
         from state: Rollout,

@@ -4,7 +4,7 @@ import simd
 
 final class FrankensteinLocomotion {
 
-    // MARK: - Learning
+    private var actionValues: [String: Float] = [:]
 
     let policy = FrankensteinLearningPolicy()
 
@@ -136,25 +136,32 @@ final class FrankensteinLocomotion {
     private var hasCoordinatorActionConstraints = false
 
     func receivePerception(
-        allowedActions: [FrankensteinAction],
-        qValues: [FrankensteinAction: Float]
-    ) {
-        coordinatorAllowedActions = allowedActions
-        coordinatorQValues = qValues
-        hasCoordinatorActionConstraints = true
+            allowedActions: [FrankensteinAction],
+            qValues: [FrankensteinAction: Float]
+        ) {
+            coordinatorAllowedActions = allowedActions
+            coordinatorQValues = qValues
+            hasCoordinatorActionConstraints = true
 
-        policy.updatePerceivedActionValues(
-            allowedActions: allowedActions,
-            qValues: qValues
-        )
-    }
+            policy.updatePerceivedActionValues(
+                allowedActions: allowedActions,
+                qValues: qValues
+            )
+        }
 
-    func clearPerception() {
-        coordinatorAllowedActions.removeAll()
-        coordinatorQValues.removeAll()
-        hasCoordinatorActionConstraints = false
-    }
+        func clearPerception() {
+            coordinatorAllowedActions.removeAll()
+            coordinatorQValues.removeAll()
+            hasCoordinatorActionConstraints = false
+        }
 
+        public func updateReinforcement(reward: Float, for actionName: String) {
+            let learningRate: Float = 0.1
+            let currentWeight = actionValues[actionName] ?? 0.0
+             
+            // Simple Q-learning or gradient-based policy update
+            actionValues[actionName] = currentWeight + learningRate * (reward - currentWeight)
+        }
     func setCarryingObject(_ carrying: Bool) {
         hasCarriedObject = carrying
     }
