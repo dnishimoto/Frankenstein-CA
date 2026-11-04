@@ -822,126 +822,57 @@ final class FrankensteinCA: ObservableObject {
 
 
     private func planValues(
+            for actions: [FrankensteinAction],
+            perception p: FrankensteinCAPerception
+        ) -> [FrankensteinAction: Float] {
 
-        for actions: [FrankensteinAction],
-
-        perception p: FrankensteinCAPerception
-
-    ) -> [FrankensteinAction: Float] {
-
-
-
-        let candidateActions = actions.filter {
-
-            isPlanSimulationAction($0)
-
-        }
-
-
-
-        guard !candidateActions.isEmpty else {
-
-            candidateSequence = []
-
-            lastBestPlanValue = -.infinity
-
-            return [:]
-
-        }
-
-
-
-        var values: [FrankensteinAction: Float] = [:]
-
-        var bestValue: Float = -.infinity
-
-        var bestSequence: [FrankensteinAction] = []
-
-
-
-        for action in candidateActions {
-
-
-
-            let first = planStep(
-
-                action,
-
-                from: Rollout(),
-
-                perception: p
-
-            )
-
-
-
-            let rest = bestContinuation(
-
-                from: first,
-
-                depth: planHorizon - 1,
-
-                perception: p,
-
-                candidateActions: candidateActions
-
-            )
-
-
-
-            let value = rest.value.isFinite
-
-                ? rest.value
-
-                : -1000
-
-
-
-            values[action] = value
-
-
-
-            if value > bestValue {
-
-                bestValue = value
-
-                bestSequence = [action] + rest.sequence
-
+            let candidateActions = actions.filter {
+                isPlanSimulationAction($0)
             }
 
-        }
-
-
-
-        candidateSequence = bestSequence
-
-        lastBestPlanValue = bestValue
-
-
-
-        for action in Array(values.keys) {
-
-            guard let value = values[action],
-
-                  value.isFinite else {
-
-                values[action] = -1000
-
-                continue
-
+            guard !candidateActions.isEmpty else {
+                candidateSequence = []
+                lastBestPlanValue = -.infinity
+                return [:]
             }
 
+            var values: [FrankensteinAction: Float] = [:]
+            var bestValue: Float = -.infinity
+            var bestSequence: [FrankensteinAction] = []
 
+            for action in candidateActions {
 
-            values[action] = planGain * (value - bestValue)
+                let state = planStep(
+                    action,
+                    from: Rollout(),
+                    perception: p
+                )
 
+                let value = terminalPlanValue(state, perception: p)
+
+                values[action] = value
+
+                if value > bestValue {
+                    bestValue = value
+                    bestSequence = [action]
+                }
+            }
+
+            candidateSequence = bestSequence
+            lastBestPlanValue = bestValue
+
+            for action in Array(values.keys) {
+                guard let value = values[action],
+                      value.isFinite else {
+                    values[action] = -1000
+                    continue
+                }
+
+                values[action] = planGain * (value - bestValue)
+            }
+
+            return values
         }
-
-
-
-        return values
-
-    }
 
 
 

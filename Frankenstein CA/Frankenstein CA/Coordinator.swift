@@ -2437,10 +2437,20 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     private func looseLetterBlock(forLetter letter: Character, atIndex index: Int) -> SCNNode? {
             guard let scene else { return nil }
-            return scene.rootNode.childNodes { node, _ in
+            
+            // 1. Try exact index-matched block first[cite: 2]
+            if let exactMatch = scene.rootNode.childNodes(passingTest: { node, _ in
+                node !== self.carriedNode && node.name == "LetterBlock_\(letter)_\(index)"
+            }).first {
+                return exactMatch
+            }
+            
+            // 2. Fallback: Find any loose block matching the letter if names/indices shifted[cite: 2]
+            return scene.rootNode.childNodes(passingTest: { node, _ in
                 node !== self.carriedNode &&
-                node.name == "LetterBlock_\(letter)_\(index)"
-            }.first
+                node.parent != nil &&
+                self.letter(ofBlock: node) == letter
+            }).first
         }
 
     /// Chooses the block and slot to work on, and sets a block into its slot
@@ -4570,4 +4580,3 @@ extension Coordinator {
     func attachExecutiveCA(_ ca: FrankensteinCA) { attachCA(ca) }
     func logExecutiveControlState(terrain: FrankensteinTerrainSample, locomotion: FrankensteinLocomotion) {}
 }
-
