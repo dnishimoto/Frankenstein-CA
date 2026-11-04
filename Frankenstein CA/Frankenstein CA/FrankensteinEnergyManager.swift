@@ -9,6 +9,7 @@ import Foundation
 import Combine
 
 final class FrankensteinEnergyManager: ObservableObject {
+    @Published var placedLetterCount: Int = 0
     @Published var powerLevel: Float = 100.0
     @Published var maxPower: Float = 100.0
     @Published var isRecharging: Bool = false

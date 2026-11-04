@@ -16,8 +16,10 @@ import SceneKit
 import UIKit
 
 struct ContentView: View {
-    @State private var resetTrigger = 0
+    @State private var placedLetterCount: Int = 0
     @StateObject private var energyManager = FrankensteinEnergyManager()
+    @State private var pendingActions: [FrankensteinAction] = []
+    @State private var resetTrigger = 0
     @State private var generation = 0
     @State private var liveCells = 0
     @State private var resetRequested = false
@@ -26,6 +28,32 @@ struct ContentView: View {
     @State private var qCells: [FrankensteinQDisplayCell] = []
     @State private var animationSpeed: Double = 1.0 // Added speed control state
 
+    // Dynamically tracks the mission state as letters are collected/placed
+    private var currentMissionSummary: String {
+        let targetWord = "FRANKENSTEIN"
+        let placedCount = energyManager.placedLetterCount
+
+        if placedCount >= targetWord.count {
+            return "Mission Complete: FRANKENSTEIN spelled successfully!"
+        }
+
+        let targetIndex = targetWord.index(
+            targetWord.startIndex,
+            offsetBy: placedCount
+        )
+        let currentLetter = targetWord[targetIndex]
+
+        return "Mission: Find and place letter '\(currentLetter)' (\(placedCount)/\(targetWord.count) placed)"
+    }
+    func placeLetter(_ letter: Character) {
+        let target = "FRANKENSTEIN"
+        let index = target.index(target.startIndex, offsetBy: placedLetterCount)
+
+        guard placedLetterCount < target.count,
+              letter == target[index] else { return }
+
+        placedLetterCount += 1
+    }
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -48,8 +76,7 @@ struct ContentView: View {
                     seenText = "I have not looked around yet."
                     planText = "I have not made a plan yet."
                     energyManager.reset()
-
-
+                    pendingActions = []
                 } label: {
                     Label("Reset", systemImage: "arrow.counterclockwise")
                 }
@@ -58,20 +85,23 @@ struct ContentView: View {
             .padding()
 
             FrankensteinSceneView(
-                            generation: $generation,
-                            liveCells: $liveCells,
-                            resetRequested: $resetRequested,
-                            seenText: $seenText,
-                            planText: $planText,
-                            qCells: $qCells,
-                            animateSpeed: $animationSpeed,
-                            onResetPerformed: {
-                                print("The scene and coordinator have successfully finished resetting!")
-                            })
-            
+                generation: $generation,
+                liveCells: $liveCells,
+                resetRequested: $resetRequested,
+                seenText: $seenText,
+                planText: $planText,
+                qCells: $qCells,
+                animateSpeed: $animationSpeed,
+                onResetPerformed: {
+                    print("The scene and coordinator have successfully finished resetting!")
+                })
+             
             //QNetworkGridPanel(cells: qCells)
-            
+             
             RobotMindPanel(seen: seenText, plan: planText)
+             
+            // Passes the dynamic mission summary into the panel queue
+            MissionPlanPanel(summary: currentMissionSummary, pendingActions: pendingActions)
 
             // Animation Speed Slider Control Row
             VStack(alignment: .leading, spacing: 4) {
@@ -181,6 +211,56 @@ struct QNetworkGridPanel: View {
     }
 }
 
+struct MissionPlanPanel: View {
+    let summary: String
+    let pendingActions: [FrankensteinAction]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label("Mission Plan & Queue", systemImage: "list.bullet.clipboard")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Text(pendingActions.isEmpty ? "Idle" : "Active")
+                    .font(.caption2.bold())
+                    .foregroundStyle(pendingActions.isEmpty ? Color.secondary : Color.green)
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(summary)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.primary)
+                        .textSelection(.enabled)
+
+                    if !pendingActions.isEmpty {
+                        Divider()
+
+                        Text(
+                            "Actions: "
+                            + pendingActions
+                                .map { String(describing: $0) }
+                                .joined(separator: " → ")
+                        )
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 80)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(.thinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 struct LetterCubesPlacementPanel: View {
     let targetWord = Array("FRANKENSTEIN")
     let placedLetters: [Character?]
@@ -239,14 +319,6 @@ struct RobotMindPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-           /* section(
-                title: "Frankenstein sees",
-                symbol: "eye",
-                text: seen
-            )*/
-
-            //Divider()
-
             section(
                 title: "Frankenstein is planning",
                 symbol: "point.topleft.down.curvedto.point.bottomright.up",
@@ -283,9 +355,3 @@ struct RobotMindPanel: View {
 #Preview {
     ContentView()
 }
-
-
-#Preview {
-    ContentView()
-}
-
