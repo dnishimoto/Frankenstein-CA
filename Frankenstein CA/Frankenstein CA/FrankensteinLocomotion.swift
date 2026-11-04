@@ -1,4 +1,3 @@
-
 import Foundation
 import SceneKit
 import simd
@@ -257,6 +256,12 @@ final class FrankensteinLocomotion {
 
     /// The Coordinator controls navigation heading.
     /// Locomotion applies the supplied heading without replacing it.
+    /// Chance of a random exploratory action; the mission phase sets it.
+    var explorationRate: Float = 0.12
+    /// True while the mission phase is delivering a carried letter; the CA
+    /// then keeps its plan instead of replacing it every decision.
+    var isDeliveringLetter = false
+
     func setHeading(_ value: Float) {
         guard value.isFinite else { return }
         output.heading = value
@@ -542,7 +547,8 @@ final class FrankensteinLocomotion {
             body: body,
             allowedActions: candidates,
             qValues: qValues,
-            exploration: 0.12
+            exploration: explorationRate,
+            isDeliveringLetter: isDeliveringLetter
         )
 
         // Reject any invalid CA output rather than executing it.

@@ -1,10 +1,10 @@
-
 import Foundation
 import Combine
 import SceneKit
 import UIKit
 
 final class FrankensteinCA: ObservableObject {
+    private(set) var lastBestPlanValue: Float = -.infinity
      private var previousRouteHeadings: [Float] = []
     private let routeChangeThreshold: Float = 0.50
     private let planHorizon = 5
@@ -60,7 +60,11 @@ final class FrankensteinCA: ObservableObject {
     private let steeringGain: Float = 1.2
     private let alignedHeadingTolerance: Float = 0.2
     private let steeringDeadband: Float = 0.12
-    private(set) var plannedSequence: [FrankensteinAction] = []
+    /// What the rollout predicts would be best. Advice only: the plan buffer
+    /// decides whether the committed continuation is kept or replaced.
+    private var candidateSequence: [FrankensteinAction] = []
+    /// The committed continuation Frankenstein is actually executing.
+    var plannedSequence: [FrankensteinAction] { planBuffer.pendingActions }
 
     private var noveltyScale: Float {
         max(0.08, 0.5 * powf(0.9997, Float(totalDecisions)))
@@ -106,6 +110,8 @@ final class FrankensteinCA: ObservableObject {
 
     private let goalProgressGain: Float = 1.6
     private let stuckThreshold: Float = 1.5
+    private var stallReplanDone = false
+    private var rolloutStepUpAllowed = false
 
     func reportActionOutcome(
         action: FrankensteinAction,
@@ -196,6 +202,7 @@ final class FrankensteinCA: ObservableObject {
         isRunning = false
         totalDecisions = 0
         stuckSeconds = 0
+        stallReplanDone = false
         outcomesObserved = 0
         consecutiveJumpCount = 0
         lastDecisionDescription = "Simulation reset"
@@ -204,7 +211,7 @@ final class FrankensteinCA: ObservableObject {
         planBuffer = FrankensteinPlanBuffer()
         goalContext = FrankensteinGoalContext()
         pendingGoalChange = nil
-        plannedSequence.removeAll()
+        candidateSequence.removeAll()
         visitCounts.removeAll()
         effectModel.removeAll()
         recentPositions.removeAll()
@@ -276,9 +283,15 @@ final class FrankensteinCA: ObservableObject {
         // When carrying a letter block, strongly prioritize walking toward the slot
         // and executing the place action so scoring doesn't override the delivery plan.
         if p.carryingLetterBlock {
+            // Placing drops the block where he stands, so the boost applies
+            // only once he is at the slot; before that placing is penalized.
+            let nearSlot = p.atGoal || (p.pathDistance.isFinite && p.pathDistance <= 1.8)
             if action == .placeObject {
-                score += 12.0 // Massive boost to prevent local overrides during delivery
-                return score
+                if nearSlot {
+                    score += 12.0 // Massive boost to prevent local overrides during delivery
+                    return score
+                }
+                score -= 6.0
             } else if action == .walk || action == .run || action == .stepForward {
                 score += 4.0 * alignment
             } else if action == .turnLeft || action == .turnRight {
@@ -329,11 +342,11 @@ final class FrankensteinCA: ObservableObject {
                 score += 8.0
             }
         case .backward:
-            if p.carryingLetterBlock {
-                score += 6.0
-            } else {
-                score += 0.1
-            }
+            // Backing away is a hazard response (handled by the clearance
+            // override above), not a standing bonus: giving it +6 while
+            // carrying made it beat turning and walking whenever he was even
+            // slightly misaligned with the slot.
+            score += 0.1
         case .walk, .run:
             score += (isTargetLetter ? 1.5 : 0.4) * alignment
             
@@ -400,36 +413,67 @@ final class FrankensteinCA: ObservableObject {
             return route[min(cell, route.count - 1)]
         }
 
-        private func planValues(
-            for actions: [FrankensteinAction],
-            perception p: FrankensteinCAPerception
-        ) -> [FrankensteinAction: Float] {
-            // Fallback to heading error if path field headings are temporarily empty
-            let activeHeadings = p.routeRelativeHeadings.isEmpty ? [p.headingError] : p.routeRelativeHeadings
+    private func planValues(
+        for actions: [FrankensteinAction],
+        perception p: FrankensteinCAPerception
+    ) -> [FrankensteinAction: Float] {
 
-            var values: [FrankensteinAction: Float] = [:]
-            var bestValue: Float = -.infinity
-            var bestSequence: [FrankensteinAction] = []
-
-            for action in actions {
-                let first = planStep(action, from: Rollout(), perception: p)
-                let rest = bestContinuation(from: first, depth: planHorizon - 1, perception: p)
-                values[action] = rest.value
-
-                if rest.value > bestValue {
-                    bestValue = rest.value
-                    bestSequence = [action] + rest.sequence
-                }
-            }
-
-            plannedSequence = bestSequence
-
-            for (action, value) in values {
-                values[action] = planGain * (value - bestValue)
-            }
-
-            return values
+        let candidateActions = actions.filter {
+            isPlanSimulationAction($0)
         }
+
+        guard !candidateActions.isEmpty else {
+            candidateSequence = []
+            lastBestPlanValue = -.infinity
+            return [:]
+        }
+
+        var values: [FrankensteinAction: Float] = [:]
+        var bestValue: Float = -.infinity
+        var bestSequence: [FrankensteinAction] = []
+
+        for action in candidateActions {
+
+            let first = planStep(
+                action,
+                from: Rollout(),
+                perception: p
+            )
+
+            let rest = bestContinuation(
+                from: first,
+                depth: planHorizon - 1,
+                perception: p,
+                candidateActions: candidateActions
+            )
+
+            let value = rest.value.isFinite
+                ? rest.value
+                : -1000
+
+            values[action] = value
+
+            if value > bestValue {
+                bestValue = value
+                bestSequence = [action] + rest.sequence
+            }
+        }
+
+        candidateSequence = bestSequence
+        lastBestPlanValue = bestValue
+
+        for action in Array(values.keys) {
+            guard let value = values[action],
+                  value.isFinite else {
+                values[action] = -1000
+                continue
+            }
+
+            values[action] = planGain * (value - bestValue)
+        }
+
+        return values
+    }
 
     private func clearance(
         forHeading heading: Float,
@@ -445,9 +489,51 @@ final class FrankensteinCA: ObservableObject {
         from state: Rollout,
         perception p: FrankensteinCAPerception
     ) -> Rollout {
-        var next = physicalStep(action, from: state, perception: p)
-        next.qSum = state.qSum + state.discount * goalQTerm(action)
-        next.discount = state.discount * planDiscount
+        var safeState = state
+
+        if !safeState.heading.isFinite {
+            safeState.heading = 0
+        }
+
+        if !safeState.progress.isFinite {
+            safeState.progress = 0
+        }
+
+        if !safeState.used.isFinite {
+            safeState.used = 0
+        }
+
+        if !safeState.qSum.isFinite {
+            safeState.qSum = 0
+        }
+
+        if !safeState.discount.isFinite {
+            safeState.discount = 1
+        }
+
+        var next = physicalStep(
+            action,
+            from: safeState,
+            perception: p
+        )
+
+        next.qSum = safeState.qSum
+            + safeState.discount * goalQTerm(action)
+
+        next.discount = safeState.discount * planDiscount
+
+        next.heading = wrapped(next.heading)
+        next.progress = max(0, next.progress)
+        next.used = max(0, next.used)
+
+        if !next.progress.isFinite {
+            next.progress = safeState.progress
+        }
+
+        if !next.qSum.isFinite {
+            next.qSum = safeState.qSum
+        }
+
         return next
     }
 
@@ -456,16 +542,28 @@ final class FrankensteinCA: ObservableObject {
         from state: Rollout,
         perception p: FrankensteinCAPerception
     ) -> Rollout {
+
         var next = state
 
+        // Reject actions without a supported physical model.
+        guard isPlanSimulationAction(action) else {
+            next.wasted += 1
+            return next
+        }
+
+        // Simulate turning.
         switch action {
         case .turnRight:
-            next.heading += planTurnPerAction
+            next.heading = wrapped(
+                state.heading + planTurnPerAction
+            )
             next.used = 0
             return next
 
         case .turnLeft:
-            next.heading -= planTurnPerAction
+            next.heading = wrapped(
+                state.heading - planTurnPerAction
+            )
             next.used = 0
             return next
 
@@ -473,42 +571,77 @@ final class FrankensteinCA: ObservableObject {
             break
         }
 
+        // Simulate supported movement.
         guard let motion = planSpeed(action) else {
             next.wasted += 1
             return next
         }
 
-        let routeNow = routeHeading(atProgress: state.progress, perception: p)
+        let routeNow = routeHeading(
+            atProgress: state.progress,
+            perception: p
+        )
+
         let error = wrapped(routeNow - state.heading)
 
-        var advance = motion.speed * planActionSeconds * cosf(error)
+        var advance = motion.speed
+            * planActionSeconds
+            * cosf(error)
 
-        if motion.blockable, advance > 0 {
-            let room = max(
-                0,
-                clearance(forHeading: state.heading, perception: p) - 0.3 - state.used
+        // Forward movement must respect available clearance.
+        if advance > 0 && motion.blockable {
+
+            let available = clearance(
+                forHeading: state.heading,
+                perception: p
             )
 
-            if advance > room {
-                advance = room
-            }
+            let room = max(
+                0,
+                available - 0.3 - state.used
+            )
 
+            advance = min(advance, room)
             next.used += advance
         }
 
-        if advance <= 0.01 && motion.speed > 0 {
+        // Penalize movement that fails to advance.
+        if advance <= 0.01 {
             next.wasted += 1
         }
 
-        next.progress = state.progress + advance
+        next.progress = state.progress + max(0, advance)
 
+        // Never exceed the remaining route distance.
         if p.pathDistance.isFinite {
-            next.progress = min(next.progress, p.pathDistance)
+            next.progress = min(
+                next.progress,
+                max(0, p.pathDistance)
+            )
         }
 
         return next
     }
+    private func isPlanSimulationAction(
+        _ action: FrankensteinAction
+    ) -> Bool {
+        switch action {
+        case .walk,
+             .run,
+             .turnLeft,
+             .turnRight,
+             .stepForward,
+             .crouch,
+             .crawl,
+             .roll:
+            return true
 
+        default:
+            // Do not simulate object manipulation, jumping,
+            // stepping, or reversing as ordinary forward movement.
+            return false
+        }
+    }
     private func terminalPlanValue(
         _ state: Rollout,
         perception p: FrankensteinCAPerception
@@ -530,33 +663,49 @@ final class FrankensteinCA: ObservableObject {
     private func bestContinuation(
         from state: Rollout,
         depth: Int,
-        perception p: FrankensteinCAPerception
+        perception p: FrankensteinCAPerception,
+        candidateActions: [FrankensteinAction]
     ) -> (value: Float, sequence: [FrankensteinAction]) {
+
         guard depth > 0 else {
-            return (terminalPlanValue(state, perception: p), [])
+            return (
+                terminalPlanValue(state, perception: p),
+                []
+            )
         }
 
-        var best: (value: Float, sequence: [FrankensteinAction]) = (-.infinity, [])
+        guard !candidateActions.isEmpty else {
+            return (
+                terminalPlanValue(state, perception: p),
+                []
+            )
+        }
 
-        // Expanded rollout action set including backward movement for retreat maneuvers
-        for action in [
-            FrankensteinAction.walk,
-            .run,
-            .turnLeft,
-            .turnRight,
-            .stepForward,
-            .backward,
-            .pushObject,
-            .kickObject
-        ] {
-            let result = bestContinuation(
-                from: planStep(action, from: state, perception: p),
-                depth: depth - 1,
+        var best: (
+            value: Float,
+            sequence: [FrankensteinAction]
+        ) = (-.infinity, [])
+
+        for action in candidateActions {
+
+            let simulatedState = planStep(
+                action,
+                from: state,
                 perception: p
             )
 
+            let result = bestContinuation(
+                from: simulatedState,
+                depth: depth - 1,
+                perception: p,
+                candidateActions: candidateActions
+            )
+
             if result.value > best.value {
-                best = (result.value, [action] + result.sequence)
+                best = (
+                    result.value,
+                    [action] + result.sequence
+                )
             }
         }
 
@@ -601,29 +750,27 @@ final class FrankensteinCA: ObservableObject {
         for action: FrankensteinAction,
         perception p: FrankensteinCAPerception
     ) -> Float {
-        guard !p.atGoal else { return 0 }
+        guard !p.atGoal,
+              p.headingError.isFinite else {
+            return 0
+        }
 
-        let error = p.headingError
-        let magnitude = min(1, abs(error) / 0.8)
+        let error = wrapped(p.headingError)
 
         switch action {
         case .turnRight:
-            if error > steeringDeadband { return steeringGain * magnitude }
-            if error < -steeringDeadband { return -steeringGain * magnitude * 0.8 }
-            return -0.2
+            let afterTurn = wrapped(error - planTurnPerAction)
+            return steeringGain * (abs(error) - abs(afterTurn))
 
         case .turnLeft:
-            if error < -steeringDeadband { return steeringGain * magnitude }
-            if error > steeringDeadband { return -steeringGain * magnitude * 0.8 }
-            return -0.2
+            let afterTurn = wrapped(error + planTurnPerAction)
+            return steeringGain * (abs(error) - abs(afterTurn))
 
         case .walk, .stepForward, .stepUp, .pushObject:
-            if abs(error) < alignedHeadingTolerance { return 0.35 }
-            return -0.6 * magnitude
+            return steeringGain * max(0, cosf(error) - 0.5)
 
         case .run:
-            if abs(error) < alignedHeadingTolerance { return 0.15 }
-            return -0.8 * magnitude
+            return 0.75 * steeringGain * max(0, cosf(error) - 0.5)
 
         default:
             return 0
@@ -751,60 +898,85 @@ final class FrankensteinCA: ObservableObject {
     /// planned action: the plan walks up to it, then kicks it out of the way
     /// (or lifts a block), then carries on to the goal.
     private func applyObstructionToPlan(
-            _ plan: inout [FrankensteinAction: Float],
-            allowed: [FrankensteinAction],
-            perception p: FrankensteinCAPerception
-        ) {
-            let reach = p.obstructionBlocked ? obstructionReach + 0.4 : obstructionReach
-            guard let action = p.obstructionAction,
-                  p.obstructionDistance <= reach,
-                  allowed.contains(action) else { return }
+        _ plan: inout [FrankensteinAction: Float],
+        allowed: [FrankensteinAction],
+        perception p: FrankensteinCAPerception
+    ) {
+        let reach = p.obstructionBlocked
+            ? obstructionReach + 0.4
+            : obstructionReach
 
-            let top = plan.values.max() ?? 0
-            plan[action] = top + (p.obstructionBlocked ? 2 * obstructionPlanBonus : obstructionPlanBonus)
-            plannedSequence = [action] + plannedSequence.filter { $0 != action }
+        guard let action = p.obstructionAction,
+              allowed.contains(action),
+              p.obstructionDistance.isFinite,
+              p.obstructionDistance <= reach else {
+            return
         }
 
-    private func updatePlanBuffer(
-            plan: [FrankensteinAction: Float],
-            allowed: [FrankensteinAction],
-            perception p: FrankensteinCAPerception?
-        ) {
-            if let change = pendingGoalChange {
-                planBuffer.invalidate(reason: change)
-                pendingGoalChange = nil
-            }
+        let bestValue = plan.values
+            .filter { $0.isFinite }
+            .max() ?? 0
 
-            let fresh: [PlanStep] = plannedSequence.map { action in
-                guard let p, !p.obstructionName.isEmpty else {
-                    return PlanStep(action: action, description: "\(action)")
-                }
-                if action == p.obstructionAction {
-                    return PlanStep(
-                        action: action,
-                        description: "\(action): clear \(p.obstructionName) out of the path"
-                    )
-                }
+        let bonus = p.obstructionBlocked
+            ? obstructionPlanBonus * 2
+            : obstructionPlanBonus
+
+        plan[action] = bestValue + bonus
+    }
+
+    private func updatePlanBuffer(
+        plan: [FrankensteinAction: Float],
+        allowed: [FrankensteinAction],
+        perception p: FrankensteinCAPerception?
+    ) {
+        if let change = pendingGoalChange {
+            // A changed mission goal cancels the previous continuation.
+            planBuffer.invalidate(reason: change)
+            pendingGoalChange = nil
+        }
+
+        // Convert the best predicted sequence into plan steps.
+        let fresh: [PlanStep] = candidateSequence.map { action in
+
+            guard let p, !p.obstructionName.isEmpty else {
                 return PlanStep(
                     action: action,
-                    description: "\(action): toward \(p.obstructionName) (in the way)"
+                    description: "\(action)"
                 )
             }
 
-            var headRegret: Float = 0
-            if let head = planBuffer.currentStep,
-               let bestValue = plan.values.max(),
-               let headValue = plan[head.action] {
-                headRegret = max(0, bestValue - headValue)
+            if action == p.obstructionAction {
+                return PlanStep(
+                    action: action,
+                    description: "\(action): clear \(p.obstructionName) out of the path"
+                )
             }
 
-            planBuffer.reconcile(
-                fresh: fresh,
-                headRegret: headRegret,
-                allowed: allowed,
-                regretMargin: planCommitmentMargin
+            return PlanStep(
+                action: action,
+                description: "\(action): toward \(p.obstructionName) (in the way)"
             )
         }
+
+        // Measure whether the current plan's next action has become inferior.
+        var headRegret: Float = 0
+
+        if let head = planBuffer.currentStep,
+           let bestValue = plan.values.max(),
+           let headValue = plan[head.action] {
+
+            headRegret = max(0, bestValue - headValue)
+        }
+
+        // Preserve the existing plan unless the new candidate
+        // is sufficiently better or the current plan is invalid.
+        planBuffer.reconcile(
+            fresh: fresh,
+            headRegret: headRegret,
+            allowed: allowed,
+            regretMargin: planCommitmentMargin
+        )
+    }
 
  
     func decideAction(
@@ -817,8 +989,8 @@ final class FrankensteinCA: ObservableObject {
     ) -> FrankensteinAction {
 
         guard !allowedActions.isEmpty else {
-            lastDecisionDescription = "No permitted action"
-            return .walk
+            lastDecisionDescription = "No permitted action: safe stop"
+            return .recover
         }
 
         setQValues(qValues)
@@ -826,20 +998,32 @@ final class FrankensteinCA: ObservableObject {
 
         let p = currentPerception()
 
-        // MARK: - Preserve the delivery route
+        // A changed mission goal always cancels the continuation, including
+        // during delivery (updatePlanBuffer is skipped while a step is live).
+        if let change = pendingGoalChange {
+            planBuffer.invalidate(reason: change)
+            pendingGoalChange = nil
+            candidateSequence.removeAll()
+        }
 
-        // A changed path-field heading does not automatically cancel
-        // the delivery plan. The path can adapt around obstacles while
-        // the mission destination remains the letter slot.
-        if let p,
-           routeHasChanged(p.routeRelativeHeadings),
-           !isDeliveringLetter {
+        // A stalled movement is a legitimate reason to rebuild the
+        // continuation, delivery included. The destination is untouched.
+        // Once per stall: re-armed when the stall has eased.
+        if stuckSeconds >= stuckThreshold, !stallReplanDone {
+            planBuffer.invalidate(reason: "Movement stalled: rebuilding continuation")
+            candidateSequence.removeAll()
+            stallReplanDone = true
+        } else if stuckSeconds < 0.5 {
+            stallReplanDone = false
+        }
 
-            planBuffer.invalidate(
-                reason: "Pathfield changed: reconsidering route around obstruction"
-            )
-
-            plannedSequence.removeAll()
+        // Only invalidate the plan if the actual mission goal changes or a step becomes impossible.
+        // Don't drop the plan merely for path/route changes unless the new route is deeply incompatible.
+        // This preserves mission intent through minor replanning and local navigation changes.
+        if let p, routeHasChanged(p.routeRelativeHeadings) {
+            // If the plan's current step is no longer allowed, it's dropped below. Otherwise, keep adapting.
+            // Do not call planBuffer.invalidate here; allow local replanning to adapt the route.
+            // (Handled below if a step is not allowed.)
         }
 
         let stateKey = p?.stateKey ?? "none"
@@ -852,7 +1036,7 @@ final class FrankensteinCA: ObservableObject {
                 perception: p
             )
         } else {
-            plannedSequence = []
+            candidateSequence = []
             plan = [:]
         }
 
@@ -947,232 +1131,41 @@ final class FrankensteinCA: ObservableObject {
 
         var selected = best
 
-        func decideAction(
-                terrain: FrankensteinTerrainSample,
-                body: FrankensteinBodyState,
-                allowedActions: [FrankensteinAction],
-                qValues: [FrankensteinAction: Float],
-                exploration: Float = 0,
-                isDeliveringLetter: Bool = false
-            ) -> FrankensteinAction {
-
-                guard !allowedActions.isEmpty else {
-                    lastDecisionDescription = "No permitted action"
-                    return .walk
-                }
-
-                setQValues(qValues)
-                planQValues = qValues
-
-                let p = currentPerception()
-
-                // MARK: - Preserve the delivery route
-
-                if let p,
-                   routeHasChanged(p.routeRelativeHeadings),
-                   !isDeliveringLetter {
-
-                    planBuffer.invalidate(
-                        reason: "Pathfield changed: reconsidering route around obstruction"
-                    )
-
-                    plannedSequence.removeAll()
-                }
-
-                let stateKey = p?.stateKey ?? "none"
-
-                var plan: [FrankensteinAction: Float]
-
-                if let p {
-                    plan = planValues(
-                        for: allowedActions,
-                        perception: p
-                    )
+        if let head = planBuffer.currentStep {
+            if allowedActions.contains(head.action) {
+                if isDeliveringLetter {
+                    // Delivery: the plan is authoritative while the step is legal.
+                    selected = head.action
+                } else if let headParts = allParts[head.action],
+                          head.action == best ||
+                          bestParts.total - headParts.total <= planCommitmentMargin {
+                    // Otherwise the plan holds unless scoring clearly disagrees.
+                    selected = head.action
                 } else {
-                    plannedSequence = []
-                    plan = [:]
-                }
-
-                if let p {
-                    applyObstructionToPlan(
-                        &plan,
-                        allowed: allowedActions,
-                        perception: p
-                    )
-                }
-
-                updatePlanBuffer(
-                    plan: plan,
-                    allowed: allowedActions,
-                    perception: p
-                )
-
-                // MARK: - Score permitted actions (used for fallback/best evaluation)
-
-                var best = allowedActions[0]
-
-                var bestParts = scoreParts(
-                    for: best,
-                    perception: p,
-                    terrain: terrain,
-                    plan: plan
-                )
-
-                var allParts: [FrankensteinAction: ScoreParts] = [
-                    best: bestParts
-                ]
-
-                lastScoreBreakdown.removeAll()
-
-                lastScoreBreakdown[best] = String(
-                    format: "Q:%.2f | Pred:%.2f | Steer:%.2f | Clear:%.2f | Terr:%.2f | Plan:%.2f | Nov:%.2f | Act:%.2f  -> Total:%.2f",
-                    bestParts.q,
-                    bestParts.goal,
-                    bestParts.steering,
-                    bestParts.clearance,
-                    bestParts.terrain,
-                    bestParts.plan,
-                    bestParts.novelty,
-                    bestParts.activity,
-                    bestParts.total
-                )
-
-                for action in allowedActions.dropFirst() {
-
-                    let parts = scoreParts(
-                        for: action,
-                        perception: p,
-                        terrain: terrain,
-                        plan: plan
-                    )
-
-                    allParts[action] = parts
-
-                    lastScoreBreakdown[action] = String(
-                        format: "Q:%.2f | Pred:%.2f | Steer:%.2f | Clear:%.2f | Terr:%.2f | Plan:%.2f | Nov:%.2f | Act:%.2f  -> Total:%.2f",
-                        parts.q,
-                        parts.goal,
-                        parts.steering,
-                        parts.clearance,
-                        parts.terrain,
-                        parts.plan,
-                        parts.novelty,
-                        parts.activity,
-                        parts.total
-                    )
-
-                    if parts.total > bestParts.total {
-                        best = action
-                        bestParts = parts
-                    }
-                }
-
-                // MARK: - Select action (Strict Plan Authoritativeness)
-
-                var selected = best
-
-                if let head = planBuffer.currentStep {
-                    if allowedActions.contains(head.action) {
-                        // Live scoring cannot change or override the active plan step.
-                        // Frankenstein strictly follows the plan unless it becomes illegal/unsafe.
-                        selected = head.action
-                    } else {
-                        // The current step is no longer permitted by terrain/safety constraints.
-                        planBuffer.overrideHead(
-                            with: PlanStep(
-                                action: best,
-                                description: "\(best)"
-                            ),
-                            reason: isDeliveringLetter
-                                ? "delivery step no longer permitted; safe replan"
-                                : "current step no longer permitted"
-                        )
-
-                        selected = best
-                    }
-
-                } else {
-
                     planBuffer.overrideHead(
-                        with: PlanStep(
-                            action: best,
-                            description: "\(best)"
-                        ),
-                        reason: "no plan; chose \(best)"
+                        with: PlanStep(action: best, description: "\(best)"),
+                        reason: "scoring overrode \(head.action) with \(best)"
                     )
-
                     selected = best
                 }
-
-                // MARK: - Exploration
-
-                let epsilon: Float
-
-                if isDeliveringLetter {
-                    epsilon = 0
-                } else if exploration >= 1 {
-                    epsilon = 1
-                } else if exploration <= 0 {
-                    epsilon = 0
-                } else {
-                    epsilon = min(
-                        0.25,
-                        max(exploration, randomExploration)
-                    )
-                }
-
-                var explored = false
-
-                if Float.random(in: 0..<1) < epsilon,
-                   let random = allowedActions
-                    .filter({ $0 != .recover && $0 != selected })
-                    .randomElement() {
-
-                    selected = random
-                    explored = true
-
-                    planBuffer.overrideHead(
-                        with: PlanStep(
-                            action: random,
-                            description: "\(random) (exploring)"
-                        ),
-                        reason: "exploring \(random)"
-                    )
-                }
-
-                // MARK: - Record decision
-
-                recordVisit(
-                    action: selected,
-                    stateKey: stateKey
+            } else {
+                // The step is no longer permitted by terrain/safety constraints.
+                planBuffer.overrideHead(
+                    with: PlanStep(action: best, description: "\(best)"),
+                    reason: isDeliveringLetter
+                        ? "delivery step no longer permitted; safe replan"
+                        : "current step no longer permitted"
                 )
-
-                rememberDecision(
-                    selected,
-                    stateKey: stateKey,
-                    perception: p
-                )
-
-                let queue = planBuffer.pendingActions
-                    .prefix(4)
-                    .map { String(describing: $0) }
-                    .joined(separator: " > ")
-
-                let missionLabel = isDeliveringLetter
-                    ? "LETTER DELIVERY COMMITTED"
-                    : "Normal planning"
-
-                lastDecisionDescription =
-                    "\(missionLabel) | " +
-                    "\(explored ? "Exploring" : "Executing") \(selected) | " +
-                    "\(goalContext.summary) | " +
-                    "Queue: \(queue.isEmpty ? "empty" : queue) | " +
-                    "Plan: \(planBuffer.lastReplanReason) " +
-                    "(\(planBuffer.replanCount)) | " +
-                    "State: \(stateKey)"
-
-                return selected
+                selected = best
             }
+        } else {
+            planBuffer.overrideHead(
+                with: PlanStep(action: best, description: "\(best)"),
+                reason: "no plan; chose \(best)"
+            )
+            selected = best
+        }
+
         // MARK: - Exploration
 
         let epsilon: Float
@@ -1234,6 +1227,16 @@ final class FrankensteinCA: ObservableObject {
         let missionLabel = isDeliveringLetter
             ? "LETTER DELIVERY COMMITTED"
             : "Normal planning"
+        
+        print("""
+        [PLAN DIAGNOSTIC]
+        Heading error: \(p?.headingError ?? 0)
+        Left plan value: \(plan[.turnLeft] ?? 0)
+        Right plan value: \(plan[.turnRight] ?? 0)
+        Current plan: \(planBuffer.currentStep?.action as Any)
+        Candidate sequence: \(candidateSequence)
+        Last best plan value: \(lastBestPlanValue)
+        """)
 
         lastDecisionDescription =
             "\(missionLabel) | " +
@@ -1296,8 +1299,11 @@ final class FrankensteinCA: ObservableObject {
     private func routeHasChanged(
         _ headings: [Float]
     ) -> Bool {
-        guard !previousRouteHeadings.isEmpty,
-              !headings.isEmpty else {
+        guard !headings.isEmpty else {
+            return false
+        }
+
+        guard !previousRouteHeadings.isEmpty else {
             previousRouteHeadings = headings
             return false
         }
@@ -1307,23 +1313,33 @@ final class FrankensteinCA: ObservableObject {
             previousRouteHeadings.count
         )
 
+        guard count > 0 else {
+            return false
+        }
+
         var maximumChange: Float = 0
 
         for index in 0..<count {
+            guard headings[index].isFinite,
+                  previousRouteHeadings[index].isFinite else {
+                continue
+            }
+
             let difference = abs(
-                wrapped(headings[index] - previousRouteHeadings[index])
+                wrapped(
+                    headings[index] - previousRouteHeadings[index]
+                )
             )
 
             maximumChange = max(maximumChange, difference)
         }
 
-        let changed =
-            maximumChange >= routeChangeThreshold ||
-            headings.count != previousRouteHeadings.count
+        guard maximumChange >= routeChangeThreshold else {
+            return false
+        }
 
         previousRouteHeadings = headings
-
-        return changed
+        return true
     }
     private func countLiveCells() -> Int {
         grid.reduce(0) { $0 + $1.filter { $0 }.count }
@@ -1339,3 +1355,4 @@ final class FrankensteinCA: ObservableObject {
     
  
 }
+
