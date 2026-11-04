@@ -335,42 +335,34 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private let manipulationDistance: Float = 1.0
     private let minimumManipulationAlignment: Float = 0.7
 
-    /// What the path field, spline and outcome reward aim at right now: the
-    /// recharge station when power is low, otherwise the letter mission's
-    /// block (to fetch) or slot (to fill).
-    private var missionGoalNode: SCNNode? {
-        if needsRecharge {
-            return rechargeStationNode
-        }
-
-        if carryingDog {
-            return nil
-        }
-
-        if carriedNode == nil, let dog = dogTarget {
-            return dog
-        }
-
-        guard letterTargetIndex != nil else {
-            return nil
-        }
-
-        if carryingLetterBlock {
-            return letterSlotTarget
-        }
-
-        return letterBlockTarget
-    }
-
     /// The spatial target for the current mission. It comes only from the
     /// supervisor's phase (updated earlier in the same frame); no other
     /// routine assigns a mission target. Obstacles on the way are handled
     /// tactically (the path field routes around them, runAssist clears
     /// them, the CA plans the clearing action) and never replace this goal.
     private var goalNode: SCNNode? {
-        resolveMissionGoal()
+        missionSupervisor.goalTarget
     }
 
+    /// LOCK: the Coordinator provides the phase's target; the supervisor owns
+    /// the plan queue and decides what the mission is doing. Runs once per
+    /// frame after the supervisor's decision.
+    private var missionPlansWired = false
+    private func syncMissionQueue() {
+        if !missionPlansWired {
+            missionPlansWired = true
+            missionSupervisor.onPlanEvent = { [weak self] message in
+                self?.publishDebug("[PLAN QUEUE] \(message)")
+            }
+        }
+        missionSupervisor.provideMissionTarget(
+            resolveMissionGoal(),
+            for: missionDecision,
+            now: currentFrameTime
+        )
+    }
+
+    /// LOCK: the spatial target for each supervisor phase.
     private func resolveMissionGoal() -> SCNNode? {
         switch missionDecision.phase {
         case .emergencyRecharge, .recharge:
@@ -397,6 +389,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     /// Logs phase and target together whenever either changes, so a
     /// supervisor/target mismatch shows up at once.
     private var lastMissionSyncKey = ""
+    /// LOCK: logs phase/target mismatches; verified by review.
     private func validateMissionTarget() {
         let targetName = goalNode?.name ?? "nil"
         let key = "\(missionDecision.phase.rawValue)|\(targetName)|\(carryingLetterBlock)"
@@ -1095,6 +1088,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         updateMissionSupervisor()
         updateLetterMission()
         updateMissionSupervisor()
+        syncMissionQueue()
         validateMissionTarget()
 
         if let textGeo = powerMeterNode?.geometry as? SCNText {
@@ -2541,9 +2535,18 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         // A letterless block on the path, or sitting on top of the letter
         // block he is after, is cleared before he continues.
-        if let blocker = pathBlocker(character: character),
-           clearBlocker(blocker, character: character) {
-            return
+        if let blocker = pathBlocker(character: character) {
+            missionSupervisor.submitTacticalPlan(
+                .clearObstacle,
+                target: blocker,
+                reason: "\(blocker.name ?? "obstacle") on the route",
+                expiresAt: currentFrameTime + 4
+            )
+            if clearBlocker(blocker, character: character) {
+                return
+            }
+        } else {
+            missionSupervisor.completeTacticalPlan(.clearObstacle, because: "route is clear")
         }
 
         if carryingLetterBlock {
@@ -2569,6 +2572,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     /// Direction (x, z) the picked-up blocker will be thrown, away from the path.
     private var blockerThrowDirection: SIMD2<Float>?
 
+    /// LOCK: what counts as a loose blocker.
     private func isLooseBlocker(_ node: SCNNode) -> Bool {
         guard node.parent != nil, node !== carriedNode,
               let name = node.name else { return false }
@@ -2576,10 +2580,12 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     /// How far from the route (m) a blocker's centre must be to be clear of it.
+    /// LOCK: corridor half-width per blocker type.
     private func blockerClearance(_ node: SCNNode) -> Float {
         node.name == "Table" ? 1.0 : blockerPathClearance
     }
 
+    /// LOCK: point-to-polyline distance (pure geometry).
     private func distance(from point: SIMD2<Float>, toPolyline path: [SIMD2<Float>]) -> Float {
         guard path.count >= 2 else {
             return path.first.map { simd_distance(point, $0) } ?? .infinity
@@ -2699,6 +2705,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     /// Direction (x, z) perpendicular to the route, on the blocker's own
     /// side of it, so a kicked or thrown blocker leaves the path.
+    /// LOCK: side a kicked/thrown blocker leaves the route.
     private func asideDirection(for blocker: SCNNode, character: SCNNode) -> SIMD2<Float> {
         let c = character.presentation.worldPosition
         let b = blocker.presentation.worldPosition
@@ -3527,6 +3534,7 @@ private func isLetterBlockName(_ name: String?) -> Bool {
         if let waypoint = platformDetourWaypoint {
             if currentFrameTime >= platformDetourUntil || simd_distance(here, waypoint) < 0.5 {
                 platformDetourWaypoint = nil
+                missionSupervisor.completeTacticalPlan(.stepAroundObstacle, because: "passed \(platformDetourName)")
                 publishDebug("Detour: passed \(platformDetourName)")
             } else {
                 let dx = waypoint.x - here.x
@@ -3557,6 +3565,11 @@ private func isLetterBlockName(_ name: String?) -> Bool {
         platformDetourWaypoint = waypoint
         platformDetourName = terrain.objectName
         platformDetourUntil = currentFrameTime + 6
+        missionSupervisor.submitTacticalPlan(
+            .stepAroundObstacle,
+            reason: "cannot climb \(terrain.objectName)",
+            expiresAt: platformDetourUntil
+        )
         let dx = waypoint.x - here.x
         let dz = waypoint.y - here.y
         perception.headingError = wrappedAngle(atan2(-dx, -dz) - heading)
@@ -3882,7 +3895,7 @@ private func isLetterBlockName(_ name: String?) -> Bool {
         scene: SCNScene,
         time: TimeInterval
     ) {
-        guard let goal = missionGoalNode else {
+        guard let goal = goalNode else {
             return
         }
 
@@ -4414,6 +4427,7 @@ private func isLetterBlockName(_ name: String?) -> Bool {
         Visible objects: \(visibleObjects.count)
         Recharge distance: \(String(format: "%.2f", Double(rechargePlatformDistance))) m
         CA path distance: \(pathText) m
+        Mission queue: \(missionSupervisor.planSummary)
         CA plan: \(ca?.plannedSequence.map { String(describing: $0) }.joined(separator: " > ") ?? "n/a")
         """
         DispatchQueue.main.async { [weak self] in

@@ -1,4 +1,3 @@
-
 //
 //  FrankensteinMissionSupervisor.swift
 //  Frankenstein CA
@@ -7,6 +6,7 @@
 //
 
 import Foundation
+import SceneKit
 
 /// Authoritative supervisor governing macro-phases,
 /// mission priorities, and task safety.
@@ -28,6 +28,75 @@ final class FrankensteinMissionSupervisor {
     private(set) var planBlocked: Bool = false
 
     private(set) var planFailureReason: String?
+
+    // MARK: - Plan queue
+    //
+    // The supervisor owns the mission plan queue. The Coordinator provides
+    // plans (the spatial target for the phase, and the tactical plans it
+    // discovers on the way); the supervisor decides which are accepted, which
+    // lapse, and what the mission is doing now. It never selects physical
+    // actions.
+
+    private let planQueue = MissionPlanQueue()
+
+    /// Called for each plan event (accepted, rejected, finished, lapsed).
+    var onPlanEvent: ((String) -> Void)? {
+        get { planQueue.onEvent }
+        set { planQueue.onEvent = newValue }
+    }
+
+    /// The node the mission is heading for. Tactical plans never change it.
+    var goalTarget: SCNNode? { planQueue.anchorTarget }
+
+    /// What is happening now: the top tactical plan, else the mission anchor.
+    var activePlanAction: CharacterAction? { planQueue.activeAction }
+
+    var planSummary: String { planQueue.summary }
+
+    /// The Coordinator provides the spatial target for the current phase.
+    /// The supervisor maps the phase to the mission anchor.
+    func provideMissionTarget(
+        _ target: SCNNode?,
+        for decision: FrankensteinMissionDecision,
+        now: TimeInterval
+    ) {
+        let action: CharacterAction
+        switch decision.phase {
+        case .emergencyRecharge, .recharge: action = .recharge
+        case .fetchLetter:                  action = .fetchLetter
+        case .deliverLetter:                action = .deliverLetter
+        case .dogInteraction:               action = .dogInteraction
+        case .lettersComplete:              action = .idle
+        case .explore:                      action = .explore
+        }
+        planQueue.setAnchor(action: action, target: target, reason: decision.subGoal)
+        planQueue.update(now: now)
+    }
+
+    /// The Coordinator offers a tactical plan it discovered on the way.
+    /// Accepted only while the mission has something to head for; the
+    /// anchor itself is never replaced by it.
+    @discardableResult
+    func submitTacticalPlan(
+        _ action: CharacterAction,
+        target: SCNNode? = nil,
+        reason: String,
+        expiresAt: TimeInterval
+    ) -> Bool {
+        guard planQueue.anchorTarget != nil else { return false }
+        switch action {
+        case .stepAroundObstacle, .clearObstacle, .realignHeading:
+            planQueue.push(action, target: target, reason: reason, expiresAt: expiresAt)
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// The Coordinator reports that a tactical plan is done.
+    func completeTacticalPlan(_ action: CharacterAction, because why: String = "done") {
+        planQueue.finish(action, because: why)
+    }
 
     // MARK: - Mission Update
 
