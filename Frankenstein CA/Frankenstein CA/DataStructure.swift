@@ -9,7 +9,17 @@ import Foundation
 import SwiftUI
 import SceneKit
 
-
+struct FrankensteinActionEvaluation {
+    let action: FrankensteinAction
+    let succeeded: Bool
+    let reward: Float
+    let goalProgress: Float
+    let pathProgress: Float
+    let madeProgress: Bool
+    let wasBlocked: Bool
+    let wasFutile: Bool
+    let failureReason: String?
+}
 
 struct FrankensteinPlanAssessment {
 

@@ -5,6 +5,7 @@ import SwiftUI
 import UIKit
 
 final class Coordinator: NSObject, SCNSceneRendererDelegate {
+    private var lastOutcomeEvaluationTime: TimeInterval = 0
     var isResetPending = false
     private let pushBlockSpeed: Float = 0.6
     var animationSpeed: Double = 0
@@ -323,6 +324,11 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     private var missionPlansWired = false
     
+    // MARK: - Heading Control
+
+    // MARK: - Reinforcement Learning
+
+
     private func syncMissionQueue() {
         guard let ca else { return }
         let queue = ca.missionQueue
@@ -3262,6 +3268,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         }
     }
 
+    // MARK: - Mission-Queue-Based Action Outcome Evaluation
+
     private func evaluateActionOutcome(
         output: FrankensteinLocomotionOutput,
         actualDisplacement: Float?,
@@ -3269,87 +3277,250 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         scene: SCNScene,
         time: TimeInterval
     ) {
-        guard let goal = goalNode else { return }
+        guard let ca else { return }
 
+        let queue = ca.missionQueue
         let action = output.action
+
+        // Only evaluate an action that belongs to the active CA mission task.
+        // This prevents feedback from being assigned to an unrelated action.
+        guard let activeTask = queue.currentTask,
+              activeTask.actions.contains(action) else {
+            outcomeWindowElapsedTime = 0
+            outcomeWindowDisplacement = 0
+            outcomeWindowGoalProgress = 0
+            outcomeWindowPathProgress = 0
+            lastEvaluatedActionName = ""
+            lastOutcomeEvaluationTime = time
+            return
+        }
+
         let actionName = String(describing: action)
 
-        let currentPosition = character.presentation.worldPosition
-        let goalPosition = goal.presentation.worldPosition
+        // The mission queue is authoritative for the target.
+        let goal = queue.currentTargetNode
+        let goalID = goal.map { ObjectIdentifier($0) }
 
-        let currentDx = Float(currentPosition.x - goalPosition.x)
-        let currentDz = Float(currentPosition.z - goalPosition.z)
-        let currentDistance = sqrt(currentDx * currentDx + currentDz * currentDz)
-        
-        let goalID = ObjectIdentifier(goal)
+        // MARK: - Calculate actual frame time
+
+        let fallbackDelta = max(
+            1.0 / 60.0,
+            Double(max(0, dtFromLastFrame))
+        )
+
+        let rawDelta: TimeInterval
+
+        if lastOutcomeEvaluationTime > 0,
+           time.isFinite,
+           time > lastOutcomeEvaluationTime {
+
+            rawDelta = time - lastOutcomeEvaluationTime
+
+        } else {
+            rawDelta = fallbackDelta
+        }
+
+        let frameDelta = min(max(rawDelta, 0.001), 0.1)
+
+        lastOutcomeEvaluationTime = time
+
+        // MARK: - Measure distance to the mission target
+
+        var currentDistance: Float?
+
+        if let goal {
+            let characterPosition = character.presentation.worldPosition
+            let goalPosition = goal.presentation.worldPosition
+
+            let dx = Float(characterPosition.x - goalPosition.x)
+            let dz = Float(characterPosition.z - goalPosition.z)
+
+            let distance = sqrt(dx * dx + dz * dz)
+
+            if distance.isFinite {
+                currentDistance = distance
+            }
+        }
+
+        // MARK: - Reset when the mission target changes
 
         if goalID != lastGoalNodeID {
             lastGoalNodeID = goalID
-            lastGoalDistance = currentDistance
-            lastEvaluatedActionName = ""
+
+            lastGoalDistance = currentDistance ?? .infinity
+            lastEvalPathDistance = pathGoalDistance
 
             outcomeWindowElapsedTime = 0
             outcomeWindowDisplacement = 0
             outcomeWindowGoalProgress = 0
             outcomeWindowPathProgress = 0
+
+            lastEvaluatedActionName = ""
+        }
+
+        // MARK: - Reset when the executed action changes
+
+        if actionName != lastEvaluatedActionName {
+            lastEvaluatedActionName = actionName
+
+            outcomeWindowElapsedTime = 0
+            outcomeWindowDisplacement = 0
+            outcomeWindowGoalProgress = 0
+            outcomeWindowPathProgress = 0
+
+            lastGoalDistance = currentDistance ?? .infinity
             lastEvalPathDistance = pathGoalDistance
         }
 
-        let displacement = actualDisplacement ?? 0.0
-        outcomeWindowDisplacement += displacement
-        outcomeWindowElapsedTime += 0.016
+        // MARK: - Accumulate physical measurements
 
-        let goalProgress = lastGoalDistance - currentDistance
-        outcomeWindowGoalProgress = goalProgress
-        lastGoalDistance = currentDistance
+        let displacement: Float
 
-        let pathProgress = lastEvalPathDistance - pathGoalDistance
-        outcomeWindowPathProgress = pathProgress
-        lastEvalPathDistance = pathGoalDistance
-
-        let movementActions: Set<FrankensteinAction> = [
-            .walk, .run, .stepForward, .crouch, .crawl, .roll, .backward
-        ]
-
-        let turningActions: Set<FrankensteinAction> = [.turnLeft, .turnRight]
-
-        let madeRouteProgress = outcomeWindowPathProgress > 0.015
-        let madeGoalProgress = outcomeWindowGoalProgress > 0.001
-        let madeProgress = madeRouteProgress || madeGoalProgress
-
-        var reward: Float = 0.0
-
-        let nearbyClass: String? = {
-            if let detection = latestDetection {
-                return objectClass(for: detection.name)
-            } else if let target = pushTargetNode, let name = target.name {
-                return objectClass(for: name)
-            }
-            return nil
-        }()
-
-        if movementActions.contains(action) && abs(outcomeWindowDisplacement) < noProgressThreshold && !madeProgress {
-            consecutiveNoProgressCount += 1
-            reward += noProgressPenalty
-
-            if let nearbyClass {
-                executive.field.learnClassOutcome(className: nearbyClass, blocked: true)
-            }
-        } else if madeProgress {
-            consecutiveNoProgressCount = 0
-            reward += max(0, outcomeWindowPathProgress) * goalProgressRewardScale
-            reward += max(0, outcomeWindowGoalProgress) * goalProgressRewardScale
-
-            if let nearbyClass {
-                executive.field.learnClassOutcome(className: nearbyClass, blocked: false)
-            }
-        } else if turningActions.contains(action) {
-            // Turning in place receives no automatic penalty
+        if let actualDisplacement,
+           actualDisplacement.isFinite {
+            displacement = actualDisplacement
         } else {
-            reward += outcomeWindowDisplacement * 0.05
+            displacement = 0
         }
 
-        locomotion.updateReinforcement(reward: reward, for: actionName)
+        outcomeWindowDisplacement += displacement
+        outcomeWindowElapsedTime += frameDelta
+
+        // Accumulate progress toward the mission target.
+        if let currentDistance,
+           lastGoalDistance.isFinite {
+
+            let progress = lastGoalDistance - currentDistance
+
+            if progress.isFinite {
+                outcomeWindowGoalProgress += progress
+            }
+        }
+
+        if let currentDistance {
+            lastGoalDistance = currentDistance
+        }
+
+        // Accumulate progress along the planned route.
+        if pathGoalDistance.isFinite,
+           lastEvalPathDistance.isFinite {
+
+            let pathProgress = lastEvalPathDistance - pathGoalDistance
+
+            if pathProgress.isFinite {
+                outcomeWindowPathProgress += pathProgress
+            }
+        }
+
+        lastEvalPathDistance = pathGoalDistance
+
+        // MARK: - Classify the action
+
+        let movementActions: Set<FrankensteinAction> = [
+            .walk,
+            .run,
+            .stepForward,
+            .backward,
+            .crouch,
+            .crawl,
+            .roll,
+            .jump,
+            .stepUp,
+            .stepDown,
+            .pushObject
+        ]
+
+        let turningActions: Set<FrankensteinAction> = [
+            .turnLeft,
+            .turnRight
+        ]
+
+        let isMovementAction = movementActions.contains(action)
+        let isTurningAction = turningActions.contains(action)
+
+        // Interaction actions are evaluated through their own confirmed
+        // physical outcomes, not by measuring character displacement.
+        guard isMovementAction || isTurningAction else {
+            return
+        }
+
+        // MARK: - Wait for a complete evaluation window
+
+        guard outcomeWindowElapsedTime >= outcomeWindowDuration else {
+            return
+        }
+
+        let windowDuration = Float(outcomeWindowElapsedTime)
+
+        guard windowDuration > 0,
+              windowDuration.isFinite else {
+            return
+        }
+
+        // MARK: - Calculate actual progress
+
+        let hasGeometricTarget =
+            goal != nil || pathGoalDistance.isFinite
+
+        let measuredProgress: Float
+
+        if hasGeometricTarget {
+            // Use the strongest geometric progress measurement.
+            // This avoids counting the same progress twice.
+            measuredProgress = max(
+                outcomeWindowGoalProgress,
+                outcomeWindowPathProgress
+            )
+        } else {
+            // Without a geometric target, use actual forward displacement.
+            measuredProgress = outcomeWindowDisplacement
+        }
+
+        let goalProgressRate = measuredProgress / windowDuration
+
+        // MARK: - Detect lack of progress
+
+        let madeProgress = measuredProgress > noProgressThreshold
+
+        let displacementIsSmall =
+            abs(outcomeWindowDisplacement) < noProgressThreshold
+
+        if isMovementAction && !madeProgress && displacementIsSmall {
+            consecutiveNoProgressCount += 1
+        } else if madeProgress {
+            consecutiveNoProgressCount = 0
+        }
+
+        // MARK: - Confirm whether an obstacle caused the blockage
+
+        let obstacleDetected =
+            latestTerrainSample.terrain == .hurdle ||
+            pushTargetNode != nil
+
+        let blocked =
+            isMovementAction &&
+            !madeProgress &&
+            displacementIsSmall &&
+            obstacleDetected
+
+        // MARK: - Send outcome to FrankensteinCA
+
+        ca.reportActionOutcome(
+            action: action,
+            goalProgressRate: goalProgressRate,
+            windowDuration: windowDuration,
+            blocked: blocked
+        )
+
+        // MARK: - Prepare the next evaluation window
+
+        outcomeWindowElapsedTime = 0
+        outcomeWindowDisplacement = 0
+        outcomeWindowGoalProgress = 0
+        outcomeWindowPathProgress = 0
+
+        lastGoalDistance = currentDistance ?? .infinity
+        lastEvalPathDistance = pathGoalDistance
     }
 
     func randomFloat(in range: ClosedRange<Float> = 0.0...1.0) -> Float {
