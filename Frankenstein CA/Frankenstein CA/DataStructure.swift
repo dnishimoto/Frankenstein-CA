@@ -4,6 +4,12 @@
 //
 //  Created by David Nishimoto on 10/24/26.
 //
+///
+//  DataStructure.swift
+//  Frankenstein CA
+//
+//  Created by David Nishimoto on 10/24/26.
+//
 
 import Foundation
 import SwiftUI
@@ -384,6 +390,8 @@ struct FrankensteinCAPerception {
     var distantObjectSummary = ""
     var routeRelativeHeadings: [Float] = []
     var advisoryValues: [FrankensteinAction: Float] = [:]
+    /// Predicted outcome of each permitted action, made before the CA chooses.
+    var predictedOutcomes: [FrankensteinAction: FrankensteinPredictedOutcome] = [:]
     var stateKey = "none"
     var timestamp: TimeInterval = 0
 
@@ -447,6 +455,14 @@ struct FrankensteinPredictedOutcome {
     let fallRisk: Float
     let expectedGoalProgress: Float
     let confidence: Float
+    /// Estimated chance the action does what it is meant to do (0...1).
+    var successProbability: Float = 0.5
+    /// Estimated chance the action fails or produces no useful result (0...1).
+    var failureRisk: Float = 0.5
+    /// How far the object is expected to move, in metres (push, kick, throw).
+    var expectedObjectDisplacement: Float = 0
+    /// Chance the action removes the obstruction from the route (0...1).
+    var clearsObstruction: Float = 0
 }
 
 struct FrankensteinQUpdateRecord {
@@ -1004,6 +1020,5 @@ struct FrankensteinLearningMemory {
         actionValues[action, default: 0]
     }
 }
-
 
 

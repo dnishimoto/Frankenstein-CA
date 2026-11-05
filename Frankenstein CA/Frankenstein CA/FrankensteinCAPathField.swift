@@ -54,6 +54,15 @@ final class FrankensteinCAPathField {
 
     private var remembered: [String: RememberedObstacle] = [:]
 
+    /// Obstacles taken from Frankenstein's object memory. The list is replaced
+    /// on every update, so an object disappears from the route the moment the
+    /// memory forgets it, with no timer of its own.
+    private var memoryObstacles: [Obstacle] = []
+
+    func setObjectMemoryObstacles(_ obstacles: [Obstacle]) {
+        memoryObstacles = obstacles
+    }
+
     /// Extra traversal cost for a world position (x, z), from the Q floor
     /// grid. The route bends away from cells where his actions went badly
     /// (stuck, blocked, fell), so he moves toward objects over the ground
@@ -82,6 +91,7 @@ final class FrankensteinCAPathField {
 
     func reset() {
         remembered.removeAll()
+        memoryObstacles.removeAll()
         generation = 0
 
         classCost = [
@@ -163,8 +173,8 @@ final class FrankensteinCAPathField {
         }
 
         // Rasterize identified objects.
-        for item in remembered.values {
-            let obstacle = item.obstacle
+        let allObstacles = memoryObstacles + remembered.values.map(\.obstacle)
+        for obstacle in allObstacles {
             let cost = classCost[obstacle.className] ?? 12
 
             let minWorld = obstacle.center - obstacle.halfExtent -

@@ -1600,17 +1600,39 @@ final class FrankensteinCA: ObservableObject {
 
         var activity: Float = 0
 
+        var prediction: Float = 0
+
 
 
         var total: Float {
 
-            q + advisory + steering + clearance + terrain + goal + plan + novelty + activity
+            q + advisory + steering + clearance + terrain + goal + plan + novelty + activity + prediction
 
         }
 
     }
 
 
+
+    /// Predictive perception made before this decision. Actions that are
+    /// expected to fail, fall or go nowhere lose; actions expected to clear an
+    /// obstruction that is blocking the route win.
+    private func predictionScore(
+        for action: FrankensteinAction,
+        perception p: FrankensteinCAPerception
+    ) -> Float {
+        guard let outcome = p.predictedOutcomes[action] else { return 0 }
+
+        var score: Float = 0
+        score -= 2.5 * max(0, outcome.failureRisk - 0.35)
+        score -= 4.0 * outcome.fallRisk
+        if !p.obstructionName.isEmpty {
+            score += 3.0 * outcome.clearsObstruction
+        }
+        score += 4.0 * outcome.expectedGoalProgress * max(0, cosf(p.headingError))
+
+        return score * (0.5 + 0.5 * outcome.confidence)
+    }
 
     private func terrainScore(
 
@@ -1681,6 +1703,8 @@ final class FrankensteinCA: ObservableObject {
                 if let p {
 
                     parts.advisory = p.advisoryValues[action, default: 0]
+
+                    parts.prediction = predictionScore(for: action, perception: p)
 
                     parts.steering = steeringScore(for: action, perception: p)
 

@@ -208,6 +208,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private let qFloorGrid = FrankensteinQFloorGrid()
     private let predictivePerception = FrankensteinPredictivePerception()
     private var pendingPrediction: FrankensteinPredictedOutcome?
+    /// Predicted outcome of every permitted action, made before the CA chooses.
+    private var latestPredictions: [FrankensteinAction: FrankensteinPredictedOutcome] = [:]
     private var lastRecordedQUpdate = 0
     private var characterVerticalVelocity: Float = 0
     private var hasReportedFall = false
@@ -1144,12 +1146,21 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             latestDetectionNodes = Dictionary(uniqueKeysWithValues: detailedDetections.map { (ObjectIdentifier($0.node), $0.info) })
             latestDetection = latestDetections.first
             pushTargetNode = findPushTargetNode(character: character, in: scene, detections: detailedDetections)
+            var wideScanRan = false
             if time - lastWideScanTime >= wideScanInterval {
                 lastWideScanTime = time
                 wideDetections = scanWideFieldOfView(from: character, in: scene)
+                wideScanRan = true
             }
             visibleObjects = mergeVisibleObjects(near: latestDetections, wide: wideDetections, character: character)
             objectMemory.observe(visibleObjects, time: time, isMovable: isMovableName)
+            if wideScanRan {
+                forgetObjectsScanConfirmsGone(
+                    character: character,
+                    in: scene,
+                    seenNames: Set(visibleObjects.map { $0.name })
+                )
+            }
             refreshMissionMemory(character: character, time: time)
 
             verifiedGroundSupport = verifySupportBeneathCharacter(character: character, in: scene)
@@ -1247,11 +1258,23 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             }
         }()
 
+        // Predict what each permitted action would do BEFORE the CA picks one,
+        // so the CA can avoid actions expected to fail and favour ones expected
+        // to clear an obstruction.
+        latestPredictions = predictivePerception.predictAll(
+            actions: perceivedActions,
+            terrain: latestTerrainSample,
+            body: locomotion.body,
+            objectObservation: objectObservation
+        )
+
         pushPerceptionToCA(terrain: latestTerrainSample, allowedActions: perceivedActions, time: time)
 
         let output = locomotion.step(deltaTime: dt, terrain: latestTerrainSample, actualDisplacement: actualDisplacement, objectObservation: objectObservation)
 
-        pendingPrediction = predictivePerception.predict(
+        // Keep the prediction made before the decision for the chosen action,
+        // so the measured result is compared with what was expected.
+        pendingPrediction = latestPredictions[output.action] ?? predictivePerception.predict(
             actionName: String(describing: output.action),
             terrain: latestTerrainSample,
             body: locomotion.body,
@@ -1343,18 +1366,25 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             }
             goalXZ = target
         }
+        // The route is planned from everything Frankenstein remembers, not only
+        // what is in view this frame. Memory forgets an object when a scan
+        // confirms it is gone (see forgetObjectsScanConfirmsGone).
+        let carriedName = carriedNode?.name
         var obstacles: [FrankensteinCAPathField.Obstacle] = []
-        for detection in detections {
-            let className = objectClass(for: detection.name)
-            if className == "rechargeStation" || detection.name.lowercased().contains("ceiling") { continue }
-            obstacles.append(
+        var memoryObstacles: [FrankensteinCAPathField.Obstacle] = []
+        for entry in objectMemory.objects.values {
+            if entry.name == carriedName { continue }
+            let className = objectClass(for: entry.name)
+            if className == "rechargeStation" || entry.name.lowercased().contains("ceiling") { continue }
+            memoryObstacles.append(
                 FrankensteinCAPathField.Obstacle(
-                    center: SIMD2<Float>(Float(detection.worldPosition.x), Float(detection.worldPosition.z)),
-                    halfExtent: SIMD2<Float>(Float(detection.dimensions.x) * 0.5, Float(detection.dimensions.z) * 0.5),
+                    center: SIMD2<Float>(entry.position.x, entry.position.z),
+                    halfExtent: SIMD2<Float>(entry.dimensions.x * 0.5, entry.dimensions.z * 0.5),
                     className: className
                 )
             )
         }
+        executive.field.setObjectMemoryObstacles(memoryObstacles)
         if let scene {
             for node in scene.rootNode.childNodes(passingTest: { node, _ in
                 (node.name ?? "").lowercased().contains("chasm") && node.geometry != nil
@@ -1672,6 +1702,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         
         applyMissionPhaseInfluence(to: &advisory, perception: perception, allowedActions: allowedActions)
         perception.advisoryValues = advisory
+        perception.predictedOutcomes = latestPredictions
         perception.stateKey = [
             String(describing: terrain.terrain),
             headingBand(perception.headingError),
@@ -2011,6 +2042,61 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             return name.hasPrefix("LetterBlock_") || name.hasPrefix("LetterSlot_") || name == self.dogName
         }) {
             rememberNode(node, time: 0)
+        }
+    }
+
+    /// Farthest remembered object a scan is trusted to confirm as gone.
+    private let memoryForgetRange: Float = 8
+
+    /// A remembered object is dropped only when it is inside the scan cone and
+    /// a ray to its last known position reaches that spot without meeting
+    /// anything. An object behind another one is occluded, not gone, so it is
+    /// kept. Objects outside the cone are kept until they are looked at again.
+    private func forgetObjectsScanConfirmsGone(
+        character: SCNNode,
+        in scene: SCNScene,
+        seenNames: Set<String>
+    ) {
+        let c = character.presentation.worldPosition
+        let halfAngle = wideScanHalfAngleDegrees * .pi / 180
+        let options: [String: Any] = [
+            SCNHitTestOption.ignoreHiddenNodes.rawValue: true,
+            SCNHitTestOption.backFaceCulling.rawValue: true
+        ]
+
+        for entry in Array(objectMemory.objects.values) where !seenNames.contains(entry.name) {
+            let dx = entry.position.x - Float(c.x)
+            let dz = entry.position.z - Float(c.z)
+            let distance = sqrt(dx * dx + dz * dz)
+            guard distance.isFinite, distance > 0.3, distance <= memoryForgetRange else { continue }
+
+            let bearing = wrappedAngle(atan2(-dx, -dz) - heading)
+            guard abs(bearing) <= halfAngle else { continue }
+
+            let rayY = entry.position.y + max(0.05, entry.dimensions.y * 0.25)
+            let origin = SCNVector3(Float(c.x), rayY, Float(c.z))
+            let end = SCNVector3(entry.position.x, rayY, entry.position.z)
+            let hits = scene.rootNode.hitTestWithSegment(from: origin, to: end, options: options)
+
+            var blocked = false
+            for hit in hits {
+                let hitNode = hit.node
+                guard !isCharacterPart(hitNode), !isFloorSurface(hitNode), !isQGridNode(hitNode) else { continue }
+                let target = pickupTarget(for: hitNode) ?? meaningfulDetectionParent(for: hitNode)
+                guard !isContainerNode(target), !isCharacterPart(target) else { continue }
+
+                let hx = Float(hit.worldCoordinates.x - c.x)
+                let hz = Float(hit.worldCoordinates.z - c.z)
+                if sqrt(hx * hx + hz * hz) < distance + 0.1 {
+                    blocked = true
+                    break
+                }
+            }
+
+            if !blocked {
+                objectMemory.forget(entry.name)
+                publishDebug("[OBJECT MEMORY] forgot \(entry.name): scan reached its last position and found nothing")
+            }
         }
     }
 
@@ -3346,6 +3432,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             let stateKeyBeforePickup = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
             let succeeded = attemptPickup()
             locomotion.reportPickupOutcome(succeeded: succeeded)
+            predictivePerception.observeInteraction(action: .liftObject, succeeded: succeeded)
             if let stateKeyBeforePickup {
                 reinforceOutcome(stateKey: stateKeyBeforePickup, action: .liftObject, reward: succeeded ? 1.0 : -0.5)
             }
@@ -3355,6 +3442,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             let stateKeyBeforePlace = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
             let ok = placeCarriedObjectAhead()
             locomotion.reportObjectActionOutcome(.placeObject, reward: ok ? 0.5 : -0.5)
+            predictivePerception.observeInteraction(action: .placeObject, succeeded: ok)
             if let stateKeyBeforePlace {
                 reinforceOutcome(stateKey: stateKeyBeforePlace, action: .placeObject, reward: ok ? 0.5 : -0.5)
             }
@@ -3364,6 +3452,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             let stateKeyBeforeThrow = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
             let ok = throwCarriedObjectAhead()
             locomotion.reportObjectActionOutcome(.throwObject, reward: ok ? 0.3 : -0.5)
+            predictivePerception.observeInteraction(action: .throwObject, succeeded: ok)
             if let stateKeyBeforeThrow {
                 reinforceOutcome(stateKey: stateKeyBeforeThrow, action: .throwObject, reward: ok ? 0.3 : -0.5)
             }
@@ -3486,9 +3575,13 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         let action = output.action
 
         // Only evaluate an action that belongs to the active CA mission task.
-        // This prevents feedback from being assigned to an unrelated action.
+        // A task with a bound action list owns exactly those actions. A task
+        // with an empty list (for example "Approach...") leaves the movement to
+        // the CA, so whatever movement the CA chose is that task's action and
+        // must be evaluated too; otherwise walking toward a goal is never scored.
+        // Feedback is still withheld when a bound task runs a different action.
         guard let activeTask = queue.currentTask,
-              activeTask.actions.contains(action) else {
+              activeTask.actions.isEmpty || activeTask.actions.contains(action) else {
             outcomeWindowElapsedTime = 0
             outcomeWindowDisplacement = 0
             outcomeWindowGoalProgress = 0
