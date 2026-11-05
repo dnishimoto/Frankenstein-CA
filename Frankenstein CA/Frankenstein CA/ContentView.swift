@@ -25,6 +25,7 @@ struct ContentView: View {
     @State private var resetRequested = false
     @State private var seenText = "I have not looked around yet."
     @State private var planText = "I have not made a plan yet."
+    @State private var missionText = "I have not made any goals yet"
     @State private var qCells: [FrankensteinQDisplayCell] = []
     @State private var animationSpeed: Double = 1.0 // Added speed control state
 
@@ -65,6 +66,7 @@ struct ContentView: View {
                 resetRequested: $resetRequested,
                 seenText: $seenText,
                 planText: $planText,
+                missionText : $missionText,
                 qCells: $qCells,
                 animateSpeed: $animationSpeed,
                 onResetPerformed: {
@@ -76,7 +78,7 @@ struct ContentView: View {
             RobotMindPanel(seen: seenText, plan: planText)
              
             // Passes the dynamic mission summary into the panel queue
-            MissionPlanPanel(summary: energyManager.missionQueuePlanText, pendingActions: pendingActions)
+            MissionPlanPanel(summary: missionText, pendingActions: pendingActions)
 
             // Animation Speed Slider Control Row
             VStack(alignment: .leading, spacing: 4) {

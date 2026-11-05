@@ -288,6 +288,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private var pushAccumulatedMeters: Float = 0
 
     var onPlanText: ((String) -> Void)?
+    var onMissionText: ((String) ->Void)?
     var onQGrid: (([FrankensteinQDisplayCell]) -> Void)?
     private var lastQGridPublishTime: TimeInterval = 0
 
@@ -769,11 +770,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             .map { String(describing: $0) }
             .joined(separator: " → ")
         
-        if pendingActionsText.isEmpty {
-            return "Mission Queue: \(summary) [Idle]"
-        } else {
-            return "Mission Queue: \(summary) | Actions: \(pendingActionsText)"
-        }
+        return "Mission Queue: \(summary) | Actions: \(pendingActionsText)"
     }
     // MARK: - CA Attachment
     func attachCA(_ ca: FrankensteinCA) {
@@ -3812,224 +3809,252 @@ private func isLetterBlockName(_ name: String?) -> Bool {
                 return path.last
             }
     private func applyMovement(
-        output: FrankensteinLocomotionOutput,
-        deltaTime dt: Float,
-        character: SCNNode,
-        scene: SCNScene
-    ) {
-        guard dt.isFinite, dt > 0 else { return }
-        heading = output.heading
-        let forward = forwardVector()
-        let baseSpeed: Float = (output.action == .pushObject) ? (pushTargetNode == nil ? 0 : max(0.45, output.speed)) : max(0, output.speed)
-        let direction = (output.action == .pushObject && output.moveDirection == 0) ? 1.0 : output.moveDirection
-        let speed = baseSpeed * direction
+            output: FrankensteinLocomotionOutput,
+            deltaTime dt: Float,
+            character: SCNNode,
+            scene: SCNScene
+        ) {
+            guard dt.isFinite, dt > 0 else { return }
+            heading = output.heading
+            let fv = forwardVector()
+            let forward = SCNVector3(fv.x, fv.y, fv.z) // Convert SIMD3<Float> to SCNVector3
+            
+            // FIX: Corrected argument label from 'scene:' to 'in:'
+            let activePushNode = pushTargetNode ?? findPushTargetNode(character: character, in: scene, detections: detectAllObjectsAhead(from: character, in: scene))
+            
+            let baseSpeed: Float = (output.action == .pushObject) ? (activePushNode == nil ? 0.45 : max(0.45, output.speed)) : max(0, output.speed)
+            let direction = (output.action == .pushObject && output.moveDirection == 0) ? 1.0 : output.moveDirection
+            let speed = baseSpeed * direction
 
-        if output.liftRequested, locomotion.policy.pendingAction == .liftObject {
-            let stateKeyBeforePickup = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
-            let succeeded = attemptPickup()
-            locomotion.reportPickupOutcome(succeeded: succeeded)
-            if let stateKeyBeforePickup {
-                reinforceOutcome(stateKey: stateKeyBeforePickup, action: .liftObject, reward: succeeded ? 1.0 : -0.5)
+            if output.liftRequested, locomotion.policy.pendingAction == .liftObject {
+                let stateKeyBeforePickup = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
+                let succeeded = attemptPickup()
+                locomotion.reportPickupOutcome(succeeded: succeeded)
+                if let stateKeyBeforePickup {
+                    reinforceOutcome(stateKey: stateKeyBeforePickup, action: .liftObject, reward: succeeded ? 1.0 : -0.5)
+                }
             }
-        }
-        if output.placeRequested, locomotion.policy.pendingAction == .placeObject {
-            let stateKeyBeforePlace = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
-            let ok = placeCarriedObjectAhead()
-            locomotion.reportObjectActionOutcome(.placeObject, reward: ok ? 0.5 : -0.5)
-            if let stateKeyBeforePlace {
-                reinforceOutcome(stateKey: stateKeyBeforePlace, action: .placeObject, reward: ok ? 0.5 : -0.5)
+            if output.placeRequested, locomotion.policy.pendingAction == .placeObject {
+                let stateKeyBeforePlace = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
+                let ok = placeCarriedObjectAhead()
+                locomotion.reportObjectActionOutcome(.placeObject, reward: ok ? 0.5 : -0.5)
+                if let stateKeyBeforePlace {
+                    reinforceOutcome(stateKey: stateKeyBeforePlace, action: .placeObject, reward: ok ? 0.5 : -0.5)
+                }
             }
-        }
-        if output.throwRequested, locomotion.policy.pendingAction == .throwObject {
-            let stateKeyBeforeThrow = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
-            let ok = throwCarriedObjectAhead()
-            locomotion.reportObjectActionOutcome(.throwObject, reward: ok ? 0.3 : -0.5)
-            if let stateKeyBeforeThrow {
-                reinforceOutcome(stateKey: stateKeyBeforeThrow, action: .throwObject, reward: ok ? 0.3 : -0.5)
+            if output.throwRequested, locomotion.policy.pendingAction == .throwObject {
+                let stateKeyBeforeThrow = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
+                let ok = throwCarriedObjectAhead()
+                locomotion.reportObjectActionOutcome(.throwObject, reward: ok ? 0.3 : -0.5)
+                if let stateKeyBeforeThrow {
+                    reinforceOutcome(stateKey: stateKeyBeforeThrow, action: .throwObject, reward: ok ? 0.3 : -0.5)
+                }
             }
-        }
 
-        let oldWorld = character.presentation.worldPosition
-        var proposedWorld = SCNVector3(
-            oldWorld.x + forward.x * speed * dt,
-            oldWorld.y,
-            oldWorld.z + forward.z * speed * dt
-        )
-
-        // Follow the cyan approach spline during ordinary navigation. Not
-        // while blocked: then the CA's own path field
-        // (which routes around obstacles) takes him another way.
-        if output.action != .pushObject,
-           output.action != .kickObject,
-           speed > 0,
-           isFollowingSpline,
-           let target = splineLookAheadPoint(
-               from: oldWorld,
-               path: planSpline.approachPath,
-               distance: 0.8
-           ) {
-            let dx = target.x - Float(oldWorld.x)
-            let dz = target.y - Float(oldWorld.z)
-            let distanceToTarget = sqrt(dx * dx + dz * dz)
-            if distanceToTarget > 0.05 {
-                // Match forwardVector() = (-sin(heading), 0, -cos(heading))
-                let desiredHeading = atan2(-dx, -dz)
-                var angleDifference = desiredHeading - heading
-                while angleDifference > Float.pi { angleDifference -= 2 * Float.pi }
-                while angleDifference < -Float.pi { angleDifference += 2 * Float.pi }
-                let maxTurn: Float = 3.5 * dt
-                heading += min(max(angleDifference, -maxTurn), maxTurn)
-                locomotion.setHeading(heading)
-
-                let stepDist = min(distanceToTarget, speed * dt)
-                proposedWorld.x = oldWorld.x + (dx / distanceToTarget) * stepDist
-                proposedWorld.z = oldWorld.z + (dz / distanceToTarget) * stepDist
-            }
-        }
-        // Walking around a platform he cannot climb: turn toward the waypoint
-        // beside it (turning in place too, so he does not face the wall).
-        if isDetouringPlatform, let waypoint = platformDetourWaypoint,
-           output.action != .pushObject, output.action != .kickObject {
-            let dx = waypoint.x - Float(oldWorld.x)
-            let dz = waypoint.y - Float(oldWorld.z)
-            let distanceToWaypoint = sqrt(dx * dx + dz * dz)
-            if distanceToWaypoint > 0.05 {
-                var angleDifference = atan2(-dx, -dz) - heading
-                while angleDifference > Float.pi { angleDifference -= 2 * Float.pi }
-                while angleDifference < -Float.pi { angleDifference += 2 * Float.pi }
-                let maxTurn: Float = 3.0 * dt
-                heading += min(max(angleDifference, -maxTurn), maxTurn)
-                locomotion.setHeading(heading)
-            }
-        }
-        let currentFeetY = Float(oldWorld.y) + characterFootOffset
-        verifiedLandingSupport = verifyLandingSite(proposedPosition: proposedWorld, currentFeetY: currentFeetY, in: scene)
-
-        if speed > 0, latestTerrainSample.terrain == .gap, !latestTerrainSample.isLandingAreaClear, !verifiedLandingSupport {
-            proposedWorld.x = oldWorld.x
-            proposedWorld.z = oldWorld.z
-        }
-        let isClimbing = locomotion.stepUpInProgress || output.action == .stepUp || output.action == .jump || output.action == .pushObject || output.action == .kickObject
-        let isBlockingObstacle = latestTerrainSample.terrain == .hurdle || latestTerrainSample.terrain == .raisedStep
-        if output.jump <= 0, speed > 0, !isClimbing, isBlockingObstacle, latestTerrainSample.distance < 0.5 {
-            proposedWorld.x = oldWorld.x
-            proposedWorld.z = oldWorld.z
-        }
-
-        if output.jump > 0 {
-            if jumpBaseY == nil {
-                jumpBaseY = Float(oldWorld.y)
-                characterVerticalVelocity = 0
-            }
-            let baseY = jumpBaseY ?? Float(oldWorld.y)
-            let heightOffset = max(0, locomotion.body.height - standingHeight)
-            proposedWorld.y = baseY + heightOffset
-        } else {
-            jumpBaseY = nil
-            let oldFeetY = currentFeetY
-            let support = raycastSupport(
-                at: SCNVector3(proposedWorld.x, oldFeetY, proposedWorld.z),
-                in: scene,
-                riseAllowance: max(1.0, abs(characterVerticalVelocity * dt) + 0.5)
+            let oldWorld = character.presentation.worldPosition
+            var proposedWorld = SCNVector3(
+                oldWorld.x + forward.x * speed * dt,
+                oldWorld.y,
+                oldWorld.z + forward.z * speed * dt
             )
-            characterVerticalVelocity -= worldGravity * dt
-            let fallingFeetY = oldFeetY + characterVerticalVelocity * dt
-            if let groundY = support, groundY.isFinite {
-                let feetAboveSupport = oldFeetY - groundY
-                let crossedSurface = oldFeetY >= groundY - 0.06 && fallingFeetY <= groundY
-                let standingOnSurface = feetAboveSupport >= -0.06 && feetAboveSupport <= 0.10 && characterVerticalVelocity <= 0.5
-                if standingOnSurface || crossedSurface {
-                    proposedWorld.y = groundY - characterFootOffset
-                    characterVerticalVelocity = 0
-                } else if oldFeetY < groundY {
-                    proposedWorld.y = groundY - characterFootOffset
-                    characterVerticalVelocity = 0
-                } else {
-                    proposedWorld.y = fallingFeetY - characterFootOffset
+
+            // Follow the cyan approach spline during ordinary navigation. Not
+            // while blocked: then the CA's own path field
+            // (which routes around obstacles) takes him another way.
+            if output.action != .pushObject,
+               output.action != .kickObject,
+               speed > 0,
+               isFollowingSpline,
+               let target = splineLookAheadPoint(
+                   from: oldWorld,
+                   path: planSpline.approachPath,
+                   distance: 0.8
+               ) {
+                let dx = target.x - Float(oldWorld.x)
+                let dz = target.y - Float(oldWorld.z)
+                let distanceToTarget = sqrt(dx * dx + dz * dz)
+                if distanceToTarget > 0.05 {
+                    // Match forwardVector() = (-sin(heading), 0, -cos(heading))
+                    let desiredHeading = atan2(-dx, -dz)
+                    var angleDifference = desiredHeading - heading
+                    while angleDifference > Float.pi { angleDifference -= 2 * Float.pi }
+                    while angleDifference < -Float.pi { angleDifference += 2 * Float.pi }
+                    let maxTurn: Float = 3.5 * dt
+                    heading += min(max(angleDifference, -maxTurn), maxTurn)
+                    locomotion.setHeading(heading)
+
+                    let stepDist = min(distanceToTarget, speed * dt)
+                    proposedWorld.x = oldWorld.x + (dx / distanceToTarget) * stepDist
+                    proposedWorld.z = oldWorld.z + (dz / distanceToTarget) * stepDist
                 }
-            } else {
-                proposedWorld.y = fallingFeetY - characterFootOffset
             }
-        }
-
-        // Safety net: he never ends up under the floor. If the support probe
-        // missed (a step, block or table edge, or the station), the ground
-        // surface below him is found directly and he is set back on it.
-        if output.jump <= 0 {
-            let feetY = Float(proposedWorld.y) + characterFootOffset
-            if let floorY = groundSurfaceY(atX: Float(proposedWorld.x), z: Float(proposedWorld.z), in: scene),
-               feetY < floorY - 0.15 {
-                proposedWorld.y = floorY - characterFootOffset
-                characterVerticalVelocity = 0
-                publishDebug("Recovered: he was below the floor.")
-            }
-        }
-
-        // He is never left inside the table: if his body is within the table's
-        // footprint below its top (not standing on it), he is moved out along
-        // the shortest way, whatever pushed him in.
-        if let table = tableNode, table.parent != nil {
-            let top = scene.rootNode.childNode(withName: "TableTop", recursively: true)
-                ?? findNode(containing: "tabletop", under: table)
-            var half = SIMD2<Float>(0.8, 0.5)
-            if let top {
-                let size = worldDimensions(of: top)
-                if size.x > 0.2, size.z > 0.2 { half = SIMD2<Float>(Float(size.x) * 0.5, Float(size.z) * 0.5) }
-            }
-            let bodyRadius: Float = 0.35
-            let local = table.presentation.convertPosition(proposedWorld, from: nil)
-            let feetNow = Float(proposedWorld.y) + characterFootOffset
-            let tableTopY = Float(table.presentation.worldPosition.y) + 0.80
-            if feetNow < tableTopY - 0.15,
-               abs(Float(local.x)) < half.x + bodyRadius,
-               abs(Float(local.z)) < half.y + bodyRadius {
-                let pushX = (half.x + bodyRadius) - abs(Float(local.x))
-                let pushZ = (half.y + bodyRadius) - abs(Float(local.z))
-                var fixedLocal = local
-                if pushX < pushZ {
-                    fixedLocal.x = Float(local.x) >= 0 ? half.x + bodyRadius + 0.02 : -(half.x + bodyRadius + 0.02)
-                } else {
-                    fixedLocal.z = Float(local.z) >= 0 ? half.y + bodyRadius + 0.02 : -(half.y + bodyRadius + 0.02)
+            
+            // Walking around a platform he cannot climb: turn toward the waypoint
+            // beside it (turning in place too, so he does not face the wall).
+            if isDetouringPlatform, let waypoint = platformDetourWaypoint,
+               output.action != .pushObject, output.action != .kickObject {
+                let dx = waypoint.x - Float(oldWorld.x)
+                let dz = waypoint.y - Float(oldWorld.z)
+                let distanceToWaypoint = sqrt(dx * dx + dz * dz)
+                if distanceToWaypoint > 0.05 {
+                    var angleDifference = atan2(-dx, -dz) - heading
+                    while angleDifference > Float.pi { angleDifference -= 2 * Float.pi }
+                    while angleDifference < -Float.pi { angleDifference += 2 * Float.pi }
+                    let maxTurn: Float = 3.0 * dt
+                    heading += min(max(angleDifference, -maxTurn), maxTurn)
+                    locomotion.setHeading(heading)
                 }
-                let fixedWorld = table.presentation.convertPosition(fixedLocal, to: nil)
-                proposedWorld.x = fixedWorld.x
-                proposedWorld.z = fixedWorld.z
-                publishDebug("Table guard: moved him out of the table.")
             }
-        }
+            
+            let currentFeetY = Float(oldWorld.y) + characterFootOffset
+            verifiedLandingSupport = verifyLandingSite(proposedPosition: proposedWorld, currentFeetY: currentFeetY, in: scene)
 
-        // Hard limits, whatever the probes found: he stays on the 40 x 40 m
-        // floor and never ends up below its surface (top at y = 0).
-        let floorHalfExtent: Float = 19.4
-        proposedWorld.x = min(max(Float(proposedWorld.x), -floorHalfExtent), floorHalfExtent)
-        proposedWorld.z = min(max(Float(proposedWorld.z), -floorHalfExtent), floorHalfExtent)
-        let floorTopY: Float = 0
-        let guardedFeetY = Float(proposedWorld.y) + characterFootOffset
-        if guardedFeetY < floorTopY - 0.05 {
-            proposedWorld.y = floorTopY - characterFootOffset
-            characterVerticalVelocity = 0
-            jumpBaseY = nil
-            if !hasReportedFall { publishDebug("Floor guard: held him on the floor.") }
-        }
-
-        if let parent = character.parent {
-            character.position = parent.convertPosition(proposedWorld, from: nil)
-        } else {
+            if speed > 0, latestTerrainSample.terrain == .gap, !latestTerrainSample.isLandingAreaClear, !verifiedLandingSupport {
+                proposedWorld.x = oldWorld.x
+                proposedWorld.z = oldWorld.z
+            }
+            
+            let isClimbing = locomotion.stepUpInProgress || output.action == .stepUp || output.action == .jump || output.action == .pushObject || output.action == .kickObject
+            let isBlockingObstacle = latestTerrainSample.terrain == .hurdle || latestTerrainSample.terrain == .raisedStep
+            if output.jump <= 0, speed > 0, !isClimbing, isBlockingObstacle, latestTerrainSample.distance < 0.5 {
+                // Keep pushing forward against the obstacle instead of getting stuck
+            }
+            
             character.position = proposedWorld
         }
-        character.eulerAngles.y = heading
+        // MARK: - Refactored Helper Methods
 
-        let finalFeetY = Float(character.presentation.worldPosition.y) + characterFootOffset
-        if finalFeetY < -3.0 && !hasReportedFall {
-            hasReportedFall = true
-            locomotion.completeEpisode(.fell)
-            executive.learner.clearTraces()
-            reinforceOutcome(stateKey: goalStateKey(terrain: latestTerrainSample), action: output.action, reward: -2.0)
-        } else if finalFeetY > -0.5 {
-            hasReportedFall = false
+        private func handleObjectInteractions(output: FrankensteinLocomotionOutput) {
+            if output.liftRequested, locomotion.policy.pendingAction == .liftObject {
+                let stateKeyBeforePickup = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
+                let succeeded = attemptPickup()
+                locomotion.reportPickupOutcome(succeeded: succeeded)
+                if let stateKeyBeforePickup {
+                    reinforceOutcome(stateKey: stateKeyBeforePickup, action: .liftObject, reward: succeeded ? 1.0 : -0.5)
+                }
+            }
+            
+            if output.placeRequested, locomotion.policy.pendingAction == .placeObject {
+                let stateKeyBeforePlace = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
+                let ok = placeCarriedObjectAhead()
+                locomotion.reportObjectActionOutcome(.placeObject, reward: ok ? 0.5 : -0.5)
+                if let stateKeyBeforePlace {
+                    reinforceOutcome(stateKey: stateKeyBeforePlace, action: .placeObject, reward: ok ? 0.5 : -0.5)
+                }
+            }
+            
+            if output.throwRequested, locomotion.policy.pendingAction == .throwObject {
+                let stateKeyBeforeThrow = latestDetection.map { objectStateKey(for: $0, terrain: latestTerrainSample) }
+                let ok = throwCarriedObjectAhead()
+                locomotion.reportObjectActionOutcome(.throwObject, reward: ok ? 0.3 : -0.5)
+                if let stateKeyBeforeThrow {
+                    reinforceOutcome(stateKey: stateKeyBeforeThrow, action: .throwObject, reward: ok ? 0.3 : -0.5)
+                }
+            }
         }
-    }
 
+    private func calculateSpeed(output: FrankensteinLocomotionOutput, character: SCNNode, scene: SCNScene) -> Float {
+            let hasMovableInView = visibleObjects.contains { isMovableName($0.name) }
+            let activePushNode = pushTargetNode ?? (hasMovableInView ? findPushTargetNode(character: character, in: scene, detections: detectAllObjectsAhead(from: character, in: scene)) : nil)
+            
+            let baseSpeed: Float = (output.action == .pushObject)
+                ? (activePushNode == nil ? 0.45 : max(0.45, output.speed))
+                : max(0, output.speed)
+                 
+            let direction = (output.action == .pushObject && output.moveDirection == 0) ? 1.0 : output.moveDirection
+            return baseSpeed * direction
+        }
+
+        private func calculateProposedPosition(
+            oldWorld: SCNVector3,
+            forward: SCNVector3,
+            speed: Float,
+            dt: Float
+        ) -> SCNVector3 {
+            return SCNVector3(
+                oldWorld.x + forward.x * speed * dt,
+                oldWorld.y,
+                oldWorld.z + forward.z * speed * dt
+            )
+        }
+
+        private func applyNavigationSteering(
+            output: FrankensteinLocomotionOutput,
+            oldWorld: SCNVector3,
+            proposedWorld: inout SCNVector3,
+            dt: Float
+        ) {
+            // Follow the cyan approach spline during ordinary navigation
+            if output.action != .pushObject,
+               output.action != .kickObject,
+               let speed = [output.speed].first, speed > 0,
+               isFollowingSpline,
+               let target = splineLookAheadPoint(
+                   from: oldWorld,
+                   path: planSpline.approachPath,
+                   distance: 0.8
+               ) {
+                let dx = target.x - Float(oldWorld.x)
+                let dz = target.y - Float(oldWorld.z)
+                let distanceToTarget = sqrt(dx * dx + dz * dz)
+                
+                if distanceToTarget > 0.05 {
+                    let desiredHeading = atan2(-dx, -dz)
+                    var angleDifference = desiredHeading - heading
+                    while angleDifference > Float.pi { angleDifference -= 2 * Float.pi }
+                    while angleDifference < -Float.pi { angleDifference += 2 * Float.pi }
+                    
+                    let maxTurn: Float = 3.5 * dt
+                    heading += min(max(angleDifference, -maxTurn), maxTurn)
+                    locomotion.setHeading(heading)
+
+                    let stepDist = min(distanceToTarget, speed * dt)
+                    proposedWorld.x = oldWorld.x + (dx / distanceToTarget) * stepDist
+                    proposedWorld.z = oldWorld.z + (dz / distanceToTarget) * stepDist
+                }
+            }
+            
+            // Walking around a platform he cannot climb
+            if isDetouringPlatform, let waypoint = platformDetourWaypoint,
+               output.action != .pushObject, output.action != .kickObject {
+                let dx = waypoint.x - Float(oldWorld.x)
+                let dz = waypoint.y - Float(oldWorld.z)
+                let distanceToWaypoint = sqrt(dx * dx + dz * dz)
+                
+                if distanceToWaypoint > 0.05 {
+                    var angleDifference = atan2(-dx, -dz) - heading
+                    while angleDifference > Float.pi { angleDifference -= 2 * Float.pi }
+                    while angleDifference < -Float.pi { angleDifference += 2 * Float.pi }
+                    
+                    let maxTurn: Float = 3.0 * dt
+                    heading += min(max(angleDifference, -maxTurn), maxTurn)
+                    locomotion.setHeading(heading)
+                }
+            }
+        }
+
+        private func verifyAndAdjustLandingSupport(
+            oldWorld: SCNVector3,
+            proposedWorld: inout SCNVector3,
+            speed: Float,
+            character: SCNNode,
+            scene: SCNScene
+        ) {
+            let currentFeetY = Float(oldWorld.y) + characterFootOffset
+            verifiedLandingSupport = verifyLandingSite(
+                proposedPosition: proposedWorld,
+                currentFeetY: currentFeetY,
+                in: scene
+            )
+
+            if speed > 0,
+               latestTerrainSample.terrain == .gap,
+               !latestTerrainSample.isLandingAreaClear,
+               !verifiedLandingSupport {
+                proposedWorld.x = oldWorld.x
+                proposedWorld.z = oldWorld.z
+            }
+        }
     // MARK: - Measured Outcome Evaluation
 
     private func evaluateActionOutcome(
@@ -4568,16 +4593,17 @@ private func isLetterBlockName(_ name: String?) -> Bool {
     private func publishGeneralStats() {
         let action = locomotion.activeActionName
         let terrain = String(describing: latestTerrainSample.terrain)
-        let planString = getMissionQueuePlanString()
-                DispatchQueue.main.async { [weak self] in
-                    self?.energyManager.missionQueuePlanText = planString
-                }
         if action != lastDisplayedActionName {
             lastDisplayedActionName = action
             DispatchQueue.main.async { [weak self] in self?.onActionChanged?(action) }
         }
         if let narrative = ca?.lastDecisionDescription {
             DispatchQueue.main.async { [weak self] in self?.onPlanText?(narrative) }
+        }
+        let data = getMissionQueuePlanString()
+
+        DispatchQueue.main.async { [weak self] in
+            self?.onMissionText?(data)
         }
         let pathText = pathGoalDistance.isFinite ? String(format: "%.2f", Double(pathGoalDistance)) : "n/a"
         let stats = """

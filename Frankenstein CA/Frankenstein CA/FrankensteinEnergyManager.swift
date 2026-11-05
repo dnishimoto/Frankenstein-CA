@@ -16,8 +16,7 @@ final class FrankensteinEnergyManager: ObservableObject {
     @Published var powerLevel: Float = 100.0
     @Published var maxPower: Float = 100.0
     @Published var isRecharging: Bool = false
-    @Published var missionQueuePlanText: String = "Not initialized"
-
+   
     /// Love from his dog (0...100). Rises while he holds the dog.
     @Published var love: Float = 0
     
@@ -60,6 +59,5 @@ final class FrankensteinEnergyManager: ObservableObject {
         isRecharging = false
         love = 0
         placedLetters = Array(repeating: nil, count: 12)
-        missionQueuePlanText = "Mission Queue: [Idle]"
     }
 }

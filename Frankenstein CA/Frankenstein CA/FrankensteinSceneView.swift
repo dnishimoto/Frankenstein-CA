@@ -11,6 +11,7 @@ struct FrankensteinSceneView: UIViewRepresentable {
     @Binding var resetRequested: Bool
     @Binding var seenText: String
     @Binding var planText: String
+    @Binding var missionText: String
     @Binding var qCells: [FrankensteinQDisplayCell]
     @Binding var animateSpeed: Double
     var onResetPerformed: (() -> Void)? = nil
@@ -221,6 +222,12 @@ struct FrankensteinSceneView: UIViewRepresentable {
                 self.planText = text
             }
         }
+        
+        context.coordinator.onMissionText = { text in
+            if self.missionText != text {
+                self.missionText = text
+            }
+        }
 
         context.coordinator.onQGrid = { cells in
             if self.qCells != cells {
@@ -304,72 +311,78 @@ struct FrankensteinSceneView: UIViewRepresentable {
         return view
     }
 
-    // MARK: - Update View
+    func updateUIView(
+        _ uiView: SCNView,
+        context: Context
+    ) {
+        let coordinator = context.coordinator
 
-    // MARK: - Update View
+        // Refresh the displayed mission plan on every SwiftUI update.
+        refreshPlanText(context: context)
 
-        func updateUIView(
-            _ uiView: SCNView,
-            context: Context
-        ) {
-            let coordinator = context.coordinator
-            guard resetRequested, !coordinator.isResetPending else {
+        // Handle reset requests.
+        guard resetRequested, !coordinator.isResetPending else {
+            return
+        }
+
+        coordinator.isResetPending = true
+
+        let resetRequestedBinding = $resetRequested
+        let generationBinding = $generation
+        let liveCellsBinding = $liveCells
+        let ca = self.ca
+        let resetAction = onResetPerformed
+
+        DispatchQueue.main.async { [weak uiView] in
+            defer {
+                resetRequestedBinding.wrappedValue = false
+                coordinator.isResetPending = false
+            }
+
+            guard let uiView = uiView else {
                 return
             }
-            
-            coordinator.isResetPending = true
-            let resetRequestedBinding = $resetRequested
-            let generationBinding = $generation
-            let liveCellsBinding = $liveCells
-            let ca = self.ca
-            let resetAction = onResetPerformed
 
-            DispatchQueue.main.async { [weak uiView] in
-                defer {
-                    resetRequestedBinding.wrappedValue = false
-                    coordinator.isResetPending = false
+            coordinator.resetObjectLearning()
+
+            if let character = uiView.scene?.rootNode.childNode(
+                withName: "Frankenstein",
+                recursively: true
+            ) {
+                character.position = SCNVector3(5.5, 0, 7.0)
+                character.eulerAngles = SCNVector3Zero
+
+                let limbNames = [
+                    "FrankensteinLeftLeg",
+                    "FrankensteinRightLeg",
+                    "FrankensteinLeftArm",
+                    "FrankensteinRightArm",
+                    "FrankensteinHead"
+                ]
+
+                for name in limbNames {
+                    character.childNode(
+                        withName: name,
+                        recursively: true
+                    )?.eulerAngles = SCNVector3Zero
                 }
-
-                guard let uiView = uiView else {
-                    return
-                }
-
-                // Reset the coordinator's learned object state and randomize the scene.
-                coordinator.resetObjectLearning()
-
-                if let character = uiView.scene?.rootNode.childNode(
-                    withName: "Frankenstein",
-                    recursively: true
-                ) {
-                    character.position = SCNVector3(5.5, 0, 7.0)
-                    character.eulerAngles = SCNVector3Zero
-
-                    let limbNames = [
-                        "FrankensteinLeftLeg",
-                        "FrankensteinRightLeg",
-                        "FrankensteinLeftArm",
-                        "FrankensteinRightArm",
-                        "FrankensteinHead"
-                    ]
-
-                    for name in limbNames {
-                        character.childNode(
-                            withName: name,
-                            recursively: true
-                        )?.eulerAngles = SCNVector3Zero
-                    }
-                }
-
-                // Reset the same CA instance attached to the coordinator.
-                ca.reset()
-
-                generationBinding.wrappedValue = ca.generation
-                liveCellsBinding.wrappedValue = ca.liveCellCount
-
-                // Notify the parent after the built-in reset completes.
-                resetAction?()
             }
+
+            ca.reset()
+
+            generationBinding.wrappedValue = ca.generation
+            liveCellsBinding.wrappedValue = ca.liveCellCount
+
+            resetAction?()
         }
+    }
+    
+    // Add planText assignment here to reflect the coordinator's latest plan string
+    func refreshPlanText(context: Context) {
+        // Assign planText from coordinator's mission queue plan string to keep UI in sync with coordinator's plan
+        self.missionText = context.coordinator.getMissionQueuePlanString()
+    }
+
     // MARK: - Tear Down
 
     static func dismantleUIView(
@@ -612,3 +625,4 @@ final class VisibleObjectsThrottle {
         return true
     }
 }
+

@@ -1,8 +1,6 @@
 import Foundation
 import SceneKit
 
-
-
 // MARK: - Mission Task
 
 struct PlanTask {
@@ -122,7 +120,7 @@ final class MissionPlanQueue {
                 .map(\.description)
                 .joined(separator: " → ")
 
-            return "\(goal.title) { \(steps) }"
+            return "\(goal.title) { \(steps.isEmpty ? "no subgoals" : steps) }"
         }
         .joined(separator: " | ")
 
@@ -167,13 +165,18 @@ final class MissionPlanQueue {
         atFront: Bool = true
     ) {
         if let index = goals.firstIndex(where: { $0.id == goal.id }) {
+            // Update target node and subgoals if they are provided / refreshed
             goals[index].targetNode = goal.targetNode
+            if !goal.subgoals.isEmpty {
+                goals[index].subgoals = goal.subgoals
+            }
 
             if atFront && index > 0 {
                 let existing = goals.remove(at: index)
                 goals.insert(existing, at: 0)
             }
 
+            onPlanEvent?("Goal updated: \(goal.title)")
             return
         }
 
@@ -183,7 +186,7 @@ final class MissionPlanQueue {
             goals.append(goal)
         }
 
-        onPlanEvent?("Goal added: \(goal.title)")
+        onPlanEvent?("Goal added: \(goal.title) (Total Goals: \(goals.count))")
     }
 
     func removeGoal(id: String, reason: String) {
