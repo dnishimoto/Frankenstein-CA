@@ -1894,13 +1894,13 @@ final class FrankensteinCA: ObservableObject {
 
         if let p, !p.obstructionName.isEmpty, let obsAction = p.obstructionAction, allowedActions.contains(obsAction) {
 
-            if missionQueue.currentTask?.action != obsAction {
+            if missionQueue.currentTask?.actions.first != obsAction {
 
                 missionQueue.pushTacticalOverride(
 
                     PlanTask(
 
-                        action: obsAction,
+                        actions: [obsAction],
 
                         description: "Tactical Clear: \(p.obstructionName)",
 
@@ -1927,7 +1927,7 @@ final class FrankensteinCA: ObservableObject {
         // A queued task with a concrete action is binding when permitted.
         // A task without an action delegates movement selection to the CA.
         let queuedTask = missionQueue.currentTask
-        let queuedAction = queuedTask?.action
+        let queuedAction = queuedTask?.actions.first
 
         var selected: FrankensteinAction
         if let queuedAction, allowedActions.contains(queuedAction) {
@@ -2166,7 +2166,6 @@ final class FrankensteinCA: ObservableObject {
         return true
 
     }
-
     private func countLiveCells() -> Int {
 
         grid.reduce(0) { $0 + $1.filter { $0 }.count }
@@ -2194,3 +2193,4 @@ final class FrankensteinCA: ObservableObject {
 
 
 }
+
