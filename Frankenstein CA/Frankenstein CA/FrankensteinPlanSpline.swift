@@ -1,16 +1,9 @@
-//
 //  FrankensteinPlanSpline.swift
 //  Frankenstein CA
 //
-//  Draws the current plan as a spline on the floor:
-//
-//    cyan   curve  Frankenstein -> the object the plan wants to move
+//  Draws the current plan as a spline with elevation/step-up handling:
+//    cyan   curve  Frankenstein -> the object/platform
 //    orange curve  that object  -> where the plan wants it to go
-//
-//  The first curve ends at a stand-off point behind the object (the side
-//  away from the destination), so it shows the approach needed to push the
-//  object toward its destination. With no object in the plan, a single curve
-//  runs from Frankenstein to the destination.
 //
 //  All nodes have "Marker" in their names, so raycasts, detection and
 //  physics ignore them.
@@ -25,9 +18,13 @@ final class FrankensteinPlanSpline {
 
     var isVisible = true
 
-    // Expose path arrays for navigation steering
-    private(set) var approachPath: [SIMD2<Float>] = []
-    private(set) var deliveryPath: [SIMD2<Float>] = []
+    // Expose 3D path arrays for navigation steering (including elevation for platforms/steps)
+    private(set) var approachPath: [SIMD3<Float>] = []
+    private(set) var deliveryPath: [SIMD3<Float>] = []
+
+    // Legacy 2D compatibility accessors for code expecting SIMD2
+    var approachPath2D: [SIMD2<Float>] { approachPath.map { SIMD2<Float>($0.x, $0.z) } }
+    var deliveryPath2D: [SIMD2<Float>] { deliveryPath.map { SIMD2<Float>($0.x, $0.z) } }
 
     private let rootName = "PlanSplineMarker"
     private weak var scene: SCNScene?
@@ -37,7 +34,6 @@ final class FrankensteinPlanSpline {
     private var targetRing = SCNNode()
     private var destinationRing = SCNNode()
 
-    private let height: Float = 0.10
     private let standOff: Float = 0.9
     private let samplesPerSegment = 12
 
@@ -165,25 +161,23 @@ final class FrankensteinPlanSpline {
         return result
     }
 
-    // MARK: - Look-Ahead Navigation
+    // MARK: - Look-Ahead Navigation (3D Elevation Aware)
 
     func lookAheadPoint(
         from position: SCNVector3,
-        path: [SIMD2<Float>],
+        path: [SIMD3<Float>],
         distance: Float = 0.8
-    ) -> SIMD2<Float>? {
+    ) -> SCNVector3? {
         guard path.count >= 2 else { return nil }
 
-        let p = SIMD2<Float>(
-            Float(position.x),
-            Float(position.z)
-        )
-
+        let p = SIMD3<Float>(Float(position.x), Float(position.y), Float(position.z))
         var nearestIndex = 0
         var nearestDistance = Float.greatestFiniteMagnitude
 
         for i in path.indices {
-            let d = simd_distance(p, path[i])
+            let dx = p.x - path[i].x
+            let dz = p.z - path[i].z
+            let d = sqrt(dx * dx + dz * dz)
 
             if d < nearestDistance {
                 nearestDistance = d
@@ -205,14 +199,14 @@ final class FrankensteinPlanSpline {
             }
 
             if remaining <= segmentLength {
-                return current + segment / segmentLength * remaining
+                return SCNVector3(current + segment / segmentLength * remaining)
             }
 
             remaining -= segmentLength
             current = next
         }
 
-        return path.last
+        return SCNVector3(path.last!)
     }
 
     // MARK: Setup
@@ -258,7 +252,7 @@ final class FrankensteinPlanSpline {
         return node
     }
 
-    // MARK: Update
+    // MARK: Update (Elevation & Step-Up Aware)
 
     func update(
         time: TimeInterval,
@@ -276,96 +270,110 @@ final class FrankensteinPlanSpline {
         lastUpdate = time
 
         let key = String(
-            format: "%.1f,%.1f|%@|%.1f,%.1f|%d",
-            Double(character.x), Double(character.z),
-            object.map { String(format: "%.1f,%.1f", Double($0.x), Double($0.z)) } ?? "-",
-            Double(destination.x), Double(destination.z),
+            format: "%.1f,%.1f,%.1f|%@|%.1f,%.1f,%.1f|%d",
+            Double(character.x), Double(character.y), Double(character.z),
+            object.map { String(format: "%.1f,%.1f,%.1f", Double($0.x), Double($0.y), Double($0.z)) } ?? "-",
+            Double(destination.x), Double(destination.y), Double(destination.z),
             approachFromCharacterSide ? 1 : 0
         )
 
         guard key != lastKey else { return }
         lastKey = key
 
-        let start = SIMD2<Float>(Float(character.x), Float(character.z))
-        let end = SIMD2<Float>(Float(destination.x), Float(destination.z))
+        let start2D = SIMD2<Float>(Float(character.x), Float(character.z))
+        let end2D = SIMD2<Float>(Float(destination.x), Float(destination.z))
+        let startY = Float(character.y)
+        let endY = Float(destination.y)
 
         destinationRing.isHidden = false
-        destinationRing.position = SCNVector3(end.x, height, end.y)
+        destinationRing.position = SCNVector3(destination.x, destination.y + 0.02, destination.z)
 
         guard let object else {
-            // No object: one curve from Frankenstein to the destination.
-            let legRoute = route(start, end)
-            let curve = legRoute.count > 2
-                ? spline(through: densify(legRoute))
-                : spline(through: [start, (start + end) * 0.5, end])
-            approachPath = curve
+            let legRoute = route(start2D, end2D)
+            let curve2D = legRoute.count > 2
+                ? spline2D(through: densify(legRoute))
+                : spline2D(through: [start2D, (start2D + end2D) * 0.5, end2D])
+            
+            approachPath = curve2D.enumerated().map { index, pt in
+                let t = Float(index) / Float(max(1, curve2D.count - 1))
+                let y = startY + (endY - startY) * t
+                return SIMD3<Float>(pt.x, y, pt.y)
+            }
             deliveryPath = []
-            approachNode.geometry = lineGeometry(curve, color: .cyan)
+            approachNode.geometry = lineGeometry3D(approachPath, color: .cyan)
             approachNode.isHidden = false
             deliveryNode.isHidden = true
             targetRing.isHidden = true
             return
         }
 
-        let obj = SIMD2<Float>(Float(object.x), Float(object.z))
+        let obj2D = SIMD2<Float>(Float(object.x), Float(object.z))
+        let objY = Float(object.y)
 
-        var pushDirection = end - obj
+        var pushDirection = end2D - obj2D
         let pushLength = simd_length(pushDirection)
         pushDirection = pushLength > 0.001 ? pushDirection / pushLength : SIMD2<Float>(0, -1)
 
-        // Pushing: stand behind the object, opposite the destination.
-        // Lifting (letter blocks): stand on his own side of it, so he walks
-        // straight up to it and stops within reach instead of circling.
-        var standPoint = obj - pushDirection * standOff
+        var standPoint2D = obj2D - pushDirection * standOff
         if approachFromCharacterSide {
-            let toObject = obj - start
+            let toObject = obj2D - start2D
             let distance = simd_length(toObject)
             if distance > standOff {
-                standPoint = obj - toObject / distance * standOff
+                standPoint2D = obj2D - toObject / distance * standOff
             } else {
-                standPoint = start
+                standPoint2D = start2D
             }
         }
 
-        let toStand = standPoint - start
+        let toStand = standPoint2D - start2D
         let side = SIMD2<Float>(-toStand.y, toStand.x)
         let sideLength = simd_length(side)
         let bow = sideLength > 0.001 ? side / sideLength * min(0.5, simd_length(toStand) * 0.15) : .zero
 
-        // Around the chasm corners when the straight way would cross it.
-        let approachRoute = route(start, standPoint)
+        let approachRoute = route(start2D, standPoint2D)
         let approachVia: [SIMD2<Float>] = approachRoute.count > 2
             ? densify(approachRoute)
-            : [start, start + toStand * 0.5 + bow, standPoint]
-        let approach = spline(through: approachVia + [obj])
-        // Navigation ends at the stand-off point when lifting, so he stops
-        // within reach of the block rather than walking into it.
-        if approachFromCharacterSide {
-            approachPath = spline(through: approachVia)
-        } else {
-            approachPath = approach
+            : [start2D, start2D + toStand * 0.5 + bow, standPoint2D]
+        
+        let curveApproach2D = spline2D(through: approachVia + [obj2D])
+        let fullApproach3D = curveApproach2D.enumerated().map { index, pt in
+            let t = Float(index) / Float(max(1, curveApproach2D.count - 1))
+            let y = startY + (objY - startY) * pow(t, 0.7)
+            return SIMD3<Float>(pt.x, y, pt.y)
         }
 
-        let across = end - obj
+        if approachFromCharacterSide {
+            let partialCount = max(2, Int(Double(fullApproach3D.count) * 0.85))
+            approachPath = Array(fullApproach3D.prefix(partialCount))
+        } else {
+            approachPath = fullApproach3D
+        }
+
+        let across = end2D - obj2D
         let acrossSide = SIMD2<Float>(-across.y, across.x)
         let acrossSideLength = simd_length(acrossSide)
         let acrossBow = acrossSideLength > 0.001
             ? acrossSide / acrossSideLength * min(0.4, simd_length(across) * 0.1)
             : .zero
 
-        let deliveryRoute = route(obj, end)
-        let delivery = deliveryRoute.count > 2
-            ? spline(through: densify(deliveryRoute))
-            : spline(through: [obj, obj + across * 0.5 + acrossBow, end])
-        deliveryPath = delivery
+        let deliveryRoute = route(obj2D, end2D)
+        let curveDelivery2D = deliveryRoute.count > 2
+            ? spline2D(through: densify(deliveryRoute))
+            : spline2D(through: [obj2D, obj2D + across * 0.5 + acrossBow, end2D])
+        
+        deliveryPath = curveDelivery2D.enumerated().map { index, pt in
+            let t = Float(index) / Float(max(1, curveDelivery2D.count - 1))
+            let y = objY + (endY - objY) * t
+            return SIMD3<Float>(pt.x, y, pt.y)
+        }
 
-        approachNode.geometry = lineGeometry(approach, color: .cyan)
-        deliveryNode.geometry = lineGeometry(delivery, color: .orange)
+        approachNode.geometry = lineGeometry3D(approachPath, color: .cyan)
+        deliveryNode.geometry = lineGeometry3D(deliveryPath, color: .orange)
         approachNode.isHidden = false
         deliveryNode.isHidden = false
 
         targetRing.isHidden = false
-        targetRing.position = SCNVector3(obj.x, height, obj.y)
+        targetRing.position = SCNVector3(object.x, objY + 0.02, object.z)
     }
 
     private func hideAll() {
@@ -378,9 +386,9 @@ final class FrankensteinPlanSpline {
         lastKey = ""
     }
 
-    // MARK: Spline
+    // MARK: Spline Math
 
-    private func spline(through points: [SIMD2<Float>]) -> [SIMD2<Float>] {
+    private func spline2D(through points: [SIMD2<Float>]) -> [SIMD2<Float>] {
         guard points.count >= 2 else { return points }
 
         let padded = [points[0]] + points + [points[points.count - 1]]
@@ -413,8 +421,8 @@ final class FrankensteinPlanSpline {
         return result
     }
 
-    private func lineGeometry(_ points: [SIMD2<Float>], color: UIColor) -> SCNGeometry {
-        let vertices = points.map { SCNVector3($0.x, height, $0.y) }
+    private func lineGeometry3D(_ points: [SIMD3<Float>], color: UIColor) -> SCNGeometry {
+        let vertices = points.map { SCNVector3($0.x, $0.y + 0.02, $0.z) }
         let source = SCNGeometrySource(vertices: vertices)
 
         var indices: [Int32] = []

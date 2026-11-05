@@ -201,66 +201,117 @@ final class MissionPlanQueue {
         target: SCNNode?,
         because reason: String
     ) -> Bool {
-        // 1. Check tactical override queue first
-        if var tactical = tacticalQueue.last,
-           let frontAction = tactical.actions.first {
-            if frontAction == action {
-                let targetMatches = (target == nil || tactical.targetNode == target || target == currentTargetNode)
+
+        // MARK: 1. Tactical override
+
+        if let index = tacticalQueue.indices.last {
+
+            let taskID = tacticalQueue[index].id
+            var tactical = tacticalQueue[index]
+
+            if let frontAction = tactical.actions.first,
+               frontAction == action {
+
+                let targetMatches: Bool
+
+                if target == nil {
+                    targetMatches = true
+                } else if let taskTarget = tactical.targetNode {
+                    targetMatches = taskTarget === target
+                } else {
+                    targetMatches = false
+                }
+
                 if targetMatches {
+
                     tactical.actions.removeFirst()
                     executedCount += 1
 
-                    if tactical.actions.isEmpty {
-                        tacticalQueue.removeLast()
-                        onPlanEvent?("Tactical task completed: \(tactical.description) — \(reason)")
-                    } else {
-                        tacticalQueue[tacticalQueue.count - 1] = tactical
-                        onPlanEvent?("Tactical action completed: \(frontAction) — \(reason)")
+                    // Verify the same task still occupies this position.
+                    guard tacticalQueue.indices.contains(index),
+                          tacticalQueue[index].id == taskID else {
+                        return false
                     }
+
+                    if tactical.actions.isEmpty {
+
+                        tacticalQueue.remove(at: index)
+
+                        onPlanEvent?(
+                            "Tactical task completed: \(tactical.description) — \(reason)"
+                        )
+
+                    } else {
+
+                        tacticalQueue[index] = tactical
+
+                        onPlanEvent?(
+                            "Tactical action completed: \(frontAction) — \(reason)"
+                        )
+                    }
+
                     return true
                 }
             }
         }
 
-        // 2. Check current mission task
-        guard !goals.isEmpty, !goals[0].subgoals.isEmpty else {
+        // MARK: 2. Mission task
+
+        guard !goals.isEmpty,
+              !goals[0].subgoals.isEmpty else {
             return false
         }
 
         var currentGoal = goals[0]
         var currentTask = currentGoal.subgoals[0]
 
-        guard let frontAction = currentTask.actions.first else {
+        guard let frontAction = currentTask.actions.first,
+              frontAction == action else {
             return false
         }
 
-        if frontAction == action {
-            let targetMatches = (target == nil || currentTask.targetNode == target)
-            if targetMatches {
-                currentTask.actions.removeFirst()
-                executedCount += 1
+        let targetMatches =
+            target == nil ||
+            currentTask.targetNode === target
 
-                onPlanEvent?("Action completed: \(frontAction) — \(reason)")
-
-                if currentTask.actions.isEmpty {
-                    currentGoal.subgoals.removeFirst()
-                    onPlanEvent?("Subgoal completed: \(currentTask.description)")
-                } else {
-                    currentGoal.subgoals[0] = currentTask
-                }
-
-                if currentGoal.subgoals.isEmpty {
-                    goals.removeFirst()
-                    onPlanEvent?("Goal completed: \(currentGoal.title)")
-                } else {
-                    goals[0] = currentGoal
-                }
-
-                return true
-            }
+        guard targetMatches else {
+            return false
         }
 
-        return false
+        currentTask.actions.removeFirst()
+        executedCount += 1
+
+        onPlanEvent?(
+            "Action completed: \(frontAction) — \(reason)"
+        )
+
+        if currentTask.actions.isEmpty {
+
+            currentGoal.subgoals.removeFirst()
+
+            onPlanEvent?(
+                "Subgoal completed: \(currentTask.description)"
+            )
+
+        } else {
+
+            currentGoal.subgoals[0] = currentTask
+        }
+
+        if currentGoal.subgoals.isEmpty {
+
+            goals.removeFirst()
+
+            onPlanEvent?(
+                "Goal completed: \(currentGoal.title)"
+            )
+
+        } else {
+
+            goals[0] = currentGoal
+        }
+
+        return true
     }
 
     @discardableResult
@@ -299,17 +350,34 @@ final class MissionPlanQueue {
     // MARK: Perception Verification
 
     func update(perception: FrankensteinCAPerception?) {
-        if let tactical = tacticalQueue.last,
-           let condition = tactical.completionCondition,
-           let perception,
-           condition(perception) {
 
-            tacticalQueue.removeLast()
-            onPlanEvent?(
-                "Tactical task completed by condition: \(tactical.description)"
-            )
-            return
+        // MARK: 1. Tactical completion
+
+        if let index = tacticalQueue.indices.last {
+
+            let task = tacticalQueue[index]
+            let taskID = task.id
+
+            if let condition = task.completionCondition,
+               let perception,
+               condition(perception) {
+
+                // Verify that the same task is still at the top.
+                if let currentIndex = tacticalQueue.indices.last,
+                   tacticalQueue[currentIndex].id == taskID {
+
+                    tacticalQueue.remove(at: currentIndex)
+
+                    onPlanEvent?(
+                        "Tactical task completed by condition: \(task.description)"
+                    )
+
+                    return
+                }
+            }
         }
+
+        // MARK: 2. Mission task completion
 
         guard let task = currentMissionTask,
               task.actions.isEmpty,
@@ -330,8 +398,31 @@ final class MissionPlanQueue {
         _ task: PlanTask,
         reason: String
     ) {
-        if tacticalQueue.last?.description == task.description {
+        // Prevent inserting the exact same task twice.
+        guard !tacticalQueue.contains(where: { $0.id == task.id }) else {
             return
+        }
+
+        // Prevent duplicate overrides for the same object and task.
+        let targetID = task.targetNode.map { ObjectIdentifier($0) }
+
+        let alreadyQueued = tacticalQueue.contains { existing in
+            let existingTargetID = existing.targetNode.map {
+                ObjectIdentifier($0)
+            }
+
+            return existing.description == task.description
+                && existingTargetID == targetID
+        }
+
+        guard !alreadyQueued else {
+            return
+        }
+
+        // Enforce queue capacity.
+        if tacticalQueue.count >= maxCapacity {
+            // Remove the oldest override, preserving the active top task.
+            tacticalQueue.removeFirst()
         }
 
         tacticalQueue.append(task)
@@ -345,12 +436,23 @@ final class MissionPlanQueue {
         matchingDescriptionPrefix prefix: String,
         because reason: String
     ) {
-        guard let top = tacticalQueue.last,
-              top.description.hasPrefix(prefix) else {
+        guard let index = tacticalQueue.indices.last else {
             return
         }
 
-        tacticalQueue.removeLast()
+        let task = tacticalQueue[index]
+
+        guard task.description.hasPrefix(prefix) else {
+            return
+        }
+
+        // Verify the task identity before removal.
+        guard tacticalQueue.indices.contains(index),
+              tacticalQueue[index].id == task.id else {
+            return
+        }
+
+        tacticalQueue.remove(at: index)
 
         onPlanEvent?(
             "Tactical override completed: \(reason)"

@@ -27,11 +27,13 @@ struct ContentView: View {
     @State private var planText = "I have not made a plan yet."
     @State private var missionText = "I have not made any goals yet"
     @State private var perceptionText = "No Perception perceived"
+    @State private var goalText = "No goals created"
     @State private var qCells: [FrankensteinQDisplayCell] = []
     @State private var animationSpeed: Double = 1.0 // Added speed control state
 
 
     var body: some View {
+        
         VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
@@ -69,6 +71,7 @@ struct ContentView: View {
                 planText: $planText,
                 missionText : $missionText,
                 perceptionText: $perceptionText,
+                goalText: $goalText,
                 qCells: $qCells,
                 animateSpeed: $animationSpeed,
                 onResetPerformed: {
@@ -76,13 +79,16 @@ struct ContentView: View {
                 })
              
             //QNetworkGridPanel(cells: qCells)
-             
-            RobotMindPanel(seen: seenText, plan: planText)
-             
-            // Passes the dynamic mission summary into the panel queue
-            MissionPlanPanel(summary: missionText, pendingActions: pendingActions)
-
-            PerceptionPanel(summary: perceptionText)
+            ScrollView{
+                RobotMindPanel(seen: seenText, plan: planText)
+                
+                // Passes the dynamic mission summary into the panel queue
+                MissionPlanPanel(summary: missionText, pendingActions: pendingActions)
+                
+                PerceptionPanel(summary: perceptionText)
+                
+                GoalPanel(summary:goalText)
+            }
             // Animation Speed Slider Control Row
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
@@ -222,6 +228,38 @@ struct PerceptionPanel: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
+struct GoalPanel: View {
+    let summary: String
+
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label("Goals", systemImage: "list.bullet.clipboard")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(summary)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.primary)
+                        .textSelection(.enabled)
+
+                    }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 80)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(.thinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 
 struct MissionPlanPanel: View {
     let summary: String

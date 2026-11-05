@@ -274,6 +274,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     var onPlanText: ((String) -> Void)?
     var onMissionText: ((String) -> Void)?
     var onPerceptionText: ((String) -> Void)?
+    var onGoalText: ((String) -> Void)?
     var onQGrid: (([FrankensteinQDisplayCell]) -> Void)?
     private var lastQGridPublishTime: TimeInterval = 0
 
@@ -504,7 +505,65 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             publishDebug("[MISSION SYNC] emergency recharge but no station found: holding, not resuming letters")
         }
     }
-    // MARK: - Frankenstein Perception Diagnostics
+
+    // MARK: - Navigation & Plan Update Loop
+
+        func updateNavigation(time: TimeInterval, deltaTime: TimeInterval) {
+            guard let characterNode = characterNode, let ca = ca else { return }
+            let characterPos = characterNode.position
+            
+            // 1. Pull the current task/goal target from CA's missionQueue
+            let missionQueue = ca.missionQueue
+            let targetNode = missionQueue.currentTargetNode
+            let targetPos = targetNode?.worldPosition
+            
+            // Determine destination or object positions for the spline update
+            // If there's an active target node (like a pickup object or goal destination), pass its position.
+            let objectPos = targetNode?.worldPosition // Or refine based on whether carrying/approaching an object
+            let destinationPos = targetNode?.worldPosition ?? SCNVector3(0, 0, -6.0) // Fallback or goal destination
+            
+            // Check if we are approaching an object or carrying one to decide approach side
+            let carrying = missionQueue.pendingActions.contains(where: { String(describing: $0).contains("lift") || String(describing: $0).contains("place") })
+            
+            // 2. Update the visual and navigation spline
+            planSpline.update(
+                time: time,
+                character: characterPos,
+                object: objectPos,
+                destination: destinationPos,
+                approachFromCharacterSide: carrying
+            )
+            
+            // 3. Select active steering path (approach vs delivery)
+            let activePath = carrying ? planSpline.deliveryPath : planSpline.approachPath
+            guard !activePath.isEmpty else { return }
+            
+            // 4. Look ahead along the path and steer Frankenstein
+            if let steeringTarget2D = planSpline.lookAheadPoint(from: characterPos, path: activePath, distance: 0.8) {
+                let steeringTarget3D = SCNVector3(steeringTarget2D.x, characterPos.y, steeringTarget2D.y)
+                
+                // Drive locomotion steering toward the look-ahead point
+                locomotion.steer(towards: steeringTarget3D, character: characterNode, deltaTime: deltaTime)
+                
+                // 5. Check arrival at the end of the current path segment
+                if let finalPoint = activePath.last {
+                    let distanceToGoal = hypot(characterPos.x - finalPoint.x, characterPos.z - finalPoint.y)
+                    if distanceToGoal < 0.35 {
+                        // Trigger completion or interaction when arriving at the waypoint/target
+                        handleWaypointArrival(missionQueue: missionQueue, targetNode: targetNode)
+                    }
+                }
+            }
+        }
+
+        private func handleWaypointArrival(missionQueue: MissionPlanQueue, targetNode: SCNNode?) {
+            // Example: notify or complete current task/action when waypoint is reached
+            if let currentTask = missionQueue.currentTask {
+                if let firstAction = currentTask.actions.first {
+                    missionQueue.completeAction(firstAction, target: targetNode, because: "reached waypoint via spline navigation")
+                }
+            }
+        }
 
     func getFrankensteinPerception() -> String {
 
@@ -761,7 +820,23 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         previousCharacterPosition = characterNode.presentation.worldPosition
         hasPreviousCharacterPosition = true
     }
-
+        func getCurrentGoalSummary() -> String {
+            guard let ca = ca, let currentGoal = ca.missionQueue.currentGoal else {
+                return "No active goal"
+            }
+            
+            let subgoalDescriptions = currentGoal.subgoals.map { task in
+                let actions = task.actions.map { "\($0)" }.joined(separator: ", ")
+                let actionText = actions.isEmpty ? "" : " [Actions: \(actions)]"
+                return "  • \(task.description)\(actionText)"
+            }.joined(separator: "\n")
+            
+            return """
+            Goal: \(currentGoal.title)
+            Subgoals:
+            \(subgoalDescriptions.isEmpty ? "  (No remaining subgoals)" : subgoalDescriptions)
+            """
+        }
     func getMissionQueuePlanString() -> String {
         guard let ca = ca else {
             return "CA not attached or simulation inactive"
@@ -1105,6 +1180,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         lastFrameTime = time
         dtFromLastFrame = dt
 
+        
         energyManager.isRecharging = hasReportedRecharge
         if hasReportedRecharge {
             energyManager.recharge(dt: dt)
@@ -1125,6 +1201,9 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         updateMissionSupervisor()
         syncMissionQueue()
         validateMissionTarget()
+        let deltaTime = time - lastFrameTime
+            lastFrameTime = time
+        updateNavigation(time: time, deltaTime: max(0.001, deltaTime))
 
         if let textGeo = powerMeterNode?.geometry as? SCNText {
             let percentage = Int(energyManager.powerLevel)
@@ -2417,9 +2496,9 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         let goalXZ = SIMD2<Float>(g.x, g.z)
 
         var path: [SIMD2<Float>] = [start, goalXZ]
-        if !carryingLetterBlock, planSpline.approachPath.count >= 2 {
-            path = planSpline.approachPath
-        }
+                if !carryingLetterBlock, planSpline.approachPath.count >= 2 {
+                    path = planSpline.approachPath.map { SIMD2<Float>($0.x, $0.z) }
+                }
 
         let goalTop = Float(goal.presentation.worldPosition.y)
         let candidates = scene.rootNode.childNodes { node, _ in self.isLooseBlocker(node) }
@@ -3302,89 +3381,96 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private func splineHeadingError(from position: SCNVector3) -> Float? {
-        guard isFollowingSpline,
-              let target = splineLookAheadPoint(
-                  from: position,
-                  path: planSpline.approachPath,
-                  distance: 0.8
-              ) else { return nil }
-        let dx = target.x - Float(position.x)
-        let dz = target.y - Float(position.z)
-        guard sqrt(dx * dx + dz * dz) > 0.05 else { return 0 }
-        return wrappedAngle(atan2(-dx, -dz) - heading)
-    }
+            guard isFollowingSpline,
+                  let target = splineLookAheadPoint(
+                      from: position,
+                      path: planSpline.approachPath,
+                      distance: 0.8
+                  ) else { return nil }
+            
+            let dx = target.x - Float(position.x)
+            let dz = target.z - Float(position.z)
+            
+            guard sqrt(dx * dx + dz * dz) > 0.05 else { return 0 }
+            return wrappedAngle(atan2(-dx, -dz) - heading)
+        }
 
     private func splineLookAheadPoint(
-        from position: SCNVector3,
-        path: [SIMD2<Float>],
-        distance: Float = 0.8
-    ) -> SIMD2<Float>? {
-        guard path.count >= 2 else { return nil }
+            from position: SCNVector3,
+            path: [SIMD3<Float>],
+            distance: Float = 0.8
+        ) -> SCNVector3? {
+            guard path.count >= 2 else { return nil }
 
-        let p = SIMD2<Float>(Float(position.x), Float(position.z))
+            let p = SIMD2<Float>(Float(position.x), Float(position.z))
 
-        let signature = "\(path.count)|\(path[0].x)|\(path[0].y)"
-        if signature != lastSplineSignature {
-            lastSplineSignature = signature
-            lastSplineIndex = 0
-        }
-
-        if lastSplineIndex < 0 || lastSplineIndex >= path.count {
-            lastSplineIndex = 0
-        }
-
-        let searchWindow = 15
-        let startIdx = max(0, lastSplineIndex)
-        let endIdx = min(path.count - 1, lastSplineIndex + searchWindow)
-
-        var nearestIndex = startIdx
-        var nearestDistance = Float.greatestFiniteMagnitude
-
-        for i in startIdx...endIdx {
-            let d = simd_distance(p, path[i])
-            if d < nearestDistance {
-                nearestDistance = d
-                nearestIndex = i
+            let signature = "\(path.count)|\(path[0].x)|\(path[0].z)"
+            if signature != lastSplineSignature {
+                lastSplineSignature = signature
+                lastSplineIndex = 0
             }
-        }
-        
-        if nearestDistance > 2.0 {
-            for i in path.indices {
-                let d = simd_distance(p, path[i])
+
+            if lastSplineIndex < 0 || lastSplineIndex >= path.count {
+                lastSplineIndex = 0
+            }
+
+            let searchWindow = 15
+            let startIdx = max(0, lastSplineIndex)
+            let endIdx = min(path.count - 1, lastSplineIndex + searchWindow)
+
+            var nearestIndex = startIdx
+            var nearestDistance = Float.greatestFiniteMagnitude
+
+            for i in startIdx...endIdx {
+                let pt2D = SIMD2<Float>(path[i].x, path[i].z)
+                let d = simd_distance(p, pt2D)
                 if d < nearestDistance {
                     nearestDistance = d
                     nearestIndex = i
                 }
             }
-        }
+            
+            if nearestDistance > 2.0 {
+                for i in path.indices {
+                    let pt2D = SIMD2<Float>(path[i].x, path[i].z)
+                    let d = simd_distance(p, pt2D)
+                    if d < nearestDistance {
+                        nearestDistance = d
+                        nearestIndex = i
+                    }
+                }
+            }
 
-        nearestIndex = max(0, min(nearestIndex, path.count - 1))
-        lastSplineIndex = nearestIndex
+            nearestIndex = max(0, min(nearestIndex, path.count - 1))
+            lastSplineIndex = nearestIndex
 
-        var remaining = max(0, distance)
-        var current = path[nearestIndex]
+            var remaining = max(0, distance)
+            var current = path[nearestIndex]
 
-        for i in nearestIndex..<(path.count - 1) {
-            let next = path[i + 1]
-            let segment = next - current
-            let segmentLength = simd_length(segment)
+            for i in nearestIndex..<(path.count - 1) {
+                let next = path[i + 1]
+                let segment = next - current
+                let segmentLength = simd_length(segment)
 
-            if segmentLength <= 0.0001 {
+                if segmentLength <= 0.0001 {
+                    current = next
+                    continue
+                }
+
+                if remaining <= segmentLength {
+                    let interpolated = current + segment / segmentLength * remaining
+                    return SCNVector3(interpolated.x, interpolated.y, interpolated.z)
+                }
+
+                remaining -= segmentLength
                 current = next
-                continue
             }
 
-            if remaining <= segmentLength {
-                return current + segment / segmentLength * remaining
+            if let lastPt = path.last {
+                return SCNVector3(lastPt.x, lastPt.y, lastPt.z)
             }
-
-            remaining -= segmentLength
-            current = next
+            return nil
         }
-
-        return path.last
-    }
-
     private func applyMovement(
         output: FrankensteinLocomotionOutput,
         deltaTime dt: Float,
@@ -4290,6 +4376,12 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         DispatchQueue.main.async { [weak self] in
             self?.onPerceptionText?(perception)
         }
+        
+        let goals = getCurrentGoalSummary()
+        DispatchQueue.main.async { [weak self] in
+            self?.onGoalText?(goals)
+        }
+       
         
         let pathText = pathGoalDistance.isFinite ? String(format: "%.2f", Double(pathGoalDistance)) : "n/a"
         let stats = """

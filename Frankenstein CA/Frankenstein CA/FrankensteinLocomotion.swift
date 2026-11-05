@@ -4,7 +4,8 @@ import simd
 
 final class FrankensteinLocomotion {
     
-    // MARK: - Mission State and Exploration
+    var moveSpeed: Float = 2.5
+    var rotationSpeed: Float = 10.0 // Radians per second for smooth turning
 
     var isDeliveringLetter: Bool = false
 
@@ -200,6 +201,41 @@ final class FrankensteinLocomotion {
     private(set) var falls = 0
     private(set) var goalsReached = 0
     private(set) var rechargesCompleted = 0
+    
+    func steer(towards target: SCNVector3, character: SCNNode, deltaTime: TimeInterval) {
+            let currentPos = character.position
+            
+            // 1. Calculate direction vector on the XZ plane (ignoring Y differences for flat ground movement)
+            let dx = target.x - currentPos.x
+            let dz = target.z - currentPos.z
+            let distance = hypot(dx, dz)
+            
+            // If already very close to the target point, stop moving
+            guard distance > 0.05 else { return }
+            
+            // Normalize direction
+            let dirX = dx / distance
+            let dirZ = dz / distance
+            
+            // 2. Move character forward along the direction vector
+            let step = min(Float(deltaTime) * moveSpeed, distance)
+            character.position = SCNVector3(
+                currentPos.x + dirX * step,
+                currentPos.y, // Maintain current height or ground level
+                currentPos.z + dirZ * step
+            )
+            
+            // 3. Smoothly rotate character to face the movement direction
+            let targetHeading = atan2(-dirX, -dirZ)
+            let currentEulerY = character.eulerAngles.y
+            
+            // Interpolate angles smoothly (shortest path rotation)
+            var angleDiff = targetHeading - currentEulerY
+            while angleDiff > .pi { angleDiff -= 2.0 * .pi }
+            while angleDiff < -.pi { angleDiff += 2.0 * .pi }
+            
+            character.eulerAngles.y += angleDiff * min(1.0, Float(deltaTime) * rotationSpeed)
+        }
 
     func completeEpisode(_ result: FrankensteinEpisodeEnd) {
         guard pendingEpisodeEnd == nil else { return }

@@ -13,6 +13,7 @@ struct FrankensteinSceneView: UIViewRepresentable {
     @Binding var planText: String
     @Binding var missionText: String
     @Binding var perceptionText: String
+    @Binding var goalText: String
     @Binding var qCells: [FrankensteinQDisplayCell]
     @Binding var animateSpeed: Double
     var onResetPerformed: (() -> Void)? = nil
@@ -235,6 +236,12 @@ struct FrankensteinSceneView: UIViewRepresentable {
                 self.perceptionText = text
             }
         }
+        
+        context.coordinator.onGoalText = { text in
+            if self.goalText != text {
+                self.goalText = text
+            }
+        }
 
 
         context.coordinator.onQGrid = { cells in
@@ -325,9 +332,7 @@ struct FrankensteinSceneView: UIViewRepresentable {
     ) {
         let coordinator = context.coordinator
 
-        // Refresh the displayed mission plan on every SwiftUI update.
-        refreshPlanText(context: context)
-
+     
         // Handle reset requests.
         guard resetRequested, !coordinator.isResetPending else {
             return
@@ -385,11 +390,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
         }
     }
     
-    // Add planText assignment here to reflect the coordinator's latest plan string
-    func refreshPlanText(context: Context) {
-        // Assign planText from coordinator's mission queue plan string to keep UI in sync with coordinator's plan
-        self.missionText = context.coordinator.getMissionQueuePlanString()
-    }
 
     // MARK: - Tear Down
 
