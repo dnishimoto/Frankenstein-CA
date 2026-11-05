@@ -12,6 +12,7 @@ struct FrankensteinSceneView: UIViewRepresentable {
     @Binding var seenText: String
     @Binding var planText: String
     @Binding var missionText: String
+    @Binding var perceptionText: String
     @Binding var qCells: [FrankensteinQDisplayCell]
     @Binding var animateSpeed: Double
     var onResetPerformed: (() -> Void)? = nil
@@ -228,6 +229,13 @@ struct FrankensteinSceneView: UIViewRepresentable {
                 self.missionText = text
             }
         }
+        
+        context.coordinator.onPerceptionText = { text in
+            if self.perceptionText != text {
+                self.perceptionText = text
+            }
+        }
+
 
         context.coordinator.onQGrid = { cells in
             if self.qCells != cells {

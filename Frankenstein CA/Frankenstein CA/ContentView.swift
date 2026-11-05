@@ -26,6 +26,7 @@ struct ContentView: View {
     @State private var seenText = "I have not looked around yet."
     @State private var planText = "I have not made a plan yet."
     @State private var missionText = "I have not made any goals yet"
+    @State private var perceptionText = "No Perception perceived"
     @State private var qCells: [FrankensteinQDisplayCell] = []
     @State private var animationSpeed: Double = 1.0 // Added speed control state
 
@@ -67,6 +68,7 @@ struct ContentView: View {
                 seenText: $seenText,
                 planText: $planText,
                 missionText : $missionText,
+                perceptionText: $perceptionText,
                 qCells: $qCells,
                 animateSpeed: $animationSpeed,
                 onResetPerformed: {
@@ -80,6 +82,7 @@ struct ContentView: View {
             // Passes the dynamic mission summary into the panel queue
             MissionPlanPanel(summary: missionText, pendingActions: pendingActions)
 
+            PerceptionPanel(summary: perceptionText)
             // Animation Speed Slider Control Row
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
@@ -185,6 +188,38 @@ struct QNetworkGridPanel: View {
         return value >= 0
             ? Color.green.opacity(strength)
             : Color.orange.opacity(strength)
+    }
+}
+
+struct PerceptionPanel: View {
+    let summary: String
+
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label("Perceptions", systemImage: "list.bullet.clipboard")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(summary)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.primary)
+                        .textSelection(.enabled)
+
+                    }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 80)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(.thinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 

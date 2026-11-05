@@ -271,6 +271,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     var onPlanText: ((String) -> Void)?
     var onMissionText: ((String) -> Void)?
+    var onPerceptionText: ((String) -> Void)?
     var onQGrid: (([FrankensteinQDisplayCell]) -> Void)?
     private var lastQGridPublishTime: TimeInterval = 0
 
@@ -501,7 +502,163 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             publishDebug("[MISSION SYNC] emergency recharge but no station found: holding, not resuming letters")
         }
     }
+    // MARK: - Frankenstein Perception Diagnostics
 
+    func getFrankensteinPerception() -> String {
+
+        var lines: [String] = []
+
+        // Character position
+        if let character = characterNode {
+            let p = character.presentation.worldPosition
+
+            lines.append("========== FRANKENSTEIN PERCEPTION ==========")
+
+            lines.append(
+                String(
+                    format: "Character position: X %.2f | Y %.2f | Z %.2f",
+                    Double(p.x),
+                    Double(p.y),
+                    Double(p.z)
+                )
+            )
+        }
+
+        // Mission information
+        lines.append("")
+        lines.append("MISSION")
+
+        lines.append("Phase: \(missionDecision.phase)")
+        lines.append("Subgoal: \(missionDecision.subGoal)")
+        lines.append("Goal: \(goalNode?.name ?? "None")")
+        lines.append("Carrying letter: \(carryingLetterBlock)")
+
+        // Terrain perception
+        let terrain = latestTerrainSample
+
+        lines.append("")
+        lines.append("TERRAIN PERCEPTION")
+
+        lines.append("Terrain: \(terrain.terrain)")
+        lines.append("Object: \(terrain.objectName.isEmpty ? "None" : terrain.objectName)")
+
+        lines.append(
+            String(
+                format: "Distance: %.2f m",
+                Double(terrain.distance)
+            )
+        )
+
+        lines.append(
+            String(
+                format: "Obstacle height: %.2f m",
+                Double(terrain.obstacleHeight)
+            )
+        )
+
+        lines.append("Object movable: \(terrain.objectMovable)")
+        lines.append("Can land on object: \(terrain.canLandOnObject)")
+
+        // Directional clearance
+        lines.append("")
+        lines.append("DIRECTIONAL CLEARANCE")
+
+        lines.append(
+            String(format: "Ahead: %.2f m", Double(clearanceAhead))
+        )
+
+        lines.append(
+            String(format: "Left: %.2f m", Double(clearanceMinus))
+        )
+
+        lines.append(
+            String(format: "Right: %.2f m", Double(clearancePlus))
+        )
+
+        lines.append(
+            String(format: "Heading: %.2f radians", Double(heading))
+        )
+
+        // Object detection
+        lines.append("")
+        lines.append("DETECTED OBJECTS")
+        lines.append("Count: \(latestDetections.count)")
+
+        for (index, object) in latestDetections.enumerated() {
+
+            let p = object.worldPosition
+            let d = object.dimensions
+
+            lines.append(
+                String(
+                    format:
+                        "%d. %@ | Distance %.2f m | Size %.2f × %.2f × %.2f m | Pickupable: %@",
+                    index + 1,
+                    object.name,
+                    Double(object.distance),
+                    Double(d.x),
+                    Double(d.y),
+                    Double(d.z),
+                    object.pickupable ? "YES" : "NO"
+                )
+            )
+        }
+
+        // Field of view
+        lines.append("")
+        lines.append("VISIBLE OBJECTS")
+        lines.append("Count: \(visibleObjects.count)")
+
+        for object in visibleObjects.prefix(12) {
+            lines.append(
+                String(
+                    format: "%@ | %.2f m",
+                    object.name,
+                    Double(object.distance)
+                )
+            )
+        }
+
+        // Raycast perception
+        lines.append("")
+        lines.append("RAYCAST OBSERVATIONS")
+        lines.append("Count: \(latestRayObservations.count)")
+
+        for ray in latestRayObservations.prefix(12) {
+            lines.append(
+                String(
+                    format: "%@ -> %@ | %.2f m",
+                    ray.hitNodeName,
+                    ray.resolvedObjectName,
+                    Double(ray.distance)
+                )
+            )
+        }
+
+        // Obstruction and movement state
+        lines.append("")
+        lines.append("OBSTRUCTION STATE")
+
+        lines.append("Push target: \(pushTargetNode?.name ?? "None")")
+
+        lines.append(
+            String(
+                format: "Stuck duration: %.2f seconds",
+                Double(stuckSeconds)
+            )
+        )
+
+        lines.append(
+            String(
+                format: "Perceived goal distance: %.2f m",
+                Double(pathGoalDistance)
+            )
+        )
+
+        lines.append("============================================")
+
+        return lines.joined(separator: "\n")
+    }
     private func canManipulate(_ target: SCNNode, from character: SCNNode) -> Bool {
         guard target.parent != nil, target !== carriedNode,
               !isCharacterPart(target) else { return false }
@@ -2393,8 +2550,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     private func annotateBearing(_ info: DetectedObjectInfo, character: SCNNode) -> DetectedObjectInfo {
         let c = character.presentation.worldPosition
-        let dx = Float(info.worldPosition.x - c.x)
-        let dz = Float(info.worldPosition.z - c.z)
+        let dx = info.worldPosition.x - c.x
+        let dz = info.worldPosition.z - c.z
         var annotated = info
         if dx * dx + dz * dz > 0.0001 {
             annotated.bearing = wrappedAngle(atan2(-dx, -dz) - heading)
@@ -2422,60 +2579,71 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private func scanWideFieldOfView(
-        from character: SCNNode,
-        in scene: SCNScene
-    ) -> [DetectedObjectInfo] {
-        let position = character.presentation.worldPosition
-        let options: [String: Any] = [
-            SCNHitTestOption.ignoreHiddenNodes.rawValue: true,
-            SCNHitTestOption.backFaceCulling.rawValue: true
-        ]
-        var nearestByNode: [ObjectIdentifier: DetectedObjectInfo] = [:]
-        var angle = -wideScanHalfAngleDegrees
-        while angle <= wideScanHalfAngleDegrees + 0.01 {
-            let theta = heading + angle * .pi / 180
-            let dx = -sin(theta)
-            let dz = -cos(theta)
-            for rayHeight in wideScanHeights {
-                let origin = SCNVector3(position.x, position.y + rayHeight, position.z)
-                let end = SCNVector3(origin.x + dx * wideScanRange, origin.y, origin.z + dz * wideScanRange)
-                let hits = scene.rootNode.hitTestWithSegment(from: origin, to: end, options: options)
-                for hit in hits {
-                    let hitNode = hit.node
-                    let lowered = (hitNode.name ?? "").lowercased()
-                    guard !isCharacterPart(hitNode), !isFloorSurface(hitNode),
-                          !isQGridNode(hitNode), !lowered.contains("marker") else { continue }
-                    let hx = Float(hit.worldCoordinates.x - position.x)
-                    let hz = Float(hit.worldCoordinates.z - position.z)
-                    let hitDistance = sqrt(hx * hx + hz * hz)
-                    guard hitDistance >= Self.minimumHitDistance else { continue }
-                    let target: SCNNode = pickupTarget(for: hitNode) ?? meaningfulDetectionParent(for: hitNode)
-                    guard !isContainerNode(target), !isCharacterPart(target), target !== character else { continue }
-                    let dimensions = worldDimensions(of: target)
-                    guard dimensions.x > 0.001, dimensions.y > 0.001, dimensions.z > 0.001,
-                          max(dimensions.x, max(dimensions.y, dimensions.z)) <= wideScanMaximumExtent else { continue }
-                    let info = DetectedObjectInfo(
-                        name: readableName(for: target),
-                        dimensions: dimensions,
-                        distance: hitDistance,
-                        worldPosition: target.presentation.worldPosition,
-                        pickupable: pickupTarget(for: target) != nil,
-                        topY: worldTopY(of: target)
-                    )
-                    let key = ObjectIdentifier(target)
-                    if let existing = nearestByNode[key], existing.distance <= hitDistance {
-                        // Keep nearest
-                    } else {
-                        nearestByNode[key] = info
-                    }
-                    break
-                }
-            }
-            angle += wideScanStepDegrees
-        }
-        return nearestByNode.values.sorted { $0.distance < $1.distance }
-    }
+            from character: SCNNode,
+            in scene: SCNScene
+        ) -> [DetectedObjectInfo] {
+            let position = character.presentation.worldPosition
+            let options: [String: Any] = [
+                SCNHitTestOption.ignoreHiddenNodes.rawValue: true,
+                SCNHitTestOption.backFaceCulling.rawValue: true
+            ]
+            var nearestByNode: [ObjectIdentifier: DetectedObjectInfo] = [:]
+            var angle = -wideScanHalfAngleDegrees
+            while angle <= wideScanHalfAngleDegrees + 0.01 {
+                let theta = heading + angle * .pi / 180
+                let dx = -sin(theta)
+                let dz = -cos(theta)
+                for rayHeight in wideScanHeights {
+                    let origin = SCNVector3(position.x, position.y + rayHeight, position.z)
+                    let end = SCNVector3(origin.x + dx * wideScanRange, origin.y, origin.z + dz * wideScanRange)
+                    let hits = scene.rootNode.hitTestWithSegment(from: origin, to: end, options: options)
+                    for hit in hits {
+                        let hitNode = hit.node
+                        let lowered = (hitNode.name ?? "").lowercased()
+                        guard !isCharacterPart(hitNode), !isFloorSurface(hitNode),
+                              !isQGridNode(hitNode), !lowered.contains("marker") else { continue }
+                        
+                        let hx = hit.worldCoordinates.x - position.x
+                        let hz = hit.worldCoordinates.z - position.z
+                        let hitDistance = sqrt(hx * hx + hz * hz)
+                        guard hitDistance >= Self.minimumHitDistance else { continue }
+                        
+                        let target: SCNNode = pickupTarget(for: hitNode) ?? meaningfulDetectionParent(for: hitNode)
+                        guard !isContainerNode(target), !isCharacterPart(target), target !== character else { continue }
+                        
+                        let dimensions = worldDimensions(of: target)
+                        guard dimensions.x > 0.001, dimensions.y > 0.001, dimensions.z > 0.001,
+                              max(dimensions.x, max(dimensions.y, dimensions.z)) <= wideScanMaximumExtent else { continue }
+                        
+                        let resolvedName = target.name ?? hitNode.name ?? "object"
+                        let lowerName = resolvedName.lowercased()
+                        let isMovable = lowerName.contains("movable") || lowerName.contains("crate")
 
+                        let rawInfo = DetectedObjectInfo(
+                            name: resolvedName,
+                            distance: hitDistance,
+                            bearing: 0.0, // Will be updated by annotateBearing
+                            dimensions: dimensions,
+                            worldPosition: target.presentation.worldPosition,
+                            pickupable: pickupTarget(for: target) != nil,
+                            movable: isMovable,
+                            topY: worldTopY(of: target)
+                        )
+
+                        let info = annotateBearing(rawInfo, character: character)
+                        let key = ObjectIdentifier(target)
+                        if let existing = nearestByNode[key], existing.distance <= hitDistance {
+                            // Keep nearest
+                        } else {
+                            nearestByNode[key] = info
+                        }
+                        break
+                    }
+                }
+                angle += wideScanStepDegrees
+            }
+            return nearestByNode.values.sorted { $0.distance < $1.distance }
+        }
     private func detectAllObjectsAhead(
         from character: SCNNode,
         in scene: SCNScene
@@ -2498,56 +2666,88 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private func detectDetailedObjectAhead(
-        from character: SCNNode,
-        in scene: SCNScene,
-        rayHeight: Float,
-        lateral: Float
-    ) -> DetailedObjectDetection? {
-        let characterPresentation = character.presentation
-        let position = characterPresentation.worldPosition
-        let localForwardPoint = characterPresentation.convertPosition(SCNVector3(0, 0, -1), to: nil)
-        var forward = SCNVector3(localForwardPoint.x - position.x, localForwardPoint.y - position.y, localForwardPoint.z - position.z)
-        let forwardLength = sqrt(forward.x * forward.x + forward.y * forward.y + forward.z * forward.z)
-        guard forwardLength > 0.0001 else { return nil }
-        forward.x /= forwardLength
-        forward.y /= forwardLength
-        forward.z /= forwardLength
-        let origin = SCNVector3(position.x + forward.z * lateral, position.y + rayHeight, position.z - forward.x * lateral)
-        let rayLength: Float = 4.0
-        let end = SCNVector3(origin.x + forward.x * rayLength, origin.y, origin.z + forward.z * rayLength)
-        let options: [String: Any] = [
-            SCNHitTestOption.ignoreHiddenNodes.rawValue: true,
-            SCNHitTestOption.backFaceCulling.rawValue: true
-        ]
-        let hits = scene.rootNode.hitTestWithSegment(from: origin, to: end, options: options)
-        for hit in hits {
-            let hitNode = hit.node
-            guard !isCharacterPart(hitNode), !isFloorSurface(hitNode), !isQGridNode(hitNode) else { continue }
-            let hitPoint = hit.worldCoordinates
-            let hitDistance = sqrt(Float((hitPoint.x - origin.x) * (hitPoint.x - origin.x) + Float((hitPoint.z - origin.z) * (hitPoint.z - origin.z))))
-            guard hitDistance >= Self.minimumHitDistance else { continue }
-            let target: SCNNode = pickupTarget(for: hitNode) ?? meaningfulDetectionParent(for: hitNode)
-            guard !isContainerNode(target), target !== character, !isCharacterPart(target) else { continue }
-            let dimensions = worldDimensions(of: target)
-            guard dimensions.x > 0.001, dimensions.y > 0.001, dimensions.z > 0.001 else { continue }
-            guard max(dimensions.x, max(dimensions.y, dimensions.z)) <= Self.maximumObstacleExtent else { continue }
-            let dx = Float(hitPoint.x - origin.x)
-            let dz = Float(hitPoint.z - origin.z)
-            let distance = sqrt(dx * dx + dz * dz)
-            guard distance <= rayLength else { continue }
-            let resolvedName = readableName(for: target)
-            let info = DetectedObjectInfo(
-                name: resolvedName,
-                dimensions: dimensions,
-                distance: distance,
-                worldPosition: target.presentation.worldPosition,
-                pickupable: pickupTarget(for: target) != nil,
-                topY: worldTopY(of: target)
+            from character: SCNNode,
+            in scene: SCNScene,
+            rayHeight: Float,
+            lateral: Float
+        ) -> DetailedObjectDetection? {
+            let characterPresentation = character.presentation
+            let position = characterPresentation.worldPosition
+            let localForwardPoint = characterPresentation.convertPosition(SCNVector3(0, 0, -1), to: nil)
+            
+            var forward = SCNVector3(
+                localForwardPoint.x - position.x,
+                localForwardPoint.y - position.y,
+                localForwardPoint.z - position.z
             )
-            return DetailedObjectDetection(node: target, info: info)
+            let forwardLength = sqrt(forward.x * forward.x + forward.y * forward.y + forward.z * forward.z)
+            guard forwardLength > 0.0001 else { return nil }
+            forward.x /= forwardLength
+            forward.y /= forwardLength
+            forward.z /= forwardLength
+
+            // Compute orthogonal right vector for lateral offset (-forward.z, 0, forward.x)
+            let rightX = -forward.z
+            let rightZ = forward.x
+
+            let origin = SCNVector3(
+                position.x + rightX * lateral,
+                position.y + rayHeight,
+                position.z + rightZ * lateral
+            )
+            let rayLength: Float = 4.0
+            let end = SCNVector3(
+                origin.x + forward.x * rayLength,
+                origin.y,
+                origin.z + forward.z * rayLength
+            )
+
+            let options: [String: Any] = [
+                SCNHitTestOption.ignoreHiddenNodes.rawValue: true,
+                SCNHitTestOption.backFaceCulling.rawValue: true
+            ]
+            let hits = scene.rootNode.hitTestWithSegment(from: origin, to: end, options: options)
+            for hit in hits {
+                let hitNode = hit.node
+                guard !isCharacterPart(hitNode), !isFloorSurface(hitNode), !isQGridNode(hitNode) else { continue }
+                let hitPoint = hit.worldCoordinates
+                
+                let dxHit = hitPoint.x - origin.x
+                let dzHit = hitPoint.z - origin.z
+                let hitDistance = sqrt(dxHit * dxHit + dzHit * dzHit)
+                guard hitDistance >= Self.minimumHitDistance else { continue }
+                
+                let target: SCNNode = pickupTarget(for: hitNode) ?? meaningfulDetectionParent(for: hitNode)
+                guard !isContainerNode(target), target !== character, !isCharacterPart(target) else { continue }
+                
+                let dimensions = worldDimensions(of: target)
+                guard dimensions.x > 0.001, dimensions.y > 0.001, dimensions.z > 0.001 else { continue }
+                guard max(dimensions.x, max(dimensions.y, dimensions.z)) <= Self.maximumObstacleExtent else { continue }
+                
+                let dx = hitPoint.x - position.x
+                let dz = hitPoint.z - position.z
+                let distance = sqrt(dx * dx + dz * dz)
+                guard distance <= rayLength else { continue }
+                
+                let resolvedName = readableName(for: target)
+                let lowerName = resolvedName.lowercased()
+                let isMovable = lowerName.contains("movable") || lowerName.contains("crate")
+
+                let rawInfo = DetectedObjectInfo(
+                    name: resolvedName,
+                    distance: distance,
+                    bearing: 0.0,
+                    dimensions: dimensions,
+                    worldPosition: target.presentation.worldPosition,
+                    pickupable: pickupTarget(for: target) != nil,
+                    movable: isMovable,
+                    topY: worldTopY(of: target)
+                )
+                let info = annotateBearing(rawInfo, character: character)
+                return DetailedObjectDetection(node: target, info: info)
+            }
+            return nil
         }
-        return nil
-    }
 
     private func logRay(
         origin: SCNVector3,
@@ -3989,6 +4189,12 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         DispatchQueue.main.async { [weak self] in
             self?.onMissionText?(data)
         }
+        
+        let perception = getFrankensteinPerception()
+        DispatchQueue.main.async { [weak self] in
+            self?.onPerceptionText?(perception)
+        }
+        
         let pathText = pathGoalDistance.isFinite ? String(format: "%.2f", Double(pathGoalDistance)) : "n/a"
         let stats = """
         Action: \(action)

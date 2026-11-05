@@ -9,6 +9,127 @@ import Foundation
 import SwiftUI
 import SceneKit
 
+
+struct DetectedObjectInfo: Equatable {
+    let name: String
+    let distance: Float
+        var bearing: Float
+        let dimensions: SCNVector3
+        let worldPosition: SCNVector3
+        let pickupable: Bool
+        let movable: Bool
+        let topY: Float
+    
+
+    /// "MovableBlock" -> "movable block", "PickupCrate1" -> "pickup crate".
+    var spokenName: String {
+        var words = ""
+
+        for character in name {
+            if character.isNumber { continue }
+
+            if character.isUppercase, !words.isEmpty, words.last != " " {
+                words.append(" ")
+            }
+
+            words.append(character)
+        }
+
+        let cleaned = words
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .lowercased()
+            .trimmingCharacters(in: .whitespaces)
+
+        return cleaned.isEmpty ? "object" : cleaned
+    }
+
+    var isMovableBlock: Bool {
+        let value = name.lowercased()
+
+        return value.contains("movable") ||
+            value.contains("block") ||
+            value.contains("crate") ||
+            value.contains("box")
+    }
+
+    var bearingPhrase: String {
+        let side = bearing >= 0 ? "right" : "left"
+
+        switch abs(bearing) {
+        case ..<0.2:
+            return "straight ahead"
+        case ..<0.75:
+            return "ahead to the \(side)"
+        case ..<1.4:
+            return "to the \(side)"
+        default:
+            return "far to the \(side)"
+        }
+    }
+
+    /// "a movable block 0.8 m straight ahead (can be pushed or lifted)"
+    var fragment: String {
+        let first = spokenName.first.map { "aeiou".contains($0) } ?? false
+        let article = first ? "an" : "a"
+
+        var text = "\(article) \(spokenName) " +
+            "\(String(format: "%.1f", Double(distance))) m \(bearingPhrase)"
+
+        var traits: [String] = []
+
+        if isMovableBlock { traits.append("can be pushed") }
+        if pickupable { traits.append("can be lifted") }
+
+        if !traits.isEmpty {
+            text += " (\(traits.joined(separator: ", ")))"
+        }
+
+        return text
+    }
+
+    /// One concatenated sentence for the UI, nearest first.
+    static func summary(
+        of objects: [DetectedObjectInfo],
+        limit: Int = 6
+    ) -> String {
+        guard !objects.isEmpty else {
+            return "I see nothing in front of me."
+        }
+
+        let sorted = objects.sorted { $0.distance < $1.distance }
+        let shown = sorted.prefix(limit).map { $0.fragment }
+
+        var text: String
+
+        switch shown.count {
+        case 1:
+            text = shown[0]
+        case 2:
+            text = "\(shown[0]) and \(shown[1])"
+        default:
+            text = shown.dropLast().joined(separator: ", ") + ", and " + (shown.last ?? "")
+        }
+
+        let extra = sorted.count - shown.count
+
+        if extra > 0 {
+            text += ", plus \(extra) more farther away"
+        }
+
+        return "I see " + text + "."
+    }
+}
+
+struct FrankensteinPerceptionFrame {
+    let detectedObjects: [DetectedObjectInfo]
+    let terrainSample: FrankensteinTerrainSample
+    
+    var isEmpty: Bool {
+        detectedObjects.isEmpty && terrainSample.terrain == .flat
+    }
+}
+
 struct FrankensteinActionEvaluation {
     let action: FrankensteinAction
     let succeeded: Bool
@@ -17,7 +138,6 @@ struct FrankensteinActionEvaluation {
     let pathProgress: Float
     let madeProgress: Bool
     let wasBlocked: Bool
-    let wasFutile: Bool
     let failureReason: String?
 }
 
@@ -151,15 +271,7 @@ struct FrankensteinObjectObservation: Hashable {
     }
 }
 
-struct DetectedObjectInfo {
-    let name: String
-    let dimensions: SCNVector3
-    let distance: Float
-    let worldPosition: SCNVector3
-    let pickupable: Bool
-    var topY: Float = 0
-    var bearing: Float = 0
-}
+
 
 struct FrankensteinQDisplayCell: Identifiable, Equatable {
     let objectName: String
@@ -327,13 +439,6 @@ struct FrankensteinGoalObservation {
     let isMovingTowardGoal: Bool
 }
 
-struct FrankensteinPerceptionFrame {
-    let visibleObjects: [DetectedObjectInfo]
-    let nearestObstacle: DetectedObjectInfo?
-    let planningTarget: DetectedObjectInfo?
-    let summary: String
-    let immediateRisk: Float
-}
 
 struct FrankensteinPredictedOutcome {
     let actionName: String
@@ -900,108 +1005,5 @@ struct FrankensteinLearningMemory {
     }
 }
 
-// MARK: - Cellular Automaton and Learner
 
-// MARK: - Spoken description of what Frankenstein sees
 
-extension DetectedObjectInfo {
-
-    /// "MovableBlock" -> "movable block", "PickupCrate1" -> "pickup crate".
-    var spokenName: String {
-        var words = ""
-
-        for character in name {
-            if character.isNumber { continue }
-
-            if character.isUppercase, !words.isEmpty, words.last != " " {
-                words.append(" ")
-            }
-
-            words.append(character)
-        }
-
-        let cleaned = words
-            .replacingOccurrences(of: "_", with: " ")
-            .replacingOccurrences(of: "-", with: " ")
-            .lowercased()
-            .trimmingCharacters(in: .whitespaces)
-
-        return cleaned.isEmpty ? "object" : cleaned
-    }
-
-    var isMovableBlock: Bool {
-        let value = name.lowercased()
-
-        return value.contains("movable") ||
-            value.contains("block") ||
-            value.contains("crate") ||
-            value.contains("box")
-    }
-
-    var bearingPhrase: String {
-        let side = bearing >= 0 ? "right" : "left"
-
-        switch abs(bearing) {
-        case ..<0.2:
-            return "straight ahead"
-        case ..<0.75:
-            return "ahead to the \(side)"
-        case ..<1.4:
-            return "to the \(side)"
-        default:
-            return "far to the \(side)"
-        }
-    }
-
-    /// "a movable block 0.8 m straight ahead (can be pushed or lifted)"
-    var fragment: String {
-        let first = spokenName.first.map { "aeiou".contains($0) } ?? false
-        let article = first ? "an" : "a"
-
-        var text = "\(article) \(spokenName) " +
-            "\(String(format: "%.1f", Double(distance))) m \(bearingPhrase)"
-
-        var traits: [String] = []
-
-        if isMovableBlock { traits.append("can be pushed") }
-        if pickupable { traits.append("can be lifted") }
-
-        if !traits.isEmpty {
-            text += " (\(traits.joined(separator: ", ")))"
-        }
-
-        return text
-    }
-
-    /// One concatenated sentence for the UI, nearest first.
-    static func summary(
-        of objects: [DetectedObjectInfo],
-        limit: Int = 6
-    ) -> String {
-        guard !objects.isEmpty else {
-            return "I see nothing in front of me."
-        }
-
-        let sorted = objects.sorted { $0.distance < $1.distance }
-        let shown = sorted.prefix(limit).map { $0.fragment }
-
-        var text: String
-
-        switch shown.count {
-        case 1:
-            text = shown[0]
-        case 2:
-            text = "\(shown[0]) and \(shown[1])"
-        default:
-            text = shown.dropLast().joined(separator: ", ") + ", and " + (shown.last ?? "")
-        }
-
-        let extra = sorted.count - shown.count
-
-        if extra > 0 {
-            text += ", plus \(extra) more farther away"
-        }
-
-        return "I see " + text + "."
-    }
-}
