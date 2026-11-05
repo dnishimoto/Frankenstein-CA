@@ -38,7 +38,7 @@ final class FrankensteinPlanSpline {
     private let samplesPerSegment = 12
 
     private var lastKey = ""
-    private var lastUpdate: TimeInterval = 0
+    private var lastUpdate: TimeInterval = -999 // Fixed: allows immediate update on frame 0
 
     // MARK: - Keep-out zones (the chasm)
 
@@ -108,7 +108,6 @@ final class FrankensteinPlanSpline {
                   !inside(b, center: zone.center, half: half),
                   segmentCrosses(a, b, center: zone.center, half: half) else { continue }
 
-            // Corners of the inflated rectangle, in order around it.
             let c = zone.center
             let corners = [
                 SIMD2<Float>(c.x - half.x, c.y - half.y),
@@ -144,8 +143,6 @@ final class FrankensteinPlanSpline {
         return [a, b]
     }
 
-    /// Adds points along each leg so the smoothing spline stays close to
-    /// the corner-to-corner route instead of cutting across the zone.
     private func densify(_ points: [SIMD2<Float>], spacing: Float = 0.8) -> [SIMD2<Float>] {
         guard points.count >= 2 else { return points }
         var result: [SIMD2<Float>] = [points[0]]
@@ -232,7 +229,7 @@ final class FrankensteinPlanSpline {
         destinationRing.name = "PlanSplineMarker_DestRing"
 
         for node in [approachNode, deliveryNode, targetRing, destinationRing] {
-            node.isHidden = true
+            node.isHidden = false // Ensure visible by default when attached
             root.addChildNode(node)
         }
 
@@ -240,7 +237,7 @@ final class FrankensteinPlanSpline {
     }
 
     private func makeRing(color: UIColor, radius: CGFloat) -> SCNNode {
-        let ring = SCNTorus(ringRadius: radius, pipeRadius: 0.025)
+        let ring = SCNTorus(ringRadius: radius, pipeRadius: 0.03)
         let material = SCNMaterial()
         material.diffuse.contents = color
         material.emission.contents = color
@@ -269,24 +266,13 @@ final class FrankensteinPlanSpline {
         guard time - lastUpdate >= 0.1 else { return }
         lastUpdate = time
 
-        let key = String(
-            format: "%.1f,%.1f,%.1f|%@|%.1f,%.1f,%.1f|%d",
-            Double(character.x), Double(character.y), Double(character.z),
-            object.map { String(format: "%.1f,%.1f,%.1f", Double($0.x), Double($0.y), Double($0.z)) } ?? "-",
-            Double(destination.x), Double(destination.y), Double(destination.z),
-            approachFromCharacterSide ? 1 : 0
-        )
-
-        guard key != lastKey else { return }
-        lastKey = key
-
         let start2D = SIMD2<Float>(Float(character.x), Float(character.z))
         let end2D = SIMD2<Float>(Float(destination.x), Float(destination.z))
         let startY = Float(character.y)
         let endY = Float(destination.y)
 
         destinationRing.isHidden = false
-        destinationRing.position = SCNVector3(destination.x, destination.y + 0.02, destination.z)
+        destinationRing.position = SCNVector3(destination.x, destination.y + 0.05, destination.z)
 
         guard let object else {
             let legRoute = route(start2D, end2D)
@@ -297,7 +283,7 @@ final class FrankensteinPlanSpline {
             approachPath = curve2D.enumerated().map { index, pt in
                 let t = Float(index) / Float(max(1, curve2D.count - 1))
                 let y = startY + (endY - startY) * t
-                return SIMD3<Float>(pt.x, y, pt.y)
+                return SIMD3<Float>(pt.x, y + 0.03, pt.y)
             }
             deliveryPath = []
             approachNode.geometry = lineGeometry3D(approachPath, color: .cyan)
@@ -339,7 +325,7 @@ final class FrankensteinPlanSpline {
         let fullApproach3D = curveApproach2D.enumerated().map { index, pt in
             let t = Float(index) / Float(max(1, curveApproach2D.count - 1))
             let y = startY + (objY - startY) * pow(t, 0.7)
-            return SIMD3<Float>(pt.x, y, pt.y)
+            return SIMD3<Float>(pt.x, y + 0.03, pt.y)
         }
 
         if approachFromCharacterSide {
@@ -364,7 +350,7 @@ final class FrankensteinPlanSpline {
         deliveryPath = curveDelivery2D.enumerated().map { index, pt in
             let t = Float(index) / Float(max(1, curveDelivery2D.count - 1))
             let y = objY + (endY - objY) * t
-            return SIMD3<Float>(pt.x, y, pt.y)
+            return SIMD3<Float>(pt.x, y + 0.03, pt.y)
         }
 
         approachNode.geometry = lineGeometry3D(approachPath, color: .cyan)
@@ -373,7 +359,7 @@ final class FrankensteinPlanSpline {
         deliveryNode.isHidden = false
 
         targetRing.isHidden = false
-        targetRing.position = SCNVector3(object.x, objY + 0.02, object.z)
+        targetRing.position = SCNVector3(object.x, objY + 0.05, object.z)
     }
 
     private func hideAll() {
@@ -422,7 +408,7 @@ final class FrankensteinPlanSpline {
     }
 
     private func lineGeometry3D(_ points: [SIMD3<Float>], color: UIColor) -> SCNGeometry {
-        let vertices = points.map { SCNVector3($0.x, $0.y + 0.02, $0.z) }
+        let vertices = points.map { SCNVector3($0.x, $0.y, $0.z) }
         let source = SCNGeometrySource(vertices: vertices)
 
         var indices: [Int32] = []

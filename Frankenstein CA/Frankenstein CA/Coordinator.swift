@@ -947,6 +947,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         characterFootOffset = measureCharacterFootOffset(characterNode)
         configurePhysicsWorld(in: scene)
         addMovableBlockCourse(to: scene)
+        planSpline.attach(to: scene)
         characterVerticalVelocity = 0
         hasReportedFall = false
         hasReportedRecharge = false
@@ -1201,6 +1202,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         updateMissionSupervisor()
         syncMissionQueue()
         validateMissionTarget()
+        
         let deltaTime = time - lastFrameTime
             lastFrameTime = time
         updateNavigation(time: time, deltaTime: max(0.001, deltaTime))
@@ -1337,6 +1339,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             }
         }()
 
+        
         // Predict what each permitted action would do BEFORE the CA picks one,
         // so the CA can avoid actions expected to fail and favour ones expected
         // to clear an obstruction.
