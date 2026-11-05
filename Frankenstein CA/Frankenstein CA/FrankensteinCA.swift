@@ -10,9 +10,8 @@ import UIKit
 
 final class FrankensteinCA: ObservableObject {
 
-    // Replace planBuffer with missionQueue
 
-    let missionQueue = MissionPlanQueue()
+    @Published var missionQueue = MissionPlanQueue()
 
 
 

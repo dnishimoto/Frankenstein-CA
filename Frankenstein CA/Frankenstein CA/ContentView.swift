@@ -28,32 +28,7 @@ struct ContentView: View {
     @State private var qCells: [FrankensteinQDisplayCell] = []
     @State private var animationSpeed: Double = 1.0 // Added speed control state
 
-    // Dynamically tracks the mission state as letters are collected/placed
-    private var currentMissionSummary: String {
-        let targetWord = "FRANKENSTEIN"
-        let placedCount = energyManager.placedLetterCount
 
-        if placedCount >= targetWord.count {
-            return "Mission Complete: FRANKENSTEIN spelled successfully!"
-        }
-
-        let targetIndex = targetWord.index(
-            targetWord.startIndex,
-            offsetBy: placedCount
-        )
-        let currentLetter = targetWord[targetIndex]
-
-        return "Mission: Find and place letter '\(currentLetter)' (\(placedCount)/\(targetWord.count) placed)"
-    }
-    func placeLetter(_ letter: Character) {
-        let target = "FRANKENSTEIN"
-        let index = target.index(target.startIndex, offsetBy: placedLetterCount)
-
-        guard placedLetterCount < target.count,
-              letter == target[index] else { return }
-
-        placedLetterCount += 1
-    }
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -101,7 +76,7 @@ struct ContentView: View {
             RobotMindPanel(seen: seenText, plan: planText)
              
             // Passes the dynamic mission summary into the panel queue
-            MissionPlanPanel(summary: currentMissionSummary, pendingActions: pendingActions)
+            MissionPlanPanel(summary: energyManager.missionQueuePlanText, pendingActions: pendingActions)
 
             // Animation Speed Slider Control Row
             VStack(alignment: .leading, spacing: 4) {

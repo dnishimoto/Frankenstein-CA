@@ -758,11 +758,37 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         hasPreviousCharacterPosition = true
     }
 
+    /// Returns a formatted string representing the current plans and active status in the mission queue.
+    func getMissionQueuePlanString() -> String {
+        guard let ca = ca else {
+            return "CA not attached or simulation inactive"
+        }
+        
+        let summary = ca.missionQueue.summary
+        let pendingActionsText = ca.missionQueue.pendingActions
+            .map { String(describing: $0) }
+            .joined(separator: " → ")
+        
+        if pendingActionsText.isEmpty {
+            return "Mission Queue: \(summary) [Idle]"
+        } else {
+            return "Mission Queue: \(summary) | Actions: \(pendingActionsText)"
+        }
+    }
     // MARK: - CA Attachment
     func attachCA(_ ca: FrankensteinCA) {
         self.ca = ca
         locomotion.attachCA(ca)
         publishCAStats()
+        ca.missionQueue.upsertGoal(
+            MissionQueueGoal(
+                id: "find-letter-f-block",
+                title: "Find the letter F block",
+                targetNode: nil,
+                subgoals: [PlanTask(description: "Find the letter F block")]
+            ),
+            atFront: true
+        )
     }
 
     private func tickCA() {
@@ -1514,6 +1540,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             lastStatsTime = time
             publishGeneralStats()
         }
+
     }
 
     // MARK: - CA Path Field
@@ -4541,6 +4568,10 @@ private func isLetterBlockName(_ name: String?) -> Bool {
     private func publishGeneralStats() {
         let action = locomotion.activeActionName
         let terrain = String(describing: latestTerrainSample.terrain)
+        let planString = getMissionQueuePlanString()
+                DispatchQueue.main.async { [weak self] in
+                    self?.energyManager.missionQueuePlanText = planString
+                }
         if action != lastDisplayedActionName {
             lastDisplayedActionName = action
             DispatchQueue.main.async { [weak self] in self?.onActionChanged?(action) }
