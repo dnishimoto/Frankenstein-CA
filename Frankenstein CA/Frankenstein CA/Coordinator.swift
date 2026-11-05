@@ -1318,6 +1318,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             publishGeneralStats()
         }
     }
+    
+    
 
     // MARK: - CA Path Field
     private func updatePathField(
@@ -2664,6 +2666,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         }
         return unique.values.sorted { $0.info.distance < $1.info.distance }
     }
+    
 
     private func detectDetailedObjectAhead(
             from character: SCNNode,
