@@ -9,6 +9,8 @@ import UIKit
 
 
 final class FrankensteinCA: ObservableObject {
+    
+    private var lastPerceptionReceivedAt: TimeInterval = 0
 
 
     @Published var missionQueue = MissionPlanQueue()
@@ -153,40 +155,34 @@ final class FrankensteinCA: ObservableObject {
 
 
 
-    func receivePerception(_ newPerception: FrankensteinCAPerception, allowedActions: [FrankensteinAction]) {
+    func receivePerception(
+        _ newPerception: FrankensteinCAPerception,
+        allowedActions: [FrankensteinAction]
+    ) {
+        perception = newPerception
+        lastPerceptionReceivedAt = ProcessInfo.processInfo.systemUptime
 
-            perception = newPerception
+        let sub = newPerception.subGoal.isEmpty
+            ? nil
+            : newPerception.subGoal
 
-            lastTimestamp = max(lastTimestamp, newPerception.timestamp)
-
-
-
-            let sub = newPerception.subGoal.isEmpty ? nil : newPerception.subGoal
-
-            if let change = goalContext.observe(
-
-                goal: newPerception.goal,
-
-                subGoal: sub,
-
-                goalReached: newPerception.atGoal
-
-            ) {
-
-                pendingGoalChange = change
-
-            }
-
-
-
-            // The CA owns mission progress. Perception may complete only tasks
-            // whose explicit completion condition is satisfied.
-            missionQueue.update(perception: newPerception)
-
-            // Mark Q-values dirty for all currently permitted actions
-            markVisionQValuesDirty(perception: newPerception, allowedActions: allowedActions)
-
+        if let change = goalContext.observe(
+            goal: newPerception.goal,
+            subGoal: sub,
+            goalReached: newPerception.atGoal
+        ) {
+            pendingGoalChange = change
         }
+
+        // The mission queue remains the authority.
+        // New perception may satisfy its completion condition.
+        missionQueue.update(perception: newPerception)
+
+        markVisionQValuesDirty(
+            perception: newPerception,
+            allowedActions: allowedActions
+        )
+    }
 
 
 
@@ -1416,13 +1412,18 @@ final class FrankensteinCA: ObservableObject {
 
 
     private func currentPerception() -> FrankensteinCAPerception? {
-
         guard let perception else { return nil }
+        guard lastPerceptionReceivedAt > 0 else { return nil }
 
-        guard lastTimestamp - perception.timestamp <= perceptionMaxAge else { return nil }
+        let age =
+            ProcessInfo.processInfo.systemUptime -
+            lastPerceptionReceivedAt
+
+        guard age >= 0, age <= perceptionMaxAge else {
+            return nil
+        }
 
         return perception
-
     }
 
 
@@ -1802,188 +1803,144 @@ final class FrankensteinCA: ObservableObject {
 
 
     func decideAction(
-
         terrain: FrankensteinTerrainSample,
-
         body: FrankensteinBodyState,
-
         allowedActions: [FrankensteinAction],
-
         qValues: [FrankensteinAction: Float],
-
         exploration: Float = 0,
-
         isDeliveringLetter: Bool = false
-
     ) -> FrankensteinAction {
 
-
-
         guard !allowedActions.isEmpty else {
-
             lastDecisionDescription = "No permitted action: safe stop"
-
             return .recover
-
         }
 
-
-
         setQValues(qValues)
-
         planQValues = qValues
-
-
 
         let p = currentPerception()
 
-
-
+        // MARK: - 1. Handle goal changes
         if let change = pendingGoalChange {
-
             missionQueue.clearTacticalOverrides(reason: change)
-
             pendingGoalChange = nil
-
             candidateSequence.removeAll()
-
         }
 
-
-
+        // MARK: - 2. Handle movement stalls
         if stuckSeconds >= stuckThreshold, !stallReplanDone {
-
             missionQueue.clearTacticalOverrides(reason: "Movement stalled")
-
             candidateSequence.removeAll()
-
             stallReplanDone = true
-
         } else if stuckSeconds < 0.5 {
-
             stallReplanDone = false
-
         }
-
-
 
         let stateKey = p?.stateKey ?? "none"
 
-
-
-        var plan: [FrankensteinAction: Float]
-
+        // MARK: - 3. Calculate CA planning alternatives
+        var plan: [FrankensteinAction: Float] = [:]
         if let p {
-
             plan = planValues(for: allowedActions, perception: p)
-
         } else {
-
-            candidateSequence = []
-
-            plan = [:]
-
+            candidateSequence.removeAll()
         }
 
+        // MARK: - 4. Detect obstruction and create tactical subtask
+        if let p,
+           !p.obstructionName.isEmpty,
+           let obsAction = p.obstructionAction,
+           allowedActions.contains(obsAction) {
 
-
-
-
-
-        // Handle tactical overrides for obstructions
-
-        if let p, !p.obstructionName.isEmpty, let obsAction = p.obstructionAction, allowedActions.contains(obsAction) {
-
-            if missionQueue.currentTask?.actions.first != obsAction {
-
+            let tacticalDescription = "Tactical Clear: \(p.obstructionName)"
+            if missionQueue.currentTask?.description != tacticalDescription {
                 missionQueue.pushTacticalOverride(
-
                     PlanTask(
-
                         actions: [obsAction],
-
-                        description: "Tactical Clear: \(p.obstructionName)",
-
-                        completionCondition: { perc in
-
-                            guard let perc else { return false }
-
-                            return perc.clearanceAhead > 1.8 || perc.obstructionName.isEmpty
-
+                        description: tacticalDescription,
+                        completionCondition: { perception in
+                            guard let perception else { return false }
+                            return perception.clearanceAhead > 1.8 || perception.obstructionName.isEmpty
                         }
-
                     ),
-
                     reason: "Obstruction ahead: \(p.obstructionName)"
-
                 )
-
             }
-
         }
 
+        // MARK: - 5. Read the authoritative current queue task
+        let activeTask = missionQueue.currentTask
+        let queuedActions = activeTask?.actions ?? []
+        let queuedAction = queuedActions.first
 
-
-        // A queued task with a concrete action is binding when permitted.
-        // A task without an action delegates movement selection to the CA.
-        let queuedTask = missionQueue.currentTask
-        let queuedAction = queuedTask?.actions.first
-
+        // MARK: - 6. Select action
         var selected: FrankensteinAction
+        var selectionReason: String
+
         if let queuedAction, allowedActions.contains(queuedAction) {
             selected = queuedAction
-        } else if let plannedAction = candidateSequence.first(where: { allowedActions.contains($0) }) {
-            selected = plannedAction
-        } else if let best = allowedActions.max(by: {
-            (qValues[$0] ?? 0) < (qValues[$1] ?? 0)
-        }) {
-            selected = best
+            selectionReason = "Current task action"
+        } else if activeTask != nil && queuedActions.isEmpty {
+            selected = allowedActions.contains(.recover) ? .recover : (allowedActions.max {
+                (qValues[$0] ?? 0) < (qValues[$1] ?? 0)
+            } ?? .recover)
+            selectionReason = "Waiting for current task completion"
+        } else if let queuedAction {
+            if let plannedAction = candidateSequence.first(where: { allowedActions.contains($0) }) {
+                selected = plannedAction
+                selectionReason = "Temporary maneuver: queued action unavailable"
+            } else {
+                selected = allowedActions.max {
+                    (qValues[$0] ?? 0) < (qValues[$1] ?? 0)
+                } ?? .recover
+                selectionReason = "Temporary Q-value maneuver"
+            }
         } else {
-            selected = .recover
+            if let plannedAction = candidateSequence.first(where: { allowedActions.contains($0) }) {
+                selected = plannedAction
+                selectionReason = "CA planned movement"
+            } else {
+                selected = allowedActions.max {
+                    (qValues[$0] ?? 0) < (qValues[$1] ?? 0)
+                } ?? .recover
+                selectionReason = "CA Q-value selection"
+            }
         }
 
-        // Exploration must not silently replace a committed mission/tactical task.
-        let epsilon: Float = queuedTask == nil && !isDeliveringLetter
+        // MARK: - 7. Exploration
+        let queueHasPrescribedAction = activeTask != nil && !queuedActions.isEmpty
+        let epsilon: Float = activeTask == nil && !isDeliveringLetter && !queueHasPrescribedAction
             ? min(0.25, max(exploration, randomExploration))
             : 0
+
         var explored = false
-        if Float.random(in: 0..<1) < epsilon,
-           let randomAction = allowedActions
-                .filter({ $0 != .recover && $0 != selected })
-                .randomElement() {
+        if epsilon > 0,
+           Float.random(in: 0..<1) < epsilon,
+           let randomAction = allowedActions.filter({ $0 != .recover && $0 != selected }).randomElement() {
             selected = randomAction
             explored = true
+            selectionReason = "Exploration"
         }
 
+        // MARK: - 8. Record decision
         recordVisit(action: selected, stateKey: stateKey)
-
         rememberDecision(selected, stateKey: stateKey, perception: p)
 
+        let queueDescription: String
+        if let activeTask {
+            let actions = activeTask.actions.map { String(describing: $0) }.joined(separator: " > ")
+            queueDescription = "\(activeTask.description): \(actions.isEmpty ? "awaiting completion" : actions)"
+        } else {
+            queueDescription = "No active task"
+        }
 
-
-        let queueDesc = missionQueue.pendingActions.map { String(describing: $0) }.joined(separator: " > ")
-
-        let missionLabel = isDeliveringLetter ? "LETTER DELIVERY COMMITTED" : "Normal planning"
-
-
-
+        let missionLabel = isDeliveringLetter ? "LETTER DELIVERY COMMITTED" : "MISSION EXECUTION"
         lastDecisionDescription =
-
-            "\(missionLabel) | " +
-
-            "\(explored ? "Exploring" : "Executing") \(selected) | " +
-
-            "Queue: \(queueDesc.isEmpty ? "empty" : queueDesc) | " +
-
-            "State: \(stateKey)"
-
-
+            "\(missionLabel) | \(selectionReason) | \(explored ? "Exploring " : "Executing ")\(selected) | Task: \(queueDescription) | State: \(stateKey)"
 
         return selected
-
     }
-
-
 
     init() {
 
