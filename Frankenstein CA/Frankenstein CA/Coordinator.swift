@@ -5,6 +5,8 @@ import SwiftUI
 import UIKit
 
 final class Coordinator: NSObject, SCNSceneRendererDelegate {
+    var hasCompletedLetterMission: Bool = false
+    private var lastMissionSyncKey = ""
     private var lastOutcomeEvaluationTime: TimeInterval = 0
     var isResetPending = false
     private let pushBlockSpeed: Float = 0.6
@@ -492,20 +494,54 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         }
     }
 
-    private var lastMissionSyncKey = ""
-    private func validateMissionTarget() {
-        let targetName = goalNode?.name ?? "nil"
-        let key = "\(missionDecision.phase.rawValue)|\(targetName)|\(carryingLetterBlock)"
-        guard key != lastMissionSyncKey else { return }
-        lastMissionSyncKey = key
-        publishDebug(
-            "[MISSION SYNC] phase \(missionDecision.phase.rawValue), goal \(targetName), " +
-            "carrying letter \(carryingLetterBlock), power \(Int(energyManager.powerLevel))"
-        )
-        if missionDecision.phase == .emergencyRecharge, rechargeStationNode == nil {
-            publishDebug("[MISSION SYNC] emergency recharge but no station found: holding, not resuming letters")
+ 
+
+        func validateMissionTarget(scene: SCNScene, isBlockInSlot: (SCNNode) -> Bool) {
+            let targetName = goalNode?.name ?? "nil"
+            let key = "\(missionDecision.phase.rawValue)|\(targetName)|\(carryingLetterBlock)"
+            guard key != lastMissionSyncKey else { return }
+            lastMissionSyncKey = key
+            
+            publishDebug(
+                "[MISSION SYNC] phase \(missionDecision.phase.rawValue), goal \(targetName), " +
+                "carrying letter \(carryingLetterBlock), power \(Int(energyManager.powerLevel))"
+            )
+            
+            if missionDecision.phase == .emergencyRecharge, rechargeStationNode == nil {
+                publishDebug("[MISSION SYNC] emergency recharge but no station found: holding, not resuming letters")
+            }
+
+            // Check if all letter blocks are successfully delivered into their destination slots
+            var allBlocks: [SCNNode] = []
+            scene.rootNode.enumerateChildNodes { node, _ in
+                let name = (node.name ?? "").lowercased()
+                if name.contains("movableblock") || name.contains("letterblock") {
+                    allBlocks.append(node)
+                }
+            }
+            
+            if !allBlocks.isEmpty, allBlocks.allSatisfy({ isBlockInSlot($0) }) {
+                if !hasCompletedLetterMission {
+                    hasCompletedLetterMission = true
+                    ca?.missionQueue.completeGoal(id: "letter_delivery_mission", because: "All letter blocks are successfully secured in their slots.")
+                    
+                    // Purge task queue and reset active states
+                    purgeMissionQueue()
+                    
+                    publishDebug("[MISSION SYNC] Mission Complete: All letter blocks are in place!")
+                }
+            }
         }
-    }
+
+        // MARK: - Mission Queue Purge Helper
+        func purgeMissionQueue() {
+            // Clear all pending or active tasks and goals from the mission queue
+            ca?.missionQueue.reset()
+            
+                 
+            publishDebug("[MISSION PURGE] Mission queue and goals purged. Frankenstein is now idle/halted.")
+        }
+  
 
     // MARK: - Navigation & Plan Update Loop
 
@@ -1331,7 +1367,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             updateLetterMission()
             updateMissionSupervisor()
             syncMissionQueue()
-            validateMissionTarget()
+            guard let scene = self.scene else { return }
+            validateMissionTarget(scene: scene, isBlockInSlot: self.isBlockInSlot)
             
             let deltaTime = time - lastFrameTime
             updateNavigation(time: time, deltaTime: max(0.001, deltaTime))
