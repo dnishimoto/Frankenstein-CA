@@ -1193,13 +1193,59 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         missionSupervisor.reset()
         missionDecision = .initial
     }
-
+    func executePhysicalAction(_ action: FrankensteinAction, on targetNode: SCNNode, characterNode: SCNNode) {
+        guard let physicsBody = targetNode.physicsBody else { return }
+        
+        let charPos = characterNode.worldPosition
+        let targetPos = targetNode.worldPosition
+        let dx = targetPos.x - charPos.x
+        let dz = targetPos.z - charPos.z
+        let length = sqrt(dx * dx + dz * dz)
+        
+        guard length > 0.001 else { return }
+        let dirX = dx / length
+        let dirZ = dz / length
+        
+        switch action {
+        case .pushObject:
+            // Apply directional force impulse to slide the box out of the way
+            let impulse = SCNVector3(dirX * 3.0, 0.2, dirZ * 3.0)
+            physicsBody.applyForce(impulse, asImpulse: true)
+            
+        case .kickObject:
+            // Apply a sharper, faster impulse for kicking
+            let impulse = SCNVector3(dirX * 6.0, 0.4, dirZ * 6.0)
+            physicsBody.applyForce(impulse, asImpulse: true)
+            
+        case .liftObject:
+            // Switch to kinematic or elevate target relative to character
+            physicsBody.type = .kinematic
+            targetNode.position = SCNVector3(charPos.x, charPos.y + 1.2, charPos.z - 0.5)
+            
+        default:
+            break
+        }
+    }
     // MARK: - Renderer Update
     func renderer(
         _ renderer: SCNSceneRenderer,
         updateAtTime time: TimeInterval
     ) {
         guard isRunning, let scene = scene, let character = characterNode else { return }
+        
+        guard let characterNode2 = self.characterNode,
+                  let ca2 = self.ca else {
+                return
+            }
+
+            // Call updateLocomotionAndTasks with the unwrapped non-optional values
+            updateLocomotionAndTasks(
+                characterNode: characterNode2,
+                ca: ca2,
+                planSpline: planSpline,
+                time: time
+            )
+        
         currentFrameTime = time
         let dt: Float = lastFrameTime == 0 ? 1.0 / 60.0 : Float(min(max(time - lastFrameTime, 1.0 / 240.0), 0.05))
         lastFrameTime = time
@@ -1594,7 +1640,56 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         while angle < -.pi { angle += 2 * .pi }
         return angle
     }
+    func updateLocomotionAndTasks(
+        characterNode: SCNNode,
+        ca: FrankensteinCA,
+        planSpline: FrankensteinPlanSpline,
+        time: TimeInterval
+    ) {
+        let characterPos = characterNode.worldPosition
 
+        // MARK: 1. Strict Precedence: Execute Task Actions First
+        if let currentTask = ca.missionQueue.currentTask, !currentTask.actions.isEmpty {
+            let frontAction = currentTask.actions[0]
+            
+            if let target = currentTask.targetNode {
+                let targetPos = target.worldPosition
+                let dx = targetPos.x - characterPos.x
+                let dz = targetPos.z - characterPos.z
+                characterNode.eulerAngles.y = atan2(dx, dz)
+                
+                // Apply physics impulse / interaction based on the action type
+                executePhysicalAction(frontAction, on: target, characterNode: characterNode)
+                
+                ca.missionQueue.completeAction(frontAction, target: target, because: "Executed physical task action")
+            }
+            return // Bypass spline steering while task actions are pending
+        }
+
+        // MARK: 2. Fallback to Path Spline Navigation
+        let activePath = ca.missionQueue.currentGoal?.subgoals.first?.targetNode != nil
+            ? planSpline.approachPath
+            : planSpline.deliveryPath
+
+        guard let targetPoint = planSpline.lookAheadPoint(from: characterPos, path: activePath, distance: 0.8) else {
+            return
+        }
+
+        let currentPos = characterNode.worldPosition
+        let dx = targetPoint.x - currentPos.x
+        let dz = targetPoint.z - currentPos.z
+        let distance = sqrt(dx * dx + dz * dz)
+
+        guard distance > 0.01 else { return }
+
+        let targetHeading = atan2(dx, dz)
+        characterNode.eulerAngles.y = targetHeading
+
+        let speed: Float = 2.0
+        let dt: Float = 1.0 / 60.0
+        characterNode.worldPosition.x += sin(targetHeading) * speed * dt
+        characterNode.worldPosition.z += cos(targetHeading) * speed * dt
+    }
     private func headingBand(_ error: Float) -> String {
         switch abs(error) {
         case ..<0.2: return "aligned"
