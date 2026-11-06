@@ -102,48 +102,76 @@ final class FrankensteinPlanSpline {
         abs(p.x - center.x) < half.x && abs(p.y - center.y) < half.y
     }
 
-    /// Waypoints from a to b that go around the corners of any keep-out
-    /// zone the straight line would cross. [a, b] when the way is clear.
+    /// Waypoints from a to b that route around all intersected keep-out zones.
     private func route(_ a: SIMD2<Float>, _ b: SIMD2<Float>) -> [SIMD2<Float>] {
         loadKeepOutZones()
+        var currentPoints = [a, b]
+
+        // Iteratively refine segments against all keep-out zones
         for zone in keepOutZones {
             let half = zone.half + SIMD2<Float>(repeating: keepOutMargin)
-            guard !inside(a, center: zone.center, half: half),
-                  !inside(b, center: zone.center, half: half),
-                  segmentCrosses(a, b, center: zone.center, half: half) else { continue }
+            var newPoints: [SIMD2<Float>] = []
+            newPoints.reserveCapacity(currentPoints.count * 2)
 
-            let c = zone.center
-            let corners = [
-                SIMD2<Float>(c.x - half.x, c.y - half.y),
-                SIMD2<Float>(c.x + half.x, c.y - half.y),
-                SIMD2<Float>(c.x + half.x, c.y + half.y),
-                SIMD2<Float>(c.x - half.x, c.y + half.y)
-            ]
-            func clear(_ p: SIMD2<Float>, _ q: SIMD2<Float>) -> Bool {
-                !segmentCrosses(p, q, center: zone.center, half: half)
-            }
-            var best: [SIMD2<Float>]?
-            var bestLength = Float.greatestFiniteMagnitude
-            func consider(_ via: [SIMD2<Float>]) {
-                var pts = [a] + via + [b]
-                var length: Float = 0
-                for i in 0..<(pts.count - 1) {
-                    guard clear(pts[i], pts[i + 1]) else { return }
-                    length += simd_distance(pts[i], pts[i + 1])
+            for i in 0..<(currentPoints.count - 1) {
+                let p1 = currentPoints[i]
+                let p2 = currentPoints[i + 1]
+
+                if !inside(p1, center: zone.center, half: half) &&
+                   !inside(p2, center: zone.center, half: half) &&
+                   segmentCrosses(p1, p2, center: zone.center, half: half) {
+
+                    let c = zone.center
+                    let corners = [
+                        SIMD2<Float>(c.x - half.x, c.y - half.y),
+                        SIMD2<Float>(c.x + half.x, c.y - half.y),
+                        SIMD2<Float>(c.x + half.x, c.y + half.y),
+                        SIMD2<Float>(c.x - half.x, c.y + half.y)
+                    ]
+
+                    var bestDetour: [SIMD2<Float>]?
+                    var bestLength = Float.greatestFiniteMagnitude
+
+                    for corner in corners {
+                        if !segmentCrosses(p1, corner, center: zone.center, half: half) &&
+                           !segmentCrosses(corner, p2, center: zone.center, half: half) {
+                            let len = simd_distance(p1, corner) + simd_distance(corner, p2)
+                            if len < bestLength {
+                                bestLength = len
+                                bestDetour = [corner]
+                            }
+                        }
+                    }
+
+                    for idx in 0..<4 {
+                        let c1 = corners[idx]
+                        let c2 = corners[(idx + 1) % 4]
+                        if !segmentCrosses(p1, c1, center: zone.center, half: half) &&
+                           !segmentCrosses(c1, c2, center: zone.center, half: half) &&
+                           !segmentCrosses(c2, p2, center: zone.center, half: half) {
+                            let len = simd_distance(p1, c1) + simd_distance(c1, c2) + simd_distance(c2, p2)
+                            if len < bestLength {
+                                bestLength = len
+                                bestDetour = [c1, c2]
+                            }
+                        }
+                    }
+
+                    newPoints.append(p1)
+                    if let detour = bestDetour {
+                        newPoints.append(contentsOf: detour)
+                    }
+                    newPoints.append(p2)
+                } else {
+                    if newPoints.isEmpty {
+                        newPoints.append(p1)
+                    }
+                    newPoints.append(p2)
                 }
-                if length < bestLength {
-                    bestLength = length
-                    best = pts
-                }
             }
-            for i in 0..<4 {
-                consider([corners[i]])
-                consider([corners[i], corners[(i + 1) % 4]])
-                consider([corners[(i + 1) % 4], corners[i]])
-            }
-            if let best { return best }
+            currentPoints = newPoints
         }
-        return [a, b]
+        return currentPoints
     }
 
     private func densify(_ points: [SIMD2<Float>], spacing: Float = 0.8) -> [SIMD2<Float>] {
@@ -254,7 +282,7 @@ final class FrankensteinPlanSpline {
         return node
     }
 
-    // MARK: Update (Elevation & Step-Up Aware)
+    // MARK: Update (Flat Travel with Final Approach Elevation)
 
     func update(
         time: TimeInterval,
@@ -326,9 +354,18 @@ final class FrankensteinPlanSpline {
             : [start2D, start2D + toStand * 0.5 + bow, standPoint2D]
         
         let curveApproach2D = spline2D(through: approachVia + [obj2D])
+        
+        // Keep travel flat at startY and only elevate during the final 15% approach segment
+        let rampStart: Float = 0.85
         approachPath = curveApproach2D.enumerated().map { index, pt in
             let t = Float(index) / Float(max(1, curveApproach2D.count - 1))
-            let y = startY + (objY - startY) * pow(t, 0.7)
+            let y: Float
+            if t >= rampStart {
+                let localT = (t - rampStart) / (1.0 - rampStart)
+                y = startY + (objY - startY) * localT
+            } else {
+                y = startY
+            }
             return SIMD3<Float>(pt.x, y + 0.05, pt.y)
         }
 
@@ -344,9 +381,16 @@ final class FrankensteinPlanSpline {
             ? spline2D(through: densify(deliveryRoute))
             : spline2D(through: [obj2D, obj2D + across * 0.5 + acrossBow, end2D])
         
+        let rampEnd: Float = 0.15
         deliveryPath = curveDelivery2D.enumerated().map { index, pt in
             let t = Float(index) / Float(max(1, curveDelivery2D.count - 1))
-            let y = objY + (endY - objY) * t
+            let y: Float
+            if t <= rampEnd {
+                let localT = t / rampEnd
+                y = objY + (endY - objY) * localT
+            } else {
+                y = endY
+            }
             return SIMD3<Float>(pt.x, y + 0.05, pt.y)
         }
 

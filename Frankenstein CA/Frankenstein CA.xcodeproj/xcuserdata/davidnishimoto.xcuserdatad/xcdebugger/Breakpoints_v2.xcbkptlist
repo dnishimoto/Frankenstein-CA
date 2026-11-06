@@ -62,8 +62,8 @@
             filePath = "Frankenstein CA/Coordinator.swift"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "2619"
-            endingLineNumber = "2619"
+            startingLineNumber = "2688"
+            endingLineNumber = "2688"
             landmarkName = "pathBlocker(character:)"
             landmarkType = "7">
          </BreakpointContent>
@@ -78,8 +78,8 @@
             filePath = "Frankenstein CA/Coordinator.swift"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "3513"
-            endingLineNumber = "3513"
+            startingLineNumber = "3582"
+            endingLineNumber = "3582"
             landmarkName = "splineHeadingError(from:)"
             landmarkType = "7">
          </BreakpointContent>
