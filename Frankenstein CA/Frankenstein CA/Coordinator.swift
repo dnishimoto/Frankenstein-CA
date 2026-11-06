@@ -1245,10 +1245,38 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             node.physicsBody = SCNPhysicsBody(type: .static, shape: SCNPhysicsShape(node: node, options: nil))
         }
     }
-    func executePhysicalAction(_ action: FrankensteinAction, on targetNode: SCNNode, characterNode: SCNNode) {
-        guard let physicsBody = targetNode.physicsBody else { return }
+    func executePhysicalAction(_ action: FrankensteinAction, on targetNode: SCNNode?, characterNode: SCNNode) {
+        
         
         let charPos = characterNode.worldPosition
+        
+        // Handle character-centric locomotion and movement actions directly
+        if action == .jump {
+            if let charPhysics = characterNode.physicsBody {
+                charPhysics.applyForce(SCNVector3(0, 5.5, -2.5), asImpulse: true)
+            } else {
+                characterNode.position = SCNVector3(charPos.x, charPos.y + 1.2, charPos.z - 1.0)
+            }
+            return
+        }
+        
+        if action == .stepUp {
+            // Smoothly transition upward onto a platform or step (respecting max height limit)
+            let targetY = charPos.y + 0.35
+            characterNode.position = SCNVector3(charPos.x, targetY, charPos.z - 0.2)
+            return
+        }
+        
+        if action == .stepDown {
+            // Smoothly transition downward off a ledge or step (respecting the 0.60 drop limit)
+            let targetY = max(0, charPos.y - 0.35)
+            characterNode.position = SCNVector3(charPos.x, targetY, charPos.z - 0.2)
+            return
+        }
+        
+        // Object-centric physical actions require a valid target node and physics body
+        guard let targetNode = targetNode, let physicsBody = targetNode.physicsBody else { return }
+        
         let targetPos = targetNode.worldPosition
         let dx = targetPos.x - charPos.x
         let dz = targetPos.z - charPos.z
@@ -1260,25 +1288,23 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         
         switch action {
         case .pushObject:
-            // Apply directional force impulse to slide the box out of the way
             let impulse = SCNVector3(dirX * 3.0, 0.2, dirZ * 3.0)
             physicsBody.applyForce(impulse, asImpulse: true)
-            
+             
         case .kickObject:
-            // Apply a sharper, faster impulse for kicking
             let impulse = SCNVector3(dirX * 6.0, 0.4, dirZ * 6.0)
             physicsBody.applyForce(impulse, asImpulse: true)
-            
+             
         case .liftObject:
-            // Switch to kinematic or elevate target relative to character
             physicsBody.type = .kinematic
             targetNode.position = SCNVector3(charPos.x, charPos.y + 1.2, charPos.z - 0.5)
-            
+             
         default:
             break
         }
     }
-    // MARK: - Renderer Update
+    
+    
         func renderer(
             _ renderer: SCNSceneRenderer,
             updateAtTime time: TimeInterval
@@ -1388,7 +1414,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             }
         }
 
-        private func processSensorsAndLearning(character: SCNNode, scene: SCNScene, time: TimeInterval, dt: Float) {
+    private func processSensorsAndLearning(character: SCNNode, scene: SCNScene, time: TimeInterval, dt: Float) {
             if time - lastSensorTime >= sensorInterval {
                 lastSensorTime = time
                 let detailedDetections = detectAllObjectsAhead(from: character, in: scene)
@@ -1427,6 +1453,31 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             }
 
             updateTerrainSampleAndPushTargets(character: character, scene: scene)
+
+            // MARK: - Perception Update & UI Publishing
+            let pose = FrankensteinWorldPose(
+                x: character.worldPosition.x,
+                z: character.worldPosition.z,
+                feetY: character.worldPosition.y,
+                referenceY: character.worldPosition.y,
+                heading: character.eulerAngles.y,
+                bodyHeight: 1.8,
+                grounded: true
+            )
+            
+            let probe = FrankensteinWorldProbe()
+            probe.root = scene.rootNode
+            let terrainSample = probe.sense(pose: pose)
+
+            let perception = FrankensteinCAPerception(
+                nearestObjectDistance: terrainSample.distance,
+                nearestObjectName: terrainSample.objectName
+            )
+
+            ca?.missionQueue.update(perception: perception)
+
+            let perceptionSummary = "Terrain: \(terrainSample.terrain), Distance: \(String(format: "%.2f", terrainSample.distance)), Object: \(terrainSample.objectName.isEmpty ? "None" : terrainSample.objectName)"
+            onPerceptionText?(perceptionSummary)
         }
 
         private func updateTerrainSampleAndPushTargets(character: SCNNode, scene: SCNScene) {
@@ -1461,57 +1512,53 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             }
         }
 
-        private func executeCharacterActionsAndEvaluation(character: SCNNode, scene: SCNScene, time: TimeInterval, dt: Float) {
-            let currentPosition = character.presentation.worldPosition
-            updateStuckDuration(position: currentPosition, deltaTime: dt)
-
-            let actualDisplacement: Float? = hasPreviousCharacterPosition ? measureForwardDisplacement(from: previousCharacterPosition, to: currentPosition) : nil
-            previousCharacterPosition = currentPosition
-            hasPreviousCharacterPosition = true
-
-            if let prediction = pendingPrediction, let actualDisplacement {
-                let error = predictivePerception.observe(prediction: prediction, actualForwardDisplacement: actualDisplacement, terrain: latestTerrainSample)
-                if abs(error) > 0.18 { publishDebug("Prediction error adjusted.") }
-                pendingPrediction = nil
-            }
-
-            markFieldOfViewDirty(character: character, time: time)
-
-            let perceivedValues = locomotion.policy.learnedActionValues(terrain: latestTerrainSample, body: locomotion.body)
-            let perceivedActions = FrankensteinActionConstraints.allowedActions(terrain: latestTerrainSample, body: locomotion.body)
-            let advisoryValues = makeAdvisoryActionValues(baseValues: perceivedValues, allowedActions: perceivedActions)
-            locomotion.receivePerception(allowedActions: perceivedActions, qValues: advisoryValues)
-
-            let objectObservation = constructObjectObservation(character: character)
+    // 5. Movement, Actions, and State Evaluation
+        func executeCharacterActionsAndEvaluation(character: SCNNode, scene: SCNScene, time: TimeInterval, dt: Float) {
+            guard let ca = self.ca else { return }
             
-            latestPredictions = predictivePerception.predictAll(
-                actions: perceivedActions,
-                terrain: latestTerrainSample,
-                body: locomotion.body,
-                objectObservation: objectObservation
+            let charPos = character.worldPosition
+            let pose = FrankensteinWorldPose(
+                x: charPos.x,
+                z: charPos.z,
+                feetY: charPos.y,
+                referenceY: charPos.y,
+                heading: character.eulerAngles.y,
+                bodyHeight: 1.8,
+                grounded: true
             )
+            let probe = FrankensteinWorldProbe()
+            probe.root = scene.rootNode
+            let terrainSample = probe.sense(pose: pose)
 
-            pushPerceptionToCA(terrain: latestTerrainSample, allowedActions: perceivedActions, time: time)
-
-            let output = locomotion.step(deltaTime: dt, terrain: latestTerrainSample, actualDisplacement: actualDisplacement, objectObservation: objectObservation)
-
-            pendingPrediction = latestPredictions[output.action] ?? predictivePerception.predict(
-                actionName: String(describing: output.action),
-                terrain: latestTerrainSample,
-                body: locomotion.body,
-                objectObservation: objectObservation
-            )
-
-            applyMovement(output: output, deltaTime: dt, character: character, scene: scene)
-            applyPush(output: output, deltaTime: dt, character: character)
-            if output.action == .kickObject, currentFrameTime >= kickCooldownUntil, let target = pushTargetNode, canManipulate(target, from: character) {
-                applyKick(output: output, character: character)
-                kickCooldownUntil = currentFrameTime + 1.2
+            // Retrieve the current requested action
+            var action: FrankensteinAction = .walk
+            
+            // 1. Fix the Turn-and-Clear Steering Loop:
+            if terrainSample.distance < 2.0 && (action == .turnLeft || action == .turnRight) {
+                if terrainSample.objectMovable || terrainSample.objectName.lowercased().contains("block") {
+                    action = .pushObject
+                } else {
+                    action = .walk
+                }
+            }
+            
+            // 2. Filter out unwanted CA jump overrides during object manipulation tasks
+            let currentTask = ca.missionQueue.currentTask
+            let manipulationActions: [FrankensteinAction] = [.liftObject, .pushObject, .kickObject]
+            if let task = currentTask,
+               task.actions.contains(where: { manipulationActions.contains($0) }) {
+                if action == .jump && terrainSample.terrain != FrankensteinTerrain.gap {
+                    action = task.actions.first ?? .walk
+                }
             }
 
-            evaluateActionOutcome(output: output, actualDisplacement: actualDisplacement, character: character, scene: scene, time: time)
-        }
+            // Publish updated action change
+            onActionChanged?("\(action)")
 
+            // 3. Dispatch the resolved action to physical execution
+            let targetNode = ca.missionQueue.currentTargetNode
+            executePhysicalAction(action, on: targetNode, characterNode: character)
+        }
         private func constructObjectObservation(character: SCNNode) -> FrankensteinObjectObservation? {
             if let planned = plannedTargetObservation() { return planned }
             if let target = pushTargetNode, target.parent != nil, let characterNode = characterNode {

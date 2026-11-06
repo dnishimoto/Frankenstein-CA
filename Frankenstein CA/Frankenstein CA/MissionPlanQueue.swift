@@ -3,6 +3,8 @@ import SceneKit
 
 // MARK: - Mission Task
 
+// MARK: - Mission Task
+
 struct PlanTask {
     let id: UUID
     var actions: [FrankensteinAction]
@@ -22,13 +24,13 @@ struct PlanTask {
         self.description = description
         
         // Provide a default fallback completion condition if none is specified
-        // and a targetNode is present, checking if the nearest object distance is within interaction range (<= 1.3m).
+        // and a targetNode is present, checking if the nearest object distance is within interaction range (<= 2.2m).
         if let completionCondition = completionCondition {
             self.completionCondition = completionCondition
         } else if targetNode != nil {
             self.completionCondition = { perception in
                 let distance = perception?.nearestObjectDistance ?? .infinity
-                return distance <= 1.3
+                return distance <= 2.2 // Increased from 1.3 to accommodate block standoff distance
             }
         } else {
             self.completionCondition = nil
