@@ -15,33 +15,37 @@ final class FrankensteinWorldProbe {
     // MARK: - Raw queries
 
     private func firstSolidHit(
-        from a: SCNVector3,
-        to b: SCNVector3
-    ) -> SCNHitTestResult? {
-        guard let root = root else { return nil }
+            from a: SCNVector3,
+            to b: SCNVector3
+        ) -> SCNHitTestResult? {
+            guard let root = root else { return nil }
 
-        rayCount += 1
+            rayCount += 1
 
-        let options: [String: Any] = [
-            SCNHitTestOption.categoryBitMask.rawValue:
-                B.solidMask,
-            SCNHitTestOption.searchMode.rawValue:
-                SCNHitTestSearchMode.all.rawValue,
-            SCNHitTestOption.sortResults.rawValue:
-                true
-        ]
+            let options: [String: Any] = [
+                SCNHitTestOption.categoryBitMask.rawValue:
+                    B.solidMask,
+                SCNHitTestOption.searchMode.rawValue:
+                    SCNHitTestSearchMode.all.rawValue,
+                SCNHitTestOption.sortResults.rawValue:
+                    true
+            ]
 
-        let hits = root.hitTestWithSegment(
-            from: a,
-            to: b,
-            options: options
-        )
+            let hits = root.hitTestWithSegment(
+                from: a,
+                to: b,
+                options: options
+            )
 
-        return hits.first {
-            ($0.node.categoryBitMask & B.solidMask) != 0
+            return hits.first { hit in
+                let name = (hit.node.name ?? "").lowercased()
+                let isSolid = (hit.node.categoryBitMask & B.solidMask) != 0
+                let isChasmOrGap = name.contains("chasm") || name.contains("gap")
+                
+                // Ignore chasm/gap marker nodes so they register as missing ground (void)
+                return isSolid && !isChasmOrGap
+            }
         }
-    }
-
     /// Highest solid surface found below the specified point.
     func surfaceHeight(
         x: Float,

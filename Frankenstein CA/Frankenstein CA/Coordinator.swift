@@ -262,7 +262,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     // MARK: - Pushing Movable Blocks
     private weak var pushTargetNode: SCNNode?
-    private let planSpline = FrankensteinPlanSpline()
+    var planSpline = FrankensteinPlanSpline()
     private var lastStuckSamplePosition: SCNVector3?
     private var stuckSeconds: Float = 0
     private let stuckThreshold: Float = 0.8
@@ -275,6 +275,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     var onMissionText: ((String) -> Void)?
     var onPerceptionText: ((String) -> Void)?
     var onGoalText: ((String) -> Void)?
+    var onCurrentTaskText: ((String) -> Void)?
     var onQGrid: (([FrankensteinQDisplayCell]) -> Void)?
     private var lastQGridPublishTime: TimeInterval = 0
 
@@ -865,7 +866,30 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             atFront: true
         )
     }
+    /// Shows and logs the current task and all its remaining actions from CA's mission queue.
+    @discardableResult
+        func getCurrentTaskAndActions() -> String {
+            guard let missionQueue = ca?.missionQueue else {
+                let message = "Mission queue is unavailable."
+                publishDebug(message)
+                return message
+            }
 
+            let details: String
+            if let task = missionQueue.currentTask {
+                let actionList = task.actions.isEmpty
+                    ? "None"
+                    : task.actions.map { "\($0)" }.joined(separator: " → ")
+
+                details = "Current Task: '\(task.description)' | Actions: [\(actionList)]"
+            } else {
+                details = "Current Task: None | Actions: [None]"
+            }
+
+            publishDebug(details)
+            onPlanText?(details)
+            return details
+        }
     private func tickCA() {
         guard let ca else { return }
         ca.step()
@@ -4385,6 +4409,12 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             self?.onGoalText?(goals)
         }
        
+        let currentTasks = getCurrentTaskAndActions()
+        
+        DispatchQueue.main.async { [weak self] in
+            self?.onCurrentTaskText?(currentTasks)
+        }
+        
         
         let pathText = pathGoalDistance.isFinite ? String(format: "%.2f", Double(pathGoalDistance)) : "n/a"
         let stats = """

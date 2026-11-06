@@ -20,10 +20,21 @@ struct PlanTask {
         self.actions = actions
         self.targetNode = targetNode
         self.description = description
-        self.completionCondition = completionCondition
+        
+        // Provide a default fallback completion condition if none is specified
+        // and a targetNode is present, checking if the nearest object distance is within interaction range (<= 1.3m).
+        if let completionCondition = completionCondition {
+            self.completionCondition = completionCondition
+        } else if targetNode != nil {
+            self.completionCondition = { perception in
+                let distance = perception?.nearestObjectDistance ?? .infinity
+                return distance <= 1.3
+            }
+        } else {
+            self.completionCondition = nil
+        }
     }
 }
-
 // MARK: - Mission Goal
 
 struct MissionQueueGoal {

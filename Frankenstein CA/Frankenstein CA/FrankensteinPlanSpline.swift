@@ -34,11 +34,10 @@ final class FrankensteinPlanSpline {
     private var targetRing = SCNNode()
     private var destinationRing = SCNNode()
 
-    private let standOff: Float = 0.9
+    // Adjusted stand-off distance for closer letter block interaction/grabbing
+    private let standOff: Float = 0.6
     private let samplesPerSegment = 12
-
-    private var lastKey = ""
-    private var lastUpdate: TimeInterval = -999 // Fixed: allows immediate update on frame 0
+    private var lastUpdate: TimeInterval = -999
 
     // MARK: - Keep-out zones (the chasm)
 
@@ -50,12 +49,17 @@ final class FrankensteinPlanSpline {
 
     private func loadKeepOutZones() {
         guard !keepOutLoaded, let scene else { return }
-        let nodes = scene.rootNode.childNodes { node, _ in
-            let name = (node.name ?? "").lowercased()
-            return name.contains("chasm") && node.geometry != nil
-        }
-        guard !nodes.isEmpty else { return }
         keepOutLoaded = true
+        
+        var nodes: [SCNNode] = []
+        scene.rootNode.enumerateChildNodes { node, _ in
+            let name = (node.name ?? "").lowercased()
+            if name.contains("chasm") && node.geometry != nil {
+                nodes.append(node)
+            }
+        }
+        
+        guard !nodes.isEmpty else { return }
         keepOutZones = nodes.map { node in
             let box = node.boundingBox
             let p = node.worldPosition
@@ -131,7 +135,6 @@ final class FrankensteinPlanSpline {
                     bestLength = length
                     best = pts
                 }
-                pts.removeAll()
             }
             for i in 0..<4 {
                 consider([corners[i]])
@@ -222,14 +225,14 @@ final class FrankensteinPlanSpline {
         deliveryNode = SCNNode()
         deliveryNode.name = "PlanSplineMarker_Delivery"
 
-        targetRing = makeRing(color: .cyan, radius: 0.45)
+        targetRing = makeRing(color: .cyan, radius: 0.5)
         targetRing.name = "PlanSplineMarker_TargetRing"
 
-        destinationRing = makeRing(color: .orange, radius: 0.55)
+        destinationRing = makeRing(color: .systemOrange, radius: 0.6)
         destinationRing.name = "PlanSplineMarker_DestRing"
 
         for node in [approachNode, deliveryNode, targetRing, destinationRing] {
-            node.isHidden = false // Ensure visible by default when attached
+            node.isHidden = false
             root.addChildNode(node)
         }
 
@@ -237,15 +240,17 @@ final class FrankensteinPlanSpline {
     }
 
     private func makeRing(color: UIColor, radius: CGFloat) -> SCNNode {
-        let ring = SCNTorus(ringRadius: radius, pipeRadius: 0.03)
+        let ring = SCNTorus(ringRadius: radius, pipeRadius: 0.04)
         let material = SCNMaterial()
         material.diffuse.contents = color
         material.emission.contents = color
         material.lightingModel = .constant
+        material.isDoubleSided = true
         ring.materials = [material]
 
         let node = SCNNode(geometry: ring)
         node.castsShadow = false
+        node.eulerAngles.x = Float.pi / 2
         return node
     }
 
@@ -258,21 +263,20 @@ final class FrankensteinPlanSpline {
         destination: SCNVector3?,
         approachFromCharacterSide: Bool = false
     ) {
-        guard isVisible, let destination else {
+        guard isVisible else {
             hideAll()
             return
         }
 
-        guard time - lastUpdate >= 0.1 else { return }
-        lastUpdate = time
+        let effectiveDestination = destination ?? SCNVector3(0, 0.05, -4.2)
+        
+        destinationRing.isHidden = false
+        destinationRing.position = SCNVector3(effectiveDestination.x, effectiveDestination.y + 0.05, effectiveDestination.z)
 
         let start2D = SIMD2<Float>(Float(character.x), Float(character.z))
-        let end2D = SIMD2<Float>(Float(destination.x), Float(destination.z))
+        let end2D = SIMD2<Float>(Float(effectiveDestination.x), Float(effectiveDestination.z))
         let startY = Float(character.y)
-        let endY = Float(destination.y)
-
-        destinationRing.isHidden = false
-        destinationRing.position = SCNVector3(destination.x, destination.y + 0.05, destination.z)
+        let endY = Float(effectiveDestination.y)
 
         guard let object else {
             let legRoute = route(start2D, end2D)
@@ -283,7 +287,7 @@ final class FrankensteinPlanSpline {
             approachPath = curve2D.enumerated().map { index, pt in
                 let t = Float(index) / Float(max(1, curve2D.count - 1))
                 let y = startY + (endY - startY) * t
-                return SIMD3<Float>(pt.x, y + 0.03, pt.y)
+                return SIMD3<Float>(pt.x, y + 0.05, pt.y)
             }
             deliveryPath = []
             approachNode.geometry = lineGeometry3D(approachPath, color: .cyan)
@@ -322,17 +326,10 @@ final class FrankensteinPlanSpline {
             : [start2D, start2D + toStand * 0.5 + bow, standPoint2D]
         
         let curveApproach2D = spline2D(through: approachVia + [obj2D])
-        let fullApproach3D = curveApproach2D.enumerated().map { index, pt in
+        approachPath = curveApproach2D.enumerated().map { index, pt in
             let t = Float(index) / Float(max(1, curveApproach2D.count - 1))
             let y = startY + (objY - startY) * pow(t, 0.7)
-            return SIMD3<Float>(pt.x, y + 0.03, pt.y)
-        }
-
-        if approachFromCharacterSide {
-            let partialCount = max(2, Int(Double(fullApproach3D.count) * 0.85))
-            approachPath = Array(fullApproach3D.prefix(partialCount))
-        } else {
-            approachPath = fullApproach3D
+            return SIMD3<Float>(pt.x, y + 0.05, pt.y)
         }
 
         let across = end2D - obj2D
@@ -350,18 +347,18 @@ final class FrankensteinPlanSpline {
         deliveryPath = curveDelivery2D.enumerated().map { index, pt in
             let t = Float(index) / Float(max(1, curveDelivery2D.count - 1))
             let y = objY + (endY - objY) * t
-            return SIMD3<Float>(pt.x, y + 0.03, pt.y)
+            return SIMD3<Float>(pt.x, y + 0.05, pt.y)
         }
 
         approachNode.geometry = lineGeometry3D(approachPath, color: .cyan)
-        deliveryNode.geometry = lineGeometry3D(deliveryPath, color: .orange)
+        deliveryNode.geometry = lineGeometry3D(deliveryPath, color: .systemOrange)
         approachNode.isHidden = false
         deliveryNode.isHidden = false
 
         targetRing.isHidden = false
         targetRing.position = SCNVector3(object.x, objY + 0.05, object.z)
     }
-
+    
     private func hideAll() {
         approachPath = []
         deliveryPath = []
@@ -369,14 +366,10 @@ final class FrankensteinPlanSpline {
         deliveryNode.isHidden = true
         targetRing.isHidden = true
         destinationRing.isHidden = true
-        lastKey = ""
     }
-
-    // MARK: Spline Math
 
     private func spline2D(through points: [SIMD2<Float>]) -> [SIMD2<Float>] {
         guard points.count >= 2 else { return points }
-
         let padded = [points[0]] + points + [points[points.count - 1]]
         var result: [SIMD2<Float>] = []
 
@@ -398,11 +391,9 @@ final class FrankensteinPlanSpline {
                         (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
                         (-p0 + 3 * p1 - 3 * p2 + p3) * t3
                     )
-
                 result.append(point)
             }
         }
-
         result.append(points[points.count - 1])
         return result
     }

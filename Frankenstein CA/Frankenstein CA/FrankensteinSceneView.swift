@@ -1,10 +1,12 @@
+//  FrankensteinSceneView.swift
+//  Frankenstein CA
+
 import Foundation
 import SwiftUI
 import SceneKit
 import UIKit
 
 struct FrankensteinSceneView: UIViewRepresentable {
-
 
     @Binding var generation: Int
     @Binding var liveCells: Int
@@ -14,6 +16,7 @@ struct FrankensteinSceneView: UIViewRepresentable {
     @Binding var missionText: String
     @Binding var perceptionText: String
     @Binding var goalText: String
+    @Binding var currentTaskText: String
     @Binding var qCells: [FrankensteinQDisplayCell]
     @Binding var animateSpeed: Double
     var onResetPerformed: (() -> Void)? = nil
@@ -21,60 +24,54 @@ struct FrankensteinSceneView: UIViewRepresentable {
     // Keep one CA instance for the lifetime of this view value.
     private let ca = FrankensteinCA()
 
+    func makeCoordinator() -> Coordinator {
+        let placeholderScene = SCNScene()
+        let placeholderCharacter = Self.makeFrankensteinCharacter()
+        let locomotion = FrankensteinLocomotion()
+        let energyManager = FrankensteinEnergyManager()
 
-
-        func makeCoordinator() -> Coordinator {
-            let placeholderScene = SCNScene()
-            let placeholderCharacter = Self.makeFrankensteinCharacter()
-            let locomotion = FrankensteinLocomotion()
-            let energyManager = FrankensteinEnergyManager()
-
-            let coordinator = Coordinator(
-                scene: placeholderScene,
-                characterNode: placeholderCharacter,
-                locomotion: locomotion,
-                energyManager: energyManager
-            )
-            
-            coordinator.onStats = { (stats: String) in
-                print("[Frankenstein Stats]\n\(stats)")
-            }
-
-            coordinator.onDebugInfo = { (message: String) in
-                print("[Frankenstein Debug] \(message)")
-            }
-
-            coordinator.onDetectedObject = { (object: DetectedObjectInfo?) in
-                if let object = object {
-                    let dimensions = object.dimensions
-                    let distance = object.distance
-
-                    print(
-                        """
-                        [Detected Object]
-                        Name: \(object.name)
-                        Dimensions: \(dimensions)
-                        Distance: \(distance)
-                        Pickupable: \(object.pickupable)
-                        """
-                    )
-                }
-            }
-
-            coordinator.onActionChanged = { (action: String) in
-                print("[Frankenstein Action] \(action)")
-            }
-
-            return coordinator
+        let coordinator = Coordinator(
+            scene: placeholderScene,
+            characterNode: placeholderCharacter,
+            locomotion: locomotion,
+            energyManager: energyManager
+        )
+        
+        coordinator.onStats = { (stats: String) in
+            print("[Frankenstein Stats]\n\(stats)")
         }
 
+        coordinator.onDebugInfo = { (message: String) in
+            print("[Frankenstein Debug] \(message)")
+        }
 
-    
+        coordinator.onDetectedObject = { (object: DetectedObjectInfo?) in
+            if let object = object {
+                let dimensions = object.dimensions
+                let distance = object.distance
+
+                print(
+                    """
+                    [Detected Object]
+                    Name: \(object.name)
+                    Dimensions: \(dimensions)
+                    Distance: \(distance)
+                    Pickupable: \(object.pickupable)
+                    """
+                )
+            }
+        }
+
+        coordinator.onActionChanged = { (action: String) in
+            print("[Frankenstein Action] \(action)")
+        }
+
+        return coordinator
+    }
 
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView(frame: .zero)
         
-   
         let scene = SCNScene()
         scene.background.contents = UIColor(
             red: 0.08,
@@ -85,6 +82,9 @@ struct FrankensteinSceneView: UIViewRepresentable {
        
         // Build the course.
         FrankensteinTerrainScene.build(in: scene)
+
+        // Attach the plan spline to the scene so it becomes visible
+        context.coordinator.planSpline.attach(to: scene)
 
         // MARK: - Add Additional Moveable Blocks
         let blockMaterial = SCNMaterial()
@@ -215,7 +215,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
 
         context.coordinator.onDetectedObjects = { objects in
             guard throttle.shouldPublish(objects) else { return }
-
             self.seenText = DetectedObjectInfo.summary(of: objects)
         }
 
@@ -242,7 +241,12 @@ struct FrankensteinSceneView: UIViewRepresentable {
                 self.goalText = text
             }
         }
-
+        
+        context.coordinator.onCurrentTaskText = { text in
+            if self.currentTaskText != text {
+                self.currentTaskText = text
+            }
+        }
 
         context.coordinator.onQGrid = { cells in
             if self.qCells != cells {
@@ -320,9 +324,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
 
         context.coordinator.start()
 
-        // Note: Removed any usage of `animationSpeed` on SCNScene or SCNView here because it is not a valid property.
-        // TODO: If animation speed control is needed, consider applying it on SCNNode or SCNAnimationPlayer instances.
-
         return view
     }
 
@@ -332,7 +333,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
     ) {
         let coordinator = context.coordinator
 
-     
         // Handle reset requests.
         guard resetRequested, !coordinator.isResetPending else {
             return
@@ -389,7 +389,6 @@ struct FrankensteinSceneView: UIViewRepresentable {
             resetAction?()
         }
     }
-    
 
     // MARK: - Tear Down
 
@@ -633,4 +632,3 @@ final class VisibleObjectsThrottle {
         return true
     }
 }
-
