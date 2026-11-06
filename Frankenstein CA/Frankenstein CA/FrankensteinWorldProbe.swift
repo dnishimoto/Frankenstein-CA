@@ -1,4 +1,3 @@
-
 import Foundation
 import SceneKit
 
@@ -166,6 +165,7 @@ final class FrankensteinWorldProbe {
 
         var wallCentreDistance: Float?
         var wallOffset: Float = 0
+        var centerRayHit: Float? = nil
 
         for height in B.bodyRayHeights(bodyHeight: pose.bodyHeight) {
             for offset in lateral {
@@ -181,6 +181,11 @@ final class FrankensteinWorldProbe {
                     dirZ: fz,
                     length: B.lookAhead
                 ) {
+                    if abs(offset) < 0.001 {
+                        if centerRayHit == nil || hit < centerRayHit! {
+                            centerRayHit = hit
+                        }
+                    }
                     if wallCentreDistance == nil ||
                         hit < wallCentreDistance! {
                         wallCentreDistance = hit
@@ -189,6 +194,9 @@ final class FrankensteinWorldProbe {
                 }
             }
         }
+
+        let isObstacleCentered = abs(wallOffset) < 0.01 ||
+            (centerRayHit != nil && wallCentreDistance != nil && wallCentreDistance! >= centerRayHit! - 0.2)
 
         // Estimate obstacle height and depth.
         var obstacleHeight: Float = 0
@@ -376,6 +384,7 @@ final class FrankensteinWorldProbe {
         case .obstacle:
             sample.obstacleHeight = obstacleHeight
             sample.obstacleDepth = obstacleDepth
+            sample.isObstacleCentered = isObstacleCentered
 
             if obstacleHeight <= B.maxStepHeight + 0.01 {
                 sample.terrain = .raisedStep

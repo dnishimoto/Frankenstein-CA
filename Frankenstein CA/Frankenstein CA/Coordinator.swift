@@ -5,6 +5,7 @@ import SwiftUI
 import UIKit
 
 final class Coordinator: NSObject, SCNSceneRendererDelegate {
+    private var failedStepUpAttempts: Int = 0
     var hasCompletedLetterMission: Bool = false
     private var lastMissionSyncKey = ""
     private var lastOutcomeEvaluationTime: TimeInterval = 0
